@@ -88,7 +88,7 @@ async function refresh(){
   item.append(el('div',pct+'% of workflow completed','micro muted'));
   if(j.error)item.append(el('div',j.error,'error'));
   const actions=el('div',undefined,'actions');
-  if(j.status==='done'){const link=el('a','Download Markdown report');link.href=`/api/jobs/${j.id}/report`;actions.append(link)}
+  if(j.status==='done'){const link=el('a','Download Markdown report');link.href=`/api/jobs/${j.id}/report`;link.download=`analysis_${j.id.slice(0,8)}.md`;actions.append(link)}
   if(j.status==='failed'){const b=el('button','Retry','button-secondary');b.type='button';b.addEventListener('click',()=>retry(j.id));actions.append(b)}
   const liveButton=el('button',expandedId===j.id?'Hide live output':'Show live output','button-secondary');liveButton.type='button';liveButton.setAttribute('aria-expanded',String(expandedId===j.id));liveButton.addEventListener('click',()=>toggleLive(j.id));actions.append(liveButton);
   item.append(actions);if(expandedId===j.id)item.append(createLive(j.id));host.append(item);
