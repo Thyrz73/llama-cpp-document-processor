@@ -1,0 +1,13 @@
+.env
+.env.*
+!.env.example
+data/
+config/system_prompt.txt
+.git/
+__pycache__/
+.pytest_cache/
+.venv/
+*.zip
+*.pdf
+*.sqlite3*
+*.db*

@@ -1,0 +1,49 @@
+# Standalone processor: connect to any running llama.cpp HTTP server.
+# Configure network access in .env; no pre-existing Docker network is required.
+services:
+  document-processor:
+    build: .
+    restart: unless-stopped
+    init: true
+    user: "${PUID:-1000}:${PGID:-1000}"
+    environment:
+      LLAMA_BASE_URL: ${LLAMA_BASE_URL:-http://host.docker.internal:8080}
+      LLAMA_API_KEY: ${LLAMA_API_KEY:-}
+      SYSTEM_PROMPT_FILE: /app/config/system_prompt.txt
+      DATA_DIR: /app/data
+      CONTEXT_TOKENS: ${CONTEXT_TOKENS:-8192}
+      CHUNK_TOKENS: ${CHUNK_TOKENS:-3000}
+      ANALYSIS_TOKENS: ${ANALYSIS_TOKENS:-1000}
+      MERGE_TOKENS: ${MERGE_TOKENS:-1200}
+      FINAL_TOKENS: ${FINAL_TOKENS:-1800}
+      OUTPUT_LANGUAGE: ${OUTPUT_LANGUAGE:-auto}
+      LIVE_OUTPUT_ENABLED: ${LIVE_OUTPUT_ENABLED:-true}
+      LIVE_PREVIEW_CHARS: ${LIVE_PREVIEW_CHARS:-12000}
+      MAX_PAGES: ${MAX_PAGES:-120}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-20}
+      REQUEST_TIMEOUT_SECONDS: ${REQUEST_TIMEOUT_SECONDS:-21600}
+      APP_PORT: ${APP_PORT:-9932}
+      OCR_ENABLED: ${OCR_ENABLED:-true}
+      OCR_LANGUAGES: ${OCR_LANGUAGES:-eng+fra}
+      OCR_DPI: ${OCR_DPI:-150}
+      OCR_MAX_PIXELS: ${OCR_MAX_PIXELS:-5000000}
+      OCR_TIMEOUT_SECONDS: ${OCR_TIMEOUT_SECONDS:-180}
+      OMP_THREAD_LIMIT: "1"
+    # Docker on Linux: resolve this alias to the host's bridge gateway.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${APP_PORT:-9932}:${APP_PORT:-9932}"
+    volumes:
+      - ./data:/app/data
+      - ./config:/app/config:ro
+    mem_limit: ${PROCESSOR_MEMORY_LIMIT:-512m}
+    memswap_limit: ${PROCESSOR_MEMORY_LIMIT:-512m}
+    cpus: ${PROCESSOR_CPUS:-0.75}
+    pids_limit: 64
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,urllib.request; p=os.getenv('APP_PORT','9932'); urllib.request.urlopen('http://127.0.0.1:'+p+'/api/health',timeout=5)"]
+      interval: 30s
+      timeout: 8s
+      retries: 3
+      start_period: 20s

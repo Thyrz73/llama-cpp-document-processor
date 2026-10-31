@@ -1,0 +1,13 @@
+# Optional overlay for a llama.cpp service on an existing Docker network.
+# Usage: docker compose -f compose.yaml -f compose.network.example.yaml up -d
+# Requires LLAMA_DOCKER_NETWORK and LLAMA_BASE_URL in .env.
+services:
+  document-processor:
+    networks:
+      - default
+      - llama-network
+
+networks:
+  llama-network:
+    external: true
+    name: ${LLAMA_DOCKER_NETWORK:?Set LLAMA_DOCKER_NETWORK in .env for this optional override}
