@@ -33,3 +33,7 @@ venv/
 *.bak
 *.bak-*
 *.swp
+
+# Local deployment guide
+GUIDE_DEPLOIEMENT_DOCUMENT_PROCESSOR.md
+GUIDE_DEPLOIEMENT_DOCUMENT_PROCESSOR.md:Zone.Identifier
