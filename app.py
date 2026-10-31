@@ -87,16 +87,27 @@ def init_db():
 def update_job(job_id, **values):
     if not values:
         return
+    if values.get("status") == "done":
+        values["progress_percent"] = 100
     values["updated_at"] = utcnow()
     parts = ", ".join(f"{k}=?" for k in values)
     with db_conn() as con:
         con.execute(f"UPDATE jobs SET {parts} WHERE id=?", [*values.values(), job_id])
 
 
+def serialize_job(row):
+    job = dict(row)
+    # Legacy jobs received a default of 0 when this column was added.
+    # Completion always means 100% of the workflow, regardless of stored progress.
+    if job["status"] == "done":
+        job["progress_percent"] = 100
+    return job
+
+
 def get_job(job_id):
     with db_conn() as con:
         row = con.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
-        return dict(row) if row else None
+        return serialize_job(row) if row else None
 
 
 def job_dir(job_id):
@@ -645,7 +656,7 @@ def health():
 def list_jobs():
     with db_conn() as con:
         rows = con.execute("SELECT * FROM jobs ORDER BY created_at DESC, id DESC LIMIT 100").fetchall()
-    return jsonify(jobs=[dict(row) for row in rows])
+    return jsonify(jobs=[serialize_job(row) for row in rows])
 
 
 @app.get("/api/jobs/<job_id>")

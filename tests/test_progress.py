@@ -1,0 +1,137 @@
+"""Global workflow progress, persistence and legacy API compatibility."""
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+import app
+
+
+class StopWorker(BaseException):
+    """Exit the worker's infinite loop after its queue has been processed."""
+
+
+class ProgressTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        directory = Path(self.tmp.name)
+        for name, value in (("DATA", directory), ("DB_PATH", directory / "jobs.sqlite3")):
+            patched = patch.object(app, name, value)
+            patched.start()
+            self.addCleanup(patched.stop)
+        app.init_db()
+        self.client = app.app.test_client()
+
+    def insert_job(self, job_id, status, percent):
+        # Direct SQL intentionally reproduces records written by older versions.
+        with app.db_conn() as con:
+            con.execute("""INSERT INTO jobs
+                (id, filename, question, status, progress_percent, created_at, updated_at)
+                VALUES (?, 'example.pdf', 'Analyze', ?, ?, ?, ?)""",
+                (job_id, status, percent, app.utcnow(), app.utcnow()))
+
+    def stored_job(self, job_id):
+        with app.db_conn() as con:
+            return dict(con.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone())
+
+    def test_list_and_detail_report_consistent_progress_for_all_statuses(self):
+        cases = [("queued", 0, 0), ("queued", 52, 52),
+                 ("running", 2, 2), ("running", 52, 52), ("running", 95, 95),
+                 ("failed", 0, 0), ("failed", 52, 52), ("failed", 95, 95),
+                 ("done", 0, 100), ("done", 52, 100), ("done", 100, 100)]
+        for index, (status, stored, expected) in enumerate(cases):
+            self.insert_job(f"{index:032x}", status, stored)
+        response = self.client.get("/api/jobs")
+        self.assertEqual(response.status_code, 200)
+        listed = {job["id"]: job for job in response.get_json()["jobs"]}
+        for index, (status, stored, expected) in enumerate(cases):
+            job_id = f"{index:032x}"
+            with self.subTest(status=status, stored=stored):
+                response = self.client.get(f"/api/jobs/{job_id}")
+                self.assertEqual(response.status_code, 200)
+                detail = response.get_json()
+                self.assertEqual(detail, listed[job_id])
+                self.assertEqual(detail["status"], status)
+                self.assertEqual(detail["progress_percent"], expected)
+                self.assertEqual(app.get_job(job_id)["progress_percent"], expected)
+                self.assertEqual(self.stored_job(job_id)["progress_percent"], stored)
+        self.assertEqual(self.client.get(f"/api/jobs/{'f' * 32}").status_code, 404)
+
+    def test_marking_done_always_persists_100_percent(self):
+        job_id = "a" * 32
+        for values in ({}, {"progress_percent": 0}, {"progress_percent": 95}):
+            with self.subTest(values=values):
+                with app.db_conn() as con:
+                    con.execute("DELETE FROM jobs")
+                self.insert_job(job_id, "running", 95)
+                app.update_job(job_id, status="done", stage="Analysis completed", **values)
+                stored = self.stored_job(job_id)
+                self.assertEqual(stored["status"], "done")
+                self.assertEqual(stored["progress_percent"], 100)
+
+    def test_failure_and_retry_preserve_partial_progress(self):
+        job_id = "a" * 32
+        self.insert_job(job_id, "running", 52)
+        app.update_job(job_id, status="failed", stage="Error", error="Model unavailable")
+        self.assertEqual(self.client.get(f"/api/jobs/{job_id}").get_json()["progress_percent"], 52)
+        with patch.object(app.worker_wakeup, "set") as wakeup:
+            response = self.client.post(f"/api/jobs/{job_id}/retry")
+        self.assertEqual(response.status_code, 200)
+        wakeup.assert_called_once_with()
+        stored = self.stored_job(job_id)
+        self.assertEqual((stored["status"], stored["progress_percent"], stored["error"]),
+                         ("queued", 52, ""))
+
+    def test_workflow_progress_through_success_and_failure(self):
+        job_id = "b" * 32
+        for fail in (False, True):
+            with self.subTest(fail=fail), tempfile.TemporaryDirectory(dir=self.tmp.name) as tmp:
+                with app.db_conn() as con:
+                    con.execute("DELETE FROM jobs")
+                self.insert_job(job_id, "queued", 0)
+                directory = Path(tmp)
+                progress = []
+                update = app.update_job
+
+                def record_update(identifier, **values):
+                    update(identifier, **values)
+                    progress.append(self.stored_job(identifier)["progress_percent"])
+
+                def extraction(path, progress):
+                    progress("Extracting text: page 1/1")
+                    return [{"page": 1, "text": "Example text"}], 1, [], []
+
+                with patch.object(app, "job_dir", return_value=directory), \
+                     patch.object(app, "ModelClient") as model_class, \
+                     patch.object(app, "extract_pdf", side_effect=extraction), \
+                     patch.object(app, "make_chunks", return_value=[
+                         {"pages": [1], "text": "Example section"} for _ in range(5)]), \
+                     patch.object(app, "update_job", side_effect=record_update), \
+                     patch.object(app.worker_wakeup, "wait", side_effect=StopWorker):
+                    model = model_class.return_value
+                    model.tokenize.return_value = 10
+                    # Five sections, one merge, then the final report.
+                    model.complete.side_effect = ["Notes [Page 1]"] * 6 + [
+                        RuntimeError("Model unavailable") if fail else "Final report [Page 1]"]
+                    if fail:
+                        with self.assertLogs(app.log, level="ERROR"), self.assertRaises(StopWorker):
+                            app.worker_loop()
+                    else:
+                        with self.assertRaises(StopWorker):
+                            app.worker_loop()
+                    self.assertEqual(model.complete.call_count, 7)
+
+                self.assertEqual(progress, sorted(progress))
+                for milestone in (2, 7, 10, 80, 81, 95):
+                    self.assertIn(milestone, progress)
+                expected = ("failed", 95) if fail else ("done", 100)
+                stored = self.stored_job(job_id)
+                self.assertEqual((stored["status"], stored["progress_percent"]), expected)
+                self.assertEqual((directory / "rapport_final.md").exists(), not fail)
+                detail = self.client.get(f"/api/jobs/{job_id}").get_json()
+                self.assertEqual((detail["status"], detail["progress_percent"]), expected)
+
+
+if __name__ == "__main__":
+    unittest.main()

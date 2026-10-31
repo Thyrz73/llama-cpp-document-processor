@@ -89,10 +89,21 @@ class LiveTests(unittest.TestCase):
                         pages INTEGER DEFAULT 0, total_chunks INTEGER DEFAULT 0, done_chunks INTEGER DEFAULT 0,
                         error TEXT DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL
                     )""")
+                    con.execute("""INSERT INTO jobs
+                        (id, filename, question, status, stage, created_at, updated_at)
+                        VALUES (?, 'example.pdf', 'Analyze', 'done', 'Analyse terminée', ?, ?)""",
+                        ('a' * 32, '2025-01-01', '2025-01-01'))
                 init_db()
                 with db_conn() as con:
                     fields = {r['name'] for r in con.execute('PRAGMA table_info(jobs)')}
+                    stored = dict(con.execute('SELECT * FROM jobs').fetchone())
                 self.assertIn('progress_percent', fields)
+                self.assertEqual(stored['progress_percent'], 0)
+                self.assertEqual(stored['updated_at'], '2025-01-01')
+                self.assertEqual(app.get_job('a' * 32)['progress_percent'], 100)
+                client = app.app.test_client()
+                self.assertEqual(client.get('/api/jobs').get_json()['jobs'][0]['progress_percent'], 100)
+                self.assertEqual(client.get('/api/jobs/' + 'a' * 32).get_json()['progress_percent'], 100)
 
 if __name__ == '__main__':
     unittest.main()
