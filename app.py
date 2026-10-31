@@ -728,7 +728,7 @@ def report(job_id):
     path = job_dir(job_id) / "rapport_final.md"
     if not path.exists():
         abort(404)
-    return send_file(path, mimetype="text/markdown; charset=utf-8", as_attachment=True,
+    return send_file(path, mimetype="text/markdown", as_attachment=True,
                      download_name="analysis_" + job_id[:8] + ".md")
 
 
