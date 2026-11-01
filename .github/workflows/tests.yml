@@ -17,8 +17,18 @@ jobs:
         run: python -m pip install -r requirements.txt
       - name: Run tests
         run: python -m unittest discover -s tests -v
+      - name: Validate Python syntax
+        run: python -m compileall -q app.py document_processor scripts tests
+      - name: Check benchmark dry run
+        run: python scripts/benchmark.py --variants docs/benchmark-variants.example.json --repeat 1
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
       - name: Run browser polling tests
         run: node tests/test_polling.js
+      - name: Validate frontend syntax and Compose
+        run: |
+          node --check static/app.js
+          docker compose config --quiet
+      - name: Check application packaging
+        run: docker build -t document-processor:test .

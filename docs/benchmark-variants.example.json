@@ -1,0 +1,4 @@
+[
+  {"name": "baseline", "options": {"profile": "low"}},
+  {"name": "section-2500", "options": {"profile": "low", "overrides": {"chunk_tokens": 2500}}}
+]

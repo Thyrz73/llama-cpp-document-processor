@@ -34,7 +34,7 @@ class TestLogic(unittest.TestCase):
                {'page':2,'text':' '.join('pear' for _ in range(700))}]
         chunks=make_chunks(pages, MockTokenizer())
         self.assertGreaterEqual(len(chunks), 2)
-        self.assertTrue(all(MockTokenizer().tokenize(x['text'])<=5500 for x in chunks))
+        self.assertTrue(all(MockTokenizer().tokenize(x['text'])<=__import__("app").CHUNK_TOKENS for x in chunks))
         self.assertTrue(any(2 in x['pages'] for x in chunks))
     def test_atomic_file(self):
         """Verify the contents of the replaced file."""

@@ -3,7 +3,7 @@
  */
 // Run scenarios against JavaScript extracted from the HTML template.
 // Return successful test names; throw on the first failure.
-async function runPollingTests(template) {
+async function runPollingTests(template, translations={en:{},fr:{}}) {
  const source=[...template.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m=>m[1]).join('\n');
  // Throw a test error when condition is false, using the supplied message.
  const assert=(condition,message)=>{if(!condition)throw Error(message)};
@@ -13,11 +13,11 @@ async function runPollingTests(template) {
  const job=(status='running',progress=52,id='a'.repeat(32))=>({id,status,progress_percent:progress,filename:'example.pdf',created_at:'2026-10-31T12:00:00Z'});
  // Create a fresh environment with controlled DOM, requests, and timers.
  // These tests start neither a real browser nor an HTTP server.
- function setup() {
+ function setup(withSettings=false) {
   class Element {
    // Initialize a minimal DOM node and properties used by the scenarios.
    // classList provides no-op methods so CSS calls are accepted.
-   constructor(tag){this.tag=tag;this.children=[];this.handlers={};this.style={};this.dataset={};this.attributes={};this.scrollTop=0;this.scrollHeight=200;this.clientHeight=100;this.classList={add(){},remove(){},toggle(){}};this.replacements=0}
+   constructor(tag){this.tag=tag;this.children=[];this.handlers={};this.style={};this.dataset={};this.attributes={};this.scrollTop=0;this.scrollHeight=200;this.clientHeight=100;this.classList={add(){},remove(){},toggle(){}};this.replacements=0;this.value='';this.options=[]}
    // Append child nodes to the current node.
    append(...children){this.children.push(...children)}
    // Replace children and count simulated DOM rebuilds.
@@ -36,6 +36,13 @@ async function runPollingTests(template) {
    reset(){}
   }
   const elements=Object.fromEntries(['file','drop','feedback','theme','uploadForm','fileLabel','send','refresh','jobs','jobsError'].map(id=>[id,new Element('div')]));
+  if(withSettings){
+   for(const id of ['translations','uiLanguage','languageFlag','profile','reportLanguage','detailLevel','profileHelp','configPreview','configWarnings','diagnostics','diagnosticOutput','chunk_tokens','analysis_tokens','merge_tokens','final_tokens','temperature','top_p','top_k','min_p','step_timeout_seconds','max_calls','thinking_section','thinking_merge','thinking_final'])elements[id]=new Element('div');
+   elements.translations.textContent=JSON.stringify(translations);
+   elements.profile.value='low';elements.reportLanguage.value='auto';elements.detailLevel.value='standard';
+   for(const name of ['profile','reportLanguage','detailLevel'])elements[name].options=[{value:elements[name].value}];
+   for(const stage of ['section','merge','final'])elements['thinking_'+stage].value='inherit';
+  }
   elements.file.files=[{name:'example.pdf'}];
   // Find a node connected to the tree by its ID.
   const find=(node,id)=>node.id===id?node:node.children.map(c=>find(c,id)).find(Boolean);
@@ -50,9 +57,9 @@ async function runPollingTests(template) {
   const requests=[];
   // Keep each request pending until the scenario resolves it.
   const fetch=(url,options)=>new Promise((resolve,reject)=>requests.push({url,options,resolve,reject}));
-  const api=new Function('document','localStorage','matchMedia','fetch','setTimeout','clearTimeout','setInterval','FormData','alert',source+'\nreturn {refresh,toggleLive,loadLive,retry};')(
+  const api=new Function('document','localStorage','matchMedia','fetch','setTimeout','clearTimeout','setInterval','FormData','alert',source+'\nreturn {refresh,toggleLive,loadLive,retry,selectedOptions,previewConfig,schedulePreview};')(
    document,{getItem(){return null},setItem(){}},()=>({matches:false,addEventListener(){}}),fetch,
-   (fn,delay)=>timer(fn,delay,false),id=>timers.delete(id),(fn,delay)=>timer(fn,delay,true),class {},message=>{throw Error(message)});
+   (fn,delay)=>timer(fn,delay,false),id=>timers.delete(id),(fn,delay)=>timer(fn,delay,true),class {constructor(){this.values=new Map()}set(k,v){this.values.set(k,v)}get(k){return this.values.get(k)}},message=>{throw Error(message)});
   // Resolve request index with payload, then run its asynchronous continuations.
   const respond=async(index,payload,ok=true)=>{assert(!!requests[index],'Missing request '+index);requests[index].resolve({ok,status:ok?200:503,json:async()=>payload});await flush()};
   // List only six-second timers dedicated to the jobs list.
@@ -196,6 +203,50 @@ async function runPollingTests(template) {
    assert(output.textContent==='Current preview','Update the current panel');
   }
  });
+
+ await test('a stalled jobs request times out and releases its shared promise',async()=>{
+  const h=setup();await h.tick(15000);assert(!h.elements.jobsError.hidden,'Timeout must be visible');
+  h.click();assert(h.requests.length===2,'Retry after a timeout must issue a new request');
+  await h.respond(1,{jobs:[job('queued')]});assert(h.polls().length===1,'Polling recovers');
+  await h.respond(0,{jobs:[]});assert(h.polls().length===1,'Late timed-out response must not overwrite current work');
+ });
+ await test('JSON decoding is also covered by the request deadline',async()=>{
+  const h=setup();h.requests[0].resolve({ok:true,status:200,json:()=>new Promise(()=>{})});await flush();
+  await h.tick(15000);h.click();assert(h.requests.length===2,'Stalled response body must release the lock');
+  await h.respond(1,{jobs:[]});assert(h.elements.jobsError.hidden,'Recover after stalled JSON');
+ });
+ await test('a stalled Live request can be retried without starting inference',async()=>{
+  const h=setup();await h.respond(0,{jobs:[job()]});h.api.toggleLive('a'.repeat(32));
+  await h.tick(15000);await h.tick(1700);assert(h.requests.length===3,'Live timeout must release liveBusy');
+  assert(h.requests.every(r=>!r.options?.method||r.options.method==='GET'),'Live must issue only GETs');
+  await h.respond(2,{content:'Recovered',active:true});assert(h.document.getElementById('live-content').textContent==='Recovered','Live recovers');
+ });
+ const resolved={profile:'low',chunk_tokens:3000,analysis_tokens:1000,merge_tokens:1200,final_tokens:1800,context_tokens:8192,warnings:[],thinking_section:'inherit',thinking_merge:'inherit',thinking_final:'inherit'};
+ async function settingsReady(){const h=setup(true);await h.respond(0,{jobs:[]});await h.respond(1,{thinking_supported:false});await h.respond(2,{configuration:resolved});return h}
+ await test('profile preview is server-resolved and keeps advanced reasoning disabled when unsupported',async()=>{
+  const h=await settingsReady();assert(!h.elements.send.disabled,'Validated preview enables submission');
+  assert(h.elements.thinking_section.disabled,'Unsupported reasoning must be disabled');
+  h.elements.analysis_tokens.value='1200';h.elements.reportLanguage.value='fr';
+  const pending=h.upload();const request=h.requests[3];const options=JSON.parse(request.options.body.get('options'));
+  assert(options.profile==='low'&&options.overrides.analysis_tokens===1200&&options.report_language==='fr','Only explicit controls are submitted');
+  assert(!('system_prompt' in options)&&!('snapshot' in options),'Private/resolved snapshot must not be client-authoritative');
+  await h.respond(3,{id:'b'.repeat(32)});await h.respond(4,{jobs:[job('queued',0,'b'.repeat(32))]});await pending;
+ });
+ await test('invalid configuration keeps submission disabled and late previews are ignored',async()=>{
+  const h=await settingsReady();const first=h.api.previewConfig();h.elements.analysis_tokens.value='-1';h.api.schedulePreview();
+  await h.respond(3,{configuration:resolved});await first;assert(h.elements.send.disabled,'A stale valid response must not enable changed settings');
+  await h.tick(250);await h.respond(4,{error_code:'invalid_budget',error:'Invalid budget'},false);
+  assert(h.elements.send.disabled,'Rejected budgets must disable submission');
+ });
+ await test('language and theme changes preserve the open Live text and scroll position',async()=>{
+  const h=await settingsReady();h.click();await h.respond(3,{jobs:[job()]});h.api.toggleLive('a'.repeat(32));
+  await h.respond(4,{content:'Original model output',active:true});const panel=h.document.getElementById('live-'+'a'.repeat(32)),output=h.document.getElementById('live-content');output.scrollTop=17;
+  h.elements.uiLanguage.value='fr';h.elements.uiLanguage.handlers.change[0]();
+  assert(h.document.documentElement.lang==='fr','HTML language must update');
+  assert(h.document.getElementById('live-'+'a'.repeat(32))===panel&&output.textContent==='Original model output'&&output.scrollTop===17,'Language change must preserve live content');
+  h.elements.theme.value='dark';h.elements.theme.handlers.change[0]();assert(h.document.documentElement.dataset.theme==='dark','Theme must update');
+  assert(output.textContent==='Original model output','Theme must not alter model output');
+ });
  return results;
 }
 
@@ -203,7 +254,7 @@ if(typeof module!=='undefined'&&typeof require==='function'){
  module.exports=runPollingTests;
  if(require.main===module){
   const fs=require('node:fs'),path=require('node:path');
-  runPollingTests(fs.readFileSync(path.join(__dirname,'../templates/index.html'),'utf8'))
+  runPollingTests(fs.readFileSync(path.join(__dirname,'../templates/index.html'),'utf8').replace(/<script src=[^>]*><\/script>/,()=>'<script>'+fs.readFileSync(path.join(__dirname,'../static/app.js'),'utf8')+'</script>'),JSON.parse(fs.readFileSync(path.join(__dirname,'../static/translations.json'),'utf8')))
    .then(results=>{for(const name of results)console.log('ok - '+name);console.log(`${results.length} tests passed`);})
    .catch(error=>{console.error(error);process.exitCode=1;});
  }

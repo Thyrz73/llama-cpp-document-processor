@@ -8,12 +8,13 @@ A lightweight, self-hosted PDF analysis app powered by an **existing llama.cpp s
 
 ## Features
 
-- **Drag-and-drop web interface** for digital and scanned PDFs, with **System / Light / Dark** themes (saved per browser).
+- **Drag-and-drop web interface** for digital and scanned PDFs, with **English/French UI**, local flag icons, and **System / Light / Dark** themes (saved per browser).
 - **Text extraction and selective OCR:** PyMuPDF, pypdf fallback, then Tesseract for pages with insufficient text. English/French OCR packs are included.
-- **Document-wide analysis:** llama.cpp tokenization, section notes, grouped consolidation and a final Markdown report.
-- **Progress and live output:** workflow progress, generated text and any model-emitted reasoning.
-- **Persistent work:** SQLite job queue and atomic intermediate files; interrupted jobs resume after a restart, and retries reuse compatible saved steps.
-- **Central analysis instructions:** editable `config/system_prompt.txt` used by this processor, plus a configurable output language.
+- **Four performance profiles:** limited, moderate, high and workstation; preview effective budgets and use validated advanced overrides. Profiles are experimental, remain sequential, and never reconfigure llama.cpp.
+- **Document-wide analysis:** cached llama.cpp tokenization, compact factual notes, context-aware consolidation and a final Markdown report. Report language and detail are independent of the resource profile.
+- **Progress and live output:** translated phases, bounded previews, explicit reasoning opt-in, request deadlines, cancellation and per-attempt/per-step metrics. Unknown engine metrics remain unknown.
+- **Persistent work:** SQLite job queue and atomic intermediate files; interrupted jobs resume after a restart. Immutable snapshots and verified artifact manifests prevent mixing incompatible saved steps. Historical files are preserved.
+- **Central analysis instructions:** editable `config/system_prompt.txt`, captured privately with each new job. Subsequent edits affect only new jobs.
 
 ## How it works
 
@@ -103,9 +104,9 @@ When using this overlay, include `-f compose.yaml -f compose.network.example.yam
 ## Using the app
 
 1. Select or drop a PDF and enter your analysis request (up to 1,500 characters).
-2. Select **Start analysis**. Jobs move through `queued` and `running`; only one document is processed at a time.
+2. Select a **performance profile**, report language and detail level; inspect the resolved settings and warnings. Optional advanced fields override only application parameters. Select **Start analysis**. Jobs move through `queued` and `running`; only one document is processed at a time.
 3. Optionally open **Show live output** to inspect the latest model pass. Closing the browser does not stop the worker.
-4. When the job is **Completed** (`done`, 100%), select **Download Markdown report** to save `analysis_<first 8 job-ID characters>.md`. Failed jobs show an error and a **Retry** button.
+4. When the job is **Completed** (`done`, 100%), select **Download Markdown report** to save `analysis_<first 8 job-ID characters>.md`. Failed or cancelled jobs show a **Retry** button. Retry keeps the same snapshot; create a new job to change settings. The **Metrics** button shows attempts and individual steps. **Cancel** stops queued work immediately and running work cooperatively.
 
 PDFs requiring a password must be unlocked before upload. Page limits are checked during processing. Reports identify pages with insufficient extracted/OCR text; a document with no usable text fails.
 
@@ -113,7 +114,7 @@ The job list polls every six seconds while any job is queued or running, pauses 
 
 ## Configuration
 
-These 25 settings are read from `.env` by Compose (see [.env.example](.env.example)). Defaults come from [compose.yaml](compose.yaml), except the optional network setting. Running `python app.py` directly does not load `.env` automatically.
+Deployment settings are read from `.env` by Compose (see [.env.example](.env.example)). Defaults come from [compose.yaml](compose.yaml), except the optional network setting. Running `python app.py` directly does not load `.env` automatically.
 
 | Variable | Default | Description |
 | --- | --- | --- |
@@ -124,7 +125,7 @@ These 25 settings are read from `.env` by Compose (see [.env.example](.env.examp
 | `PUID` | `1000` | Container user ID; match the owner of the host `./data` directory. |
 | `PGID` | `1000` | Numeric group ID used to run the container and write `./data`. |
 | `CONTEXT_TOKENS` | `8192` | Input/output context budget, no greater than llama.cpp's actual context. Prompts and outputs need headroom; an insufficient budget is rejected. |
-| `CHUNK_TOKENS` | `3000` | Maximum document-text tokens sent to one section analysis. Valid range: `1000`–`6000`. |
+| `CHUNK_TOKENS` | `3000` | Maximum document-text tokens sent to one section analysis. Validated range: `128`–`131072`, additionally constrained by the available context and output budget. |
 | `ANALYSIS_TOKENS` | `1000` | Maximum generated tokens for each document-section analysis. |
 | `MERGE_TOKENS` | `1200` | Maximum generated tokens for each intermediate consolidation pass. |
 | `FINAL_TOKENS` | `1800` | Maximum generated tokens for the final Markdown report. |
@@ -137,7 +138,7 @@ These 25 settings are read from `.env` by Compose (see [.env.example](.env.examp
 | `OCR_ENABLED` | `true` | Enables OCR on pages whose extracted text is insufficient. Accepted true values: `1`, `true`, `yes`, `on`. |
 | `OCR_LANGUAGES` | `eng+fra` | Tesseract language pack(s) used for OCR, separated with `+`. The image includes English (`eng`) and French (`fra`). |
 | `OCR_DPI` | `150` | OCR rendering resolution; higher values can improve recognition at greater CPU/memory cost. |
-| `OCR_MAX_PIXELS` | `5000000` | Target pixel budget per OCR page. Rendering resolution is reduced to fit, with a minimum of 72 DPI. |
+| `OCR_MAX_PIXELS` | `5000000` | Target pixel budget per OCR page. Rendering resolution is reduced to fit, and rejects pages that cannot fit even at minimum rendering resolution. |
 | `OCR_TIMEOUT_SECONDS` | `180` | Maximum OCR time allowed for one page. |
 | `PROCESSOR_MEMORY_LIMIT` | `512m` | Docker memory limit for the processor container. `memswap_limit` is set to the same value, so swap is not added. |
 | `PROCESSOR_CPUS` | `0.75` | Docker CPU quota for the processor container. Tesseract is also limited to one OpenMP thread by Compose. |
@@ -147,7 +148,25 @@ Compose fixes `DATA_DIR=/app/data`, `SYSTEM_PROMPT_FILE=/app/config/system_promp
 
 After editing `.env`, wait until the queue is idle and run `docker compose up -d` to apply changes. `docker compose restart` alone keeps the old container environment.
 
-Start with conservative token budgets. Changing prompts, language or chunk settings does not invalidate saved notes on retry. Create a **new analysis** to apply new settings to the whole document.
+Start with conservative token budgets. An API request without `options` keeps the historical deployment defaults. An explicit profile replaces its section/analysis/merge defaults, then validated advanced overrides apply. All four profiles initially use one worker and one generation at a time; `ultra` does not enable parallel inference.
+
+The current experimental profile definitions are centralized in `document_processor/profiles.py`: low `3000/1000/1200`, medium `3500/1100/1300`, high `4000/1200/1400`, ultra `4500/1400/1600` (section/analysis/merge tokens). They are **not calibrated hardware recommendations**. Final output derives from `FINAL_TOKENS` and the separate detail choice (concise ×0.8, standard ×1, detailed ×1.5); an explicit final-output override wins. No speed gain or exact ETA is promised.
+
+Changing environment variables, language, prompts or profile does not alter existing jobs. **Retry uses the original snapshot. Create a new analysis to change settings**, including after a `length` failure. Snapshots include private prompt text; protect the data volume like the source PDFs.
+
+| Additional variable | Default | Purpose |
+| --- | --- | --- |
+| `STEP_TIMEOUT_SECONDS` | `21600` | Actual generation deadline, including a silent prefill; distinct from the socket inactivity timeout. |
+| `MAX_MODEL_CALLS` | `500` | Maximum generation calls per processing attempt. |
+| `MAX_JOB_ATTEMPTS` | `10` | Maximum manual/restart attempts accepted for a job; no automatic generation retries. |
+| `LLAMA_USAGE_SUPPORTED` | `false` | Request streaming usage only after verifying backend support. Optional returned usage/timings are parsed regardless. |
+| `LLAMA_APPLY_TEMPLATE_SUPPORTED` | `false` | Use `/apply-template` for input sizing after verifying it matches completion templating and reasoning options. Otherwise use tokenization plus a marked template estimate. |
+| `LLAMA_THINKING_ADAPTER` | `unsupported` | `unsupported`, `chat_template`, or `prompt`. Enable only after verifying the exact GGUF/build/template. |
+| `LLAMA_INITIAL_THINKING` | `false` | Start the parser inside a reasoning block when the verified template opens `<think>` without emitting it. |
+
+The thinking adapter controls whether advanced per-stage `inherit/on/off` policies are available. `chat_template` sends `chat_template_kwargs.enable_thinking`; `prompt` uses `/think` or `/no_think`. The default inherits engine behavior. **Masking reasoning in the interface does not reduce inference work.** Never assume a Qwen3 derivative supports the official model's controls.
+
+See [engine tuning and measurement](docs/engine-tuning.md), [API contracts](docs/api.md), and [migration/rollback](docs/migration-v2.md).
 
 ### Customize the system prompt
 
@@ -155,30 +174,46 @@ Edit `config/system_prompt.txt`, copied in the quick start, to set processor-wid
 
 ### Themes and live model output
 
-The **System / Light / Dark** theme preference is stored in the browser. **Generated text** shows the current or latest section, merge or final-report pass. **Reasoning (if available)** displays only text emitted by the model through reasoning fields or `<think>` tags; it may be empty.
+The **System / Light / Dark** theme preference is stored in the browser. **Generated text** shows the current or latest section, merge or final-report pass. **Reasoning (if available)** is opt-in and displays only emitted text; it may be absent or incomplete. The API omits this channel unless explicitly requested. Interface language changes do not translate or regenerate model output.
 
 The progress bar covers extraction, section analysis, merging and final writing; it is a workflow estimate, not a time estimate. During section analysis, the Live panel's phase label includes PDF page numbers.
 
-Live output polls separately every 1.7 seconds while its panel is open and the tab is visible, including for completed jobs. Each new model pass replaces the bounded preview; full successful notes and reports remain saved separately. Streaming support is required even with `LIVE_OUTPUT_ENABLED=false`.
+Live output polls separately every 1.7 seconds, with bounded request timeouts, while its panel is open and the tab is visible, including for completed jobs. Jobs polling backs off after repeated failures; hidden tabs do not start polling requests. Each new model pass replaces the bounded preview; full successful notes and reports remain saved separately. Streaming support is required even with `LIVE_OUTPUT_ENABLED=false`.
 
 ## Persistent data
 
 ```text
 data/                           # Private, mounted at /app/data
-├── jobs.sqlite3                 # Queue and job metadata
+├── jobs.sqlite3                 # Jobs, immutable configurations, attempts and steps
 └── jobs/<job-id>/
     ├── source.pdf
-    ├── extracted.json
-    ├── chunks.json
-    ├── analysis_0000.md         # Section notes
-    ├── merge_00_0000.md         # Intermediate consolidation, when needed
-    ├── live_preview.json       # When live preview is enabled
-    └── rapport_final.md        # Downloaded as analysis_<8-character ID>.md
+    ├── artifacts/<snapshot-hash>/
+    │   ├── manifest.json        # Dependencies and SHA-256 checks
+    │   ├── extracted.json
+    │   ├── chunks.json
+    │   ├── analysis_0000.md
+    │   ├── merge_00_0000.md
+    │   └── rapport_final.md
+    ├── live_preview.json        # Bounded latest output; private
+    ├── previous_reports/       # Preserved earlier reports, when replaced
+    └── rapport_final.md        # Same download path/name as before
 ```
 
 **Never commit `.env`, `config/system_prompt.txt`, `data/`, uploaded PDFs, SQLite databases, or real analysis reports.** `.gitignore` and `.dockerignore` exclude these common files, but always inspect `git status` before pushing.
 
-On restart, interrupted jobs return to the queue and reuse compatible saved files. Failed jobs wait for **Retry**. A newly uploaded PDF creates a new job, even if it was uploaded before. Files are retained without automatic cleanup; the UI has no delete/cancel action.
+On restart, interrupted jobs return to the queue and reuse compatible saved files. Failed/cancelled jobs wait for **Retry**. Old jobs without a snapshot are recomputed with a visible historical-configuration warning, while their original files remain intact. A newly uploaded PDF creates a new job, even if it was uploaded before. Files and metrics are retained without automatic cleanup. Metric API pages are bounded. There is a cancel action but no delete action. During an OCR subprocess, cancellation takes effect at the next page boundary; during silent model generation, the application checks cancellation/deadlines independently of incoming tokens. A closing HTTP reader blocks further local generations until it exits; stopping inference inside a remote backend ultimately depends on that backend.
+
+## Measurements and controlled comparisons
+
+Per-job metrics separate queue waiting, extraction/OCR, tokenization, sections, merges, final generation and saving. Engine usage, prefill/decode timings and cache counts are recorded only when available. First-event latency includes transport/waiting and is **not** labeled prefill. Character counts and SSE events are never labeled tokens. Mechanical checks of page references and numeric items are warning signals, not factual-quality scores.
+
+No benchmark runs at startup or during diagnostics. Prepare an offline plan with:
+
+```bash
+.venv/bin/python scripts/benchmark.py --variants docs/benchmark-variants.example.json
+```
+
+Execution requires `--execute`, an authorized PDF, a question file and a new output path. Read [the benchmark protocol](docs/engine-tuning.md) before executing. The tool creates fresh jobs, alternates trial order, exports non-content metrics and supports an optional mechanical recall checklist. Human review of facts, units, contradictions and citations remains required.
 
 ## Updating and backups
 
@@ -212,10 +247,10 @@ curl -i http://127.0.0.1:9932/api/health
 - **Cannot connect to llama.cpp:** check `LLAMA_BASE_URL` from the container's network perspective. `localhost` inside the processor container does **not** mean the Docker host.
 - **llama.cpp authorization error:** check the optional `LLAMA_API_KEY` value.
 - **Out-of-context / too many tokens:** align `CONTEXT_TOKENS` with your llama.cpp context and reduce `CHUNK_TOKENS` or response budgets.
-- **Response hit `max_tokens`:** raise the relevant output budget (`ANALYSIS_TOKENS`, `MERGE_TOKENS` or `FINAL_TOKENS`) while keeping enough context, then retry. Truncated generations are treated as failures.
+- **Response hit `max_tokens`:** create a new job with an adjusted output budget while keeping enough context. Retry deliberately preserves the old budget. Truncated generations are treated as failures.
 - **No usable text:** check whether OCR is enabled, language packs match the source, and the PDF is not password-protected.
 - **Killed during OCR:** check Docker memory usage and increase `PROCESSOR_MEMORY_LIMIT` carefully if the host has headroom.
-- **Unexpected output language:** set `OUTPUT_LANGUAGE` explicitly and start a new analysis.
+- **Unexpected output language:** select the report language explicitly and start a new analysis; browser language is independent.
 - **Empty reasoning panel:** the model/server did not emit separate reasoning; this is expected for many models.
 - **Live output unavailable:** check that llama.cpp supports `stream: true`, then inspect `docker compose logs`.
 
