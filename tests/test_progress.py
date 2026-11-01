@@ -1,4 +1,4 @@
-"""Global workflow progress, persistence and legacy API compatibility."""
+"""Test persisted progress and the jobs APIs."""
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,11 +8,19 @@ import app
 
 
 class StopWorker(BaseException):
-    """Exit the worker's infinite loop after its queue has been processed."""
+    """Stop the worker loop after its queue has been processed.
+
+    Inherit from BaseException so the signal passes through the loop's
+    ``except Exception`` blocks without turning test shutdown into a job
+    failure.
+    """
 
 
 class ProgressTests(unittest.TestCase):
+    """Verify job states and progress."""
+
     def setUp(self):
+        """Prepare temporary test resources."""
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         directory = Path(self.tmp.name)
@@ -24,7 +32,11 @@ class ProgressTests(unittest.TestCase):
         self.client = app.app.test_client()
 
     def insert_job(self, job_id, status, percent):
-        # Direct SQL intentionally reproduces records written by older versions.
+        """Insert a raw job to simulate a legacy database.
+
+        Write job_id, status, and percent directly through SQL to reproduce
+        an older database without update_job normalization.
+        """
         with app.db_conn() as con:
             con.execute("""INSERT INTO jobs
                 (id, filename, question, status, progress_percent, created_at, updated_at)
@@ -32,10 +44,12 @@ class ProgressTests(unittest.TestCase):
                 (job_id, status, percent, app.utcnow(), app.utcnow()))
 
     def stored_job(self, job_id):
+        """Return raw values for the stored job."""
         with app.db_conn() as con:
             return dict(con.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone())
 
     def test_list_and_detail_report_consistent_progress_for_all_statuses(self):
+        """Verify APIs without rewriting jobs."""
         cases = [("queued", 0, 0), ("queued", 52, 52),
                  ("running", 2, 2), ("running", 52, 52), ("running", 95, 95),
                  ("failed", 0, 0), ("failed", 52, 52), ("failed", 95, 95),
@@ -59,6 +73,7 @@ class ProgressTests(unittest.TestCase):
         self.assertEqual(self.client.get(f"/api/jobs/{'f' * 32}").status_code, 404)
 
     def test_marking_done_always_persists_100_percent(self):
+        """Persist 100 percent on every successful completion."""
         job_id = "a" * 32
         for values in ({}, {"progress_percent": 0}, {"progress_percent": 95}):
             with self.subTest(values=values):
@@ -71,6 +86,7 @@ class ProgressTests(unittest.TestCase):
                 self.assertEqual(stored["progress_percent"], 100)
 
     def test_failure_and_retry_preserve_partial_progress(self):
+        """Preserve progress after failure and retry."""
         job_id = "a" * 32
         self.insert_job(job_id, "running", 52)
         app.update_job(job_id, status="failed", stage="Error", error="Model unavailable")
@@ -84,6 +100,12 @@ class ProgressTests(unittest.TestCase):
                          ("queued", 52, ""))
 
     def test_workflow_progress_through_success_and_failure(self):
+        """Test the complete workflow with and without failure.
+
+        Run the real worker with a mocked model and extraction. Verify
+        persisted stages, final state, and report existence; stop the loop
+        with StopWorker once the queue is empty.
+        """
         job_id = "b" * 32
         for fail in (False, True):
             with self.subTest(fail=fail), tempfile.TemporaryDirectory(dir=self.tmp.name) as tmp:
@@ -95,10 +117,12 @@ class ProgressTests(unittest.TestCase):
                 update = app.update_job
 
                 def record_update(identifier, **values):
+                    """Apply values and record progress."""
                     update(identifier, **values)
                     progress.append(self.stored_job(identifier)["progress_percent"])
 
                 def extraction(path, progress):
+                    """Simulate one page and call progress."""
                     progress("Extracting text: page 1/1")
                     return [{"page": 1, "text": "Example text"}], 1, [], []
 
@@ -111,7 +135,7 @@ class ProgressTests(unittest.TestCase):
                      patch.object(app.worker_wakeup, "wait", side_effect=StopWorker):
                     model = model_class.return_value
                     model.tokenize.return_value = 10
-                    # Five sections, one merge, then the final report.
+                    # Simulate five sections, one merge, and the final report.
                     model.complete.side_effect = ["Notes [Page 1]"] * 6 + [
                         RuntimeError("Model unavailable") if fail else "Final report [Page 1]"]
                     if fail:

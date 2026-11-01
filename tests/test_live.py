@@ -1,4 +1,4 @@
-"""Streaming parser and live output tests, with no running llama.cpp required."""
+"""Test the SSE stream and legacy jobs without llama.cpp."""
 import json
 import os
 import sys
@@ -14,26 +14,41 @@ from app import ModelClient, ThinkingSplitter, init_db, db_conn
 
 
 class FakeStream:
+    """Simulate a streaming HTTP response."""
+
     def __init__(self, events):
+        """Store events from the fake stream."""
         self.events = events
     def __enter__(self):
+        """Return the fake stream when entering a with block."""
         return self
     def __exit__(self, *args):
+        """Let exceptions propagate when leaving the with block."""
         return False
     def raise_for_status(self):
+        """Simulate a successful HTTP status without raising."""
         return None
     def iter_lines(self, **kwargs):
+        """Emit SSE events and their completion marker.
+
+        Accept kwargs used by requests without needing them for this fake
+        stream. Return an iterator of bytes.
+        """
         for event in self.events:
             yield ('data: ' + json.dumps(event)).encode()
         yield b'data: [DONE]'
 
 
 def event(delta, finish=None):
+    """Create an SSE event with delta and an optional finish reason."""
     return {"choices": [{"delta": delta, "finish_reason": finish}]}
 
 
 class LiveTests(unittest.TestCase):
+    """Verify the SSE stream and legacy databases."""
+
     def test_tags_can_split_at_any_position(self):
+        """Recognize a <think> tag split across stream fragments."""
         for split in range(1, len('<think>') + 1):
             parser = ThinkingSplitter()
             text = 'Before <think>work</think> After'
@@ -44,6 +59,7 @@ class LiveTests(unittest.TestCase):
             self.assertEqual(parser.reasoning, 'work')
 
     def test_separated_reasoning_field(self):
+        """Separate reasoning from final text."""
         client = ModelClient()
         events = [event({'reasoning_content': 'checking'}), event({'content': 'Answer '}),
                   event({'content': 'done'}, finish='stop')]
@@ -57,6 +73,7 @@ class LiveTests(unittest.TestCase):
         self.assertEqual(preview[-1], ('Answer done', 'checking', True))
 
     def test_raw_thinking_tags(self):
+        """Separate text from reasoning tags."""
         client = ModelClient()
         events = [event({'content': '<thi'}), event({'content': 'nk>working</think>Result'}, finish='stop')]
         preview = []
@@ -69,6 +86,7 @@ class LiveTests(unittest.TestCase):
         self.assertEqual(preview[-1][1], 'working')
 
     def test_truncated_output_is_not_accepted(self):
+        """Reject output truncated by the token limit."""
         client = ModelClient()
         events = [event({'content': 'Incomplete'}, finish='length')]
         with patch.object(client, 'tokenize', return_value=5), \
@@ -78,6 +96,12 @@ class LiveTests(unittest.TestCase):
                 client.complete('Analyze', 'PDF', 100)
 
     def test_existing_jobs_table_is_migrated(self):
+        """Migrate the table while preserving legacy jobs.
+
+        Create a temporary database without the progress column. Verify that
+        legacy jobs are presented at 100 percent through the API while the
+        stored value and timestamp remain unchanged.
+        """
         import app
         with tempfile.TemporaryDirectory() as tmp:
             new_path = Path(tmp) / 'jobs.sqlite3'
@@ -91,7 +115,7 @@ class LiveTests(unittest.TestCase):
                     )""")
                     con.execute("""INSERT INTO jobs
                         (id, filename, question, status, stage, created_at, updated_at)
-                        VALUES (?, 'example.pdf', 'Analyze', 'done', 'Analyse terminée', ?, ?)""",
+                        VALUES (?, 'example.pdf', 'Analyze', 'done', 'Analysis completed', ?, ?)""",
                         ('a' * 32, '2025-01-01', '2025-01-01'))
                 init_db()
                 with db_conn() as con:

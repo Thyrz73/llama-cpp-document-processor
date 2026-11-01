@@ -1,4 +1,4 @@
-"""Report download HTTP contract, using only temporary files and SQLite."""
+"""Test Markdown downloads in isolated storage."""
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,7 +8,14 @@ import app
 
 
 class ReportTests(unittest.TestCase):
+    """Test downloads with the Flask client."""
+
     def setUp(self):
+        """Prepare temporary test resources.
+
+        Redirect DATA and DB_PATH to a temporary directory. Register cleanup
+        for files and patches even when the test fails.
+        """
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         directory = Path(self.tmp.name)
@@ -28,7 +35,8 @@ class ReportTests(unittest.TestCase):
         self.directory.mkdir(parents=True)
 
     def test_markdown_attachment_headers_filename_and_utf8_content(self):
-        content = "# Résumé\n\nAnalyse terminée.\n"
+        """Verify headers and UTF-8 Markdown content."""
+        content = "# Summary\n\nAnalysis completed.\n"
         (self.directory / "rapport_final.md").write_text(content, encoding="utf-8")
         with self.client.get(f"/api/jobs/{self.job_id}/report") as response:
             self.assertEqual(response.status_code, 200)
@@ -39,6 +47,7 @@ class ReportTests(unittest.TestCase):
             self.assertEqual(response.data, content.encode("utf-8"))
 
     def test_unfinished_jobs_cannot_download_a_report(self):
+        """Reject unfinished jobs with HTTP 409."""
         for status in ("queued", "running", "failed"):
             with self.subTest(status=status):
                 app.update_job(self.job_id, status=status)
@@ -46,6 +55,7 @@ class ReportTests(unittest.TestCase):
                     f"/api/jobs/{self.job_id}/report").status_code, 409)
 
     def test_missing_job_or_report_returns_404(self):
+        """Require HTTP 404 when the job or report is missing."""
         self.assertEqual(self.client.get(
             f"/api/jobs/{'f' * 32}/report").status_code, 404)
         self.assertEqual(self.client.get(
