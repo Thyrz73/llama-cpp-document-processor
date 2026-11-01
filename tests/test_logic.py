@@ -23,7 +23,7 @@ class TestLogic(unittest.TestCase):
 
     def test_page_split_preserves_text(self):
         """Verify splitting without losing text."""
-        original=' '.join('mot' for _ in range(1800))
+        original=' '.join('word' for _ in range(1800))
         pieces=split_with_page(original, 7, limit=500)
         self.assertGreater(len(pieces), 1)
         self.assertTrue(all(x['page']==7 for x in pieces))

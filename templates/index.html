@@ -79,13 +79,13 @@ function createLive(id){
  return root
 }
 // Read the open panel preview without overlapping Live requests.
-// Ignore hidden tabs and responses for a job closed in the meantime.
+// Ignore hidden tabs and responses for a panel replaced in the meantime.
 // Preserve manual scrolling; follow output when the user is at the bottom.
 async function loadLive(){
  if(document.hidden||liveBusy)return;
  const id=expandedId,output=$('live-content'),note=$('live-note');if(!id||!output||!note)return;
  liveBusy=true;
- try{const res=await fetch(`/api/jobs/${id}/live`,{cache:'no-store'});if(!res.ok)throw Error(`HTTP ${res.status}`);const d=await res.json();if(id!==expandedId)return;
+ try{const res=await fetch(`/api/jobs/${id}/live`,{cache:'no-store'});if(!res.ok)throw Error(`HTTP ${res.status}`);const d=await res.json();if(id!==expandedId||output!==$('live-content'))return;
  const content=liveTab==='reasoning'?d.reasoning:d.content;
  const truncated=(liveTab==='reasoning'?d.reasoning_chars:d.content_chars)>(content||'').length;
  const label=liveTab==='reasoning'?'No reasoning text was emitted for this pass. The model may not support it, or the server may not expose it.':'No generated text yet for this pass.';
@@ -93,7 +93,12 @@ async function loadLive(){
  if(output.textContent!==(content||label))output.textContent=content||label;
  if(nearBottom)output.scrollTop=output.scrollHeight;
  note.textContent=(d.phase||'Waiting')+' · '+(d.active?'Generating…':'Last available output')+(truncated?' · Showing recent text only':'');
- }catch(err){note.textContent='Cannot load live output: '+err.message}finally{liveBusy=false}
+ }catch(err){if(id===expandedId&&output===$('live-content'))note.textContent='Cannot load live output: '+err.message}
+ finally{
+  liveBusy=false;
+  // Load a replacement panel immediately after the previous request settles.
+  if($('live-content')&&output!==$('live-content'))loadLive();
+ }
 }
 // Cancel the jobs polling deadline and release its reference when present.
 function stopJobsPolling(){if(jobsTimer!==null)clearTimeout(jobsTimer);jobsTimer=null}
@@ -118,7 +123,7 @@ function refresh(afterChange=false){
    try{
     const res=await fetch('/api/jobs',{cache:'no-store'});if(!res.ok)throw Error('Unable to load jobs');const data=await res.json();
     if(refreshPending)continue;
-    jobs=data.jobs;hasActiveJobs=jobs.some(j=>activeStatuses.has(j.status));
+    jobs=data.jobs;hasActiveJobs=data.has_active_jobs??jobs.some(j=>activeStatuses.has(j.status));
     $('jobsError').hidden=true;renderJobs();
    }catch(err){
     const error=$('jobsError'),message='Cannot refresh analyses: '+err.message;

@@ -865,10 +865,21 @@ def health():
 
 @app.get("/api/jobs")
 def list_jobs():
-    """Return the 100 most recent jobs as JSON."""
+    """Return the 100 most recent jobs and activity across the whole queue.
+
+    has_active_jobs includes older jobs outside the visible list so the
+    browser keeps polling while any job is queued or running.
+    """
     with db_conn() as con:
-        rows = con.execute("SELECT * FROM jobs ORDER BY created_at DESC, id DESC LIMIT 100").fetchall()
-    return jsonify(jobs=[serialize_job(row) for row in rows])
+        rows = con.execute("""SELECT *,
+            EXISTS(SELECT 1 FROM jobs WHERE status IN ('queued', 'running'))
+                AS has_active_jobs
+            FROM jobs ORDER BY created_at DESC, id DESC LIMIT 100""").fetchall()
+    has_active_jobs = bool(rows and rows[0]["has_active_jobs"])
+    jobs = [serialize_job(row) for row in rows]
+    for job in jobs:
+        job.pop("has_active_jobs")
+    return jsonify(jobs=jobs, has_active_jobs=has_active_jobs)
 
 
 @app.get("/api/jobs/<job_id>")

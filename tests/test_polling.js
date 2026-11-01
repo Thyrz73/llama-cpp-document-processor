@@ -87,6 +87,15 @@ async function runPollingTests(template) {
    assert(h.polls().length===0,'Last active job terminated');
   }
  });
+ await test('active jobs outside the visible list keep polling without rebuilding cards',async()=>{
+  const h=setup(),jobs=[job('done',100)];
+  await h.respond(0,{jobs,has_active_jobs:true});
+  assert(h.polls().length===1,'An older active job still needs polling');
+  const article=h.elements.jobs.children[0];
+  await h.tick(6000);await h.respond(1,{jobs,has_active_jobs:false});
+  assert(h.polls().length===0,'Stop once all jobs are terminal');
+  assert(h.elements.jobs.children[0]===article,'Metadata-only changes must not rebuild cards');
+ });
  await test('manual and timer refreshes share an in-flight request and a single timer',async()=>{
   const h=setup();const pending=h.api.refresh();assert(h.api.refresh()===pending,'Requests must share a promise');h.click();
   assert(h.requests.length===1,'Concurrent initial refreshes must coalesce');
@@ -170,6 +179,22 @@ async function runPollingTests(template) {
   await h.respond(3,{phase:'Analysis',content:'Preview',reasoning:'Reasoning preview',active:true});await h.visible(false);await h.tick(1700);
   assert(h.requests.length===4,'No hidden Live requests');h.api.toggleLive('a'.repeat(32));await h.tick(1700);
   assert(h.requests.length===4,'No requests when Live is closed');
+ });
+ await test('Live follows a panel reopened or switched while a request is pending',async()=>{
+  for(const nextId of ['a'.repeat(32),'b'.repeat(32)]){
+   const h=setup();await h.respond(0,{jobs:[job(),job('running',20,'b'.repeat(32))]});
+   h.api.toggleLive('a'.repeat(32));
+   if(nextId==='a'.repeat(32))h.api.toggleLive(nextId);
+   h.api.toggleLive(nextId);
+   assert(h.requests.length===2,'Keep one pending Live request');
+   await h.respond(1,{phase:'Old pass',content:'Old preview',active:true});
+   const output=h.document.getElementById('live-content');
+   assert(output.textContent==='Waiting for streamed output…','Ignore responses for a replaced panel');
+   assert(h.requests.length===3,'Immediately load the current panel once the old request settles');
+   assert(h.requests[2].url===`/api/jobs/${nextId}/live`,'Fetch the current job');
+   await h.respond(2,{phase:'New pass',content:'Current preview',active:true});
+   assert(output.textContent==='Current preview','Update the current panel');
+  }
  });
  return results;
 }

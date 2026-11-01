@@ -109,7 +109,7 @@ When using this overlay, include `-f compose.yaml -f compose.network.example.yam
 
 PDFs requiring a password must be unlocked before upload. Page limits are checked during processing. Reports identify pages with insufficient extracted/OCR text; a document with no usable text fails.
 
-The job list polls every six seconds while a job is queued or running, pauses in hidden tabs and refreshes when the tab becomes visible. **Refresh** also works when polling has stopped. The UI lists the latest 100 jobs; older files remain on disk.
+The job list polls every six seconds while any job is queued or running, pauses in hidden tabs and refreshes when the tab becomes visible. **Refresh** also works when polling has stopped. The UI lists the latest 100 jobs; older active jobs still keep polling enabled, and older files remain on disk.
 
 ## Configuration
 
@@ -237,7 +237,7 @@ python3 -m venv .venv
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
-The tests use temporary documents/databases and simulated model responses; no running llama.cpp is required. Browser polling tests use a simulated DOM/network/timers and run separately with `node tests/test_polling.js` (Node.js is only needed for that suite). [GitHub Actions](.github/workflows/tests.yml) currently runs the Python suite on pushes and pull requests.
+The tests use temporary documents/databases and simulated model responses; no running llama.cpp is required. Browser polling tests use a simulated DOM/network/timers and run with `node tests/test_polling.js` (Node.js is only needed for that suite; CI uses Node.js 22). [GitHub Actions](.github/workflows/tests.yml) runs both suites on pushes and pull requests.
 
 ## Help and contributions
 

@@ -36,7 +36,7 @@ class ReportTests(unittest.TestCase):
 
     def test_markdown_attachment_headers_filename_and_utf8_content(self):
         """Verify headers and UTF-8 Markdown content."""
-        content = "# Summary\n\nAnalysis completed.\n"
+        content = "# Summary\n\nAnalysis completed — temperature: 25 °C ± 0.5 °C.\n"
         (self.directory / "rapport_final.md").write_text(content, encoding="utf-8")
         with self.client.get(f"/api/jobs/{self.job_id}/report") as response:
             self.assertEqual(response.status_code, 200)

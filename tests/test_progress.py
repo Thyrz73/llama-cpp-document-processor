@@ -85,6 +85,30 @@ class ProgressTests(unittest.TestCase):
                 self.assertEqual(stored["status"], "done")
                 self.assertEqual(stored["progress_percent"], 100)
 
+    def test_list_detects_active_jobs_outside_the_latest_100(self):
+        """Keep polling when an older job is active outside the visible list."""
+        self.assertEqual(self.client.get("/api/jobs").get_json(),
+                         {"jobs": [], "has_active_jobs": False})
+        for status in ("queued", "running"):
+            with self.subTest(status=status):
+                with app.db_conn() as con:
+                    con.execute("DELETE FROM jobs")
+                oldest_id = "0" * 32
+                self.insert_job(oldest_id, status, 52)
+                with app.db_conn() as con:
+                    con.execute("UPDATE jobs SET created_at='2000-01-01' WHERE id=?",
+                                (oldest_id,))
+                for index in range(1, 101):
+                    self.insert_job(f"{index:032x}", "done", 100)
+
+                payload = self.client.get("/api/jobs").get_json()
+                self.assertEqual(len(payload["jobs"]), 100)
+                self.assertNotIn(oldest_id, [job["id"] for job in payload["jobs"]])
+                self.assertTrue(payload["has_active_jobs"])
+
+                app.update_job(oldest_id, status="failed")
+                self.assertFalse(self.client.get("/api/jobs").get_json()["has_active_jobs"])
+
     def test_failure_and_retry_preserve_partial_progress(self):
         """Preserve progress after failure and retry."""
         job_id = "a" * 32
