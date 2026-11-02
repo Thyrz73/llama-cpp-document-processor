@@ -118,7 +118,7 @@ def main(argv=None):
     parser.add_argument("--trial-timeout", type=int, default=86400)
     parser.add_argument("--cache-condition", choices=("unknown", "warm", "cold"), default="unknown")
     args = parser.parse_args(argv)
-    variants = validate_plan(json.loads(args.variants.read_text()), args.allow_combined)
+    variants = validate_plan(json.loads(args.variants.read_text(encoding="utf-8")), args.allow_combined)
     if not 1 <= args.repeat <= 10 or args.trial_timeout <= 0:
         parser.error("Use 1–10 repetitions and a positive trial timeout.")
     order = [variant for repeat in range(args.repeat) for variant in (variants if repeat % 2 == 0 else variants[::-1])]
@@ -133,7 +133,7 @@ def main(argv=None):
     question = args.question_file.read_text(encoding="utf-8").strip()
     if not 1 <= len(question) <= 1500:
         parser.error("The question must contain 1–1500 characters.")
-    checklist = json.loads(args.checklist.read_text()) if args.checklist else []
+    checklist = json.loads(args.checklist.read_text(encoding="utf-8")) if args.checklist else []
     if not isinstance(checklist, list) or any(not isinstance(item, dict) or not isinstance(item.get("id"), str)
             or not isinstance(item.get("terms"), list) or not item["terms"]
             or any(not isinstance(term, str) or not term for term in item["terms"]) for item in checklist):
@@ -150,7 +150,7 @@ def main(argv=None):
             trial = execute_trial(session, args.url.rstrip("/"), args.pdf, question, variant, checklist, args.trial_timeout)
             result["trials"].append(trial)
             descriptor = os.open(args.output, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(descriptor, "w") as stream:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
                 json.dump(result, stream, ensure_ascii=False, indent=2)
             print(f"{variant['name']}: {trial['status']} ({len(result['trials'])}/{len(order)})")
     summary = {}

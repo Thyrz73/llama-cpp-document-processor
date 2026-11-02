@@ -78,6 +78,10 @@ def run(job_id, runtime):
         model.check_cancelled()
         if stage in ("section", "merge", "final"):
             model.current_metrics = {}
+            # Pre-fix artifacts may contain Latin-1-decoded UTF-8 even when
+            # their file hashes are valid. Recompute on an explicit retry;
+            # never try to repair their Unicode strings heuristically.
+            dependencies = {**dependencies, "text_transport_version": 1}
         handle = recorder.start(stage, name)
         before_calls, before_ms = model.tokenization_calls, model.tokenization_ms
         before_hits = model.tokenization_cache_hits

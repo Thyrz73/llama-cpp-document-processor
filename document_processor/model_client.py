@@ -166,7 +166,9 @@ class ModelClient:
         try:
             with self.session.request(method, self.base_url + path, timeout=(5, timeout), **kwargs) as response:
                 response.raise_for_status()
-                return response.json()
+                # JSON from llama.cpp is UTF-8, independently of HTTP charset
+                # guesses (or a proxy's misleading Content-Type).
+                return json.loads(response.content.decode("utf-8"))
         except (requests.RequestException, ValueError):
             raise ModelError("backend_unavailable", "The model backend is unavailable or returned invalid data.") from None
 
@@ -198,7 +200,7 @@ class ModelClient:
                 result["slots"] = slots
             template = props.get("chat_template")
             if isinstance(template, str):
-                result["template_hash"] = hashlib.sha256(template.encode()).hexdigest()
+                result["template_hash"] = hashlib.sha256(template.encode("utf-8")).hexdigest()
             # Do not serialize arbitrary build metadata: it may contain local paths.
             version = props.get("version")
             if isinstance(version, str) and len(version) < 80 and all(c.isalnum() or c in ".-_ " for c in version):
@@ -302,7 +304,10 @@ class ModelClient:
                                        stream=True, timeout=(10, self.config["request_timeout"])) as response:
                     response_holder.append(response)
                     response.raise_for_status()
-                    for line in response.iter_lines(chunk_size=64, decode_unicode=True):
+                    # Requests defaults text/* without a charset to Latin-1.
+                    # Keep bytes until iter_lines has assembled a whole line:
+                    # a UTF-8 code point can span several network chunks.
+                    for line in response.iter_lines(chunk_size=64, decode_unicode=False):
                         if stopped.is_set():
                             break
                         if line and len(line) > 1024 * 1024:
@@ -383,7 +388,10 @@ class ModelClient:
                 if not line:
                     continue
                 if not isinstance(line, str):
-                    line = line.decode("utf-8", errors="replace")
+                    try:
+                        line = line.decode("utf-8")
+                    except UnicodeDecodeError:
+                        raise ModelError("invalid_stream_encoding", "The model stream is not valid UTF-8.") from None
                 if not line.startswith("data:"):
                     continue
                 message = line[5:].strip()

@@ -38,7 +38,7 @@ def inspect(data):
                 artifact_root = root / "artifacts" / snapshot["fingerprint"]
                 manifest_path = artifact_root / "manifest.json"
                 if manifest_path.exists():
-                    manifest = json.loads(manifest_path.read_text())
+                    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
                     if manifest.get("config_hash") != snapshot["fingerprint"] or manifest.get("version") != 1:
                         raise ValueError()
                     for name, entry in manifest["artifacts"].items():

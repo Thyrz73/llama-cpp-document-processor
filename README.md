@@ -251,6 +251,7 @@ curl -i http://127.0.0.1:9932/api/health
 - **No usable text:** check whether OCR is enabled, language packs match the source, and the PDF is not password-protected.
 - **Killed during OCR:** check Docker memory usage and increase `PROCESSOR_MEMORY_LIMIT` carefully if the host has headroom.
 - **Unexpected output language:** select the report language explicitly and start a new analysis; browser language is independent.
+- **Garbled accents such as `Ã©` or `â…`:** update to the UTF-8 streaming correction and start a new analysis. Existing completed reports are preserved. See the [UTF-8 diagnosis, update and controlled recovery guide](docs/utf8-correction.md) before handling old reports.
 - **Empty reasoning panel:** the model/server did not emit separate reasoning; this is expected for many models.
 - **Live output unavailable:** check that llama.cpp supports `stream: true`, then inspect `docker compose logs`.
 

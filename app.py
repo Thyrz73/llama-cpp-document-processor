@@ -225,7 +225,7 @@ def read_system_prompt():
     """
     try:
         return SYSTEM_FILE.read_text(encoding="utf-8").strip()
-    except OSError:
+    except (OSError, UnicodeError):
         raise job_config.ConfigurationError("missing_prompt", "The system prompt is missing or unreadable.") from None
 
 
@@ -434,7 +434,11 @@ def ocr_page(page, number, settings=None):
         del png
     if process.returncode:
         raise ModelError("ocr_failed", f"OCR failed on page {number}. Check installed language packs.")
-    return normalize_extracted_text(process.stdout.decode("utf-8", errors="replace"))
+    try:
+        text = process.stdout.decode("utf-8")
+    except UnicodeDecodeError:
+        raise ModelError("invalid_ocr_encoding", "OCR returned text that is not valid UTF-8.") from None
+    return normalize_extracted_text(text)
 
 
 def extract_pdf(pdf_path, progress=None, settings=None):
@@ -738,8 +742,10 @@ def report(job_id):
         abort(404)
     if path.stat().st_size == 0:
         abort(409)
-    return send_file(path, mimetype="text/markdown", as_attachment=True,
-                     download_name="analysis_" + job_id[:8] + ".md")
+    response = send_file(path, mimetype="text/markdown", as_attachment=True,
+                         download_name="analysis_" + job_id[:8] + ".md")
+    response.headers["Content-Type"] = "text/markdown; charset=utf-8"
+    return response
 
 
 _capability_cache = {"value": None, "expires": 0}
@@ -830,7 +836,7 @@ def diagnostics():
             _capability_cache.update(value=value, expires=time.monotonic() + 30)
     process_rss_kib = None
     try:
-        matched = re.search(r"^VmRSS:\s+(\d+)", Path("/proc/self/status").read_text(), re.M)
+        matched = re.search(r"^VmRSS:\s+(\d+)", Path("/proc/self/status").read_text(encoding="utf-8"), re.M)
         if matched:
             process_rss_kib = int(matched[1])
     except OSError:

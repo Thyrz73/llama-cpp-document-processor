@@ -240,12 +240,15 @@ async function runPollingTests(template, translations={en:{},fr:{}}) {
  });
  await test('language and theme changes preserve the open Live text and scroll position',async()=>{
   const h=await settingsReady();h.click();await h.respond(3,{jobs:[job()]});h.api.toggleLive('a'.repeat(32));
-  await h.respond(4,{content:'Original model output',active:true});const panel=h.document.getElementById('live-'+'a'.repeat(32)),output=h.document.getElementById('live-content');output.scrollTop=17;
+  const text='L’assemblée générale a décidé de vérifier la présence des élèves à Grenoble. Résumé : température −2,5 °C, échantillon n° 3, précision ±0,2 %. English œ «quotes» µm ∑ 中文 العربية 😀';
+  // Parse the JSON wire representation before passing it to the browser logic.
+  await h.respond(4,JSON.parse(JSON.stringify({content:text,active:true})));const panel=h.document.getElementById('live-'+'a'.repeat(32)),output=h.document.getElementById('live-content');output.scrollTop=17;
+  assert(output.textContent===text,'JSON preview must retain every Unicode character');
   h.elements.uiLanguage.value='fr';h.elements.uiLanguage.handlers.change[0]();
   assert(h.document.documentElement.lang==='fr','HTML language must update');
-  assert(h.document.getElementById('live-'+'a'.repeat(32))===panel&&output.textContent==='Original model output'&&output.scrollTop===17,'Language change must preserve live content');
+  assert(h.document.getElementById('live-'+'a'.repeat(32))===panel&&output.textContent===text&&output.scrollTop===17,'Language change must preserve live content');
   h.elements.theme.value='dark';h.elements.theme.handlers.change[0]();assert(h.document.documentElement.dataset.theme==='dark','Theme must update');
-  assert(output.textContent==='Original model output','Theme must not alter model output');
+  assert(output.textContent===text,'Theme must not alter model output');
  });
  return results;
 }
