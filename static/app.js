@@ -82,6 +82,8 @@ const file = $("file"),
 let expandedId = null,
   liveTab = "content";
 const activeStatuses = new Set(["queued", "running"]);
+const cancellingJobs = new Set();
+const promptExpanded = new Set();
 let jobs = [],
   renderedJobs = null,
   hasActiveJobs = false,
@@ -372,9 +374,22 @@ function renderJobs() {
   const priorScroll = live ? $("live-content")?.scrollTop : null;
   host.replaceChildren();
   renderedJobs = signature;
-  if (!jobs.length) {
-    host.append(el("p", t("No analysis jobs yet.")));
-    return;
+  const groups = {};
+  for (const [key, heading, empty] of [
+    ["active", "Active analyses", "No analyses in progress."],
+    ["history", "Analysis history", "No analysis history yet."],
+  ]) {
+    const section = el("section", undefined, "job-group job-group-" + key);
+    const title = el("h3", t(heading));
+    title.id = "jobs-" + key + "-heading";
+    section.setAttribute("aria-labelledby", title.id);
+    section.append(title);
+    const list = el("div", undefined, "job-list");
+    section.append(list);
+    host.append(section);
+    groups[key] = list;
+    if (!jobs.some((job) => activeStatuses.has(job.status) === (key === "active")))
+      list.append(el("p", t(empty), "muted"));
   }
   for (const j of jobs) {
     const item = el("article", undefined, "item"),
@@ -422,14 +437,18 @@ function renderJobs() {
     item.append(el("div", pct + t("% of workflow completed"), "micro muted"));
     if (j.error) item.append(el("div", errorText(j, j.error), "error"));
     const actions = el("div", undefined, "actions");
-    if (j.status === "done") {
-      const link = el("a", t("Download Markdown report"));
-      link.href = `/api/jobs/${j.id}/report`;
-      link.download = `analysis_${j.id.slice(0, 8)}.md`;
-      link.addEventListener("click", (event) =>
-        downloadReport(event, link, j.id),
+    if (j.status === "done" && j.report_available !== false) {
+      item.append(
+        el("div", j.report_name || t("Markdown report"), "meta report-name"),
       );
-      actions.append(link);
+      const view = el("a", t("View"));
+      view.href = `/api/jobs/${j.id}/report/view?lang=${uiLanguage}`;
+      view.target = "_blank";
+      view.rel = "noopener noreferrer";
+      const link = el("a", t("Download"));
+      link.href = `/api/jobs/${j.id}/report`;
+      link.download = j.report_name || "";
+      actions.append(view, link);
     }
     if (["failed", "cancelled"].includes(j.status)) {
       const b = el("button", t("Retry"), "button-secondary");
@@ -440,10 +459,17 @@ function renderJobs() {
     if (activeStatuses.has(j.status)) {
       const cancel = el(
         "button",
-        t(j.cancel_requested ? "Cancellation requested" : "Cancel"),
-        "button-secondary",
+        t(
+          j.cancel_requested
+            ? "Cancellation requested"
+            : cancellingJobs.has(j.id)
+              ? "Requesting cancellation…"
+              : "Cancel",
+        ),
+        "button-danger",
       );
-      cancel.disabled = !!j.cancel_requested;
+      cancel.disabled = !!j.cancel_requested || cancellingJobs.has(j.id);
+      cancel.setAttribute("aria-busy", String(cancellingJobs.has(j.id)));
       cancel.type = "button";
       cancel.addEventListener("click", () => cancelJob(j.id));
       actions.append(cancel);
@@ -462,8 +488,30 @@ function renderJobs() {
     liveButton.addEventListener("click", () => toggleLive(j.id));
     actions.append(liveButton);
     item.append(actions);
+    // The saved request is the only user-configurable prompt; server prompts stay private.
+    if (
+      j.question && j.question_custom !== 0 &&
+      (j.question_custom === 1 || ![
+        catalog.en?.default_question, catalog.fr?.default_question,
+        "Analyze the entire document",
+      ].includes(j.question.trim()))
+    ) {
+      const details = el("details", undefined, "custom-prompt");
+      details.open = promptExpanded.has(j.id);
+      details.append(
+        el("summary", t(j.question_custom === 1
+          ? "Custom analysis instructions"
+          : "Saved analysis instructions")),
+      );
+      details.append(el("pre", j.question, "prompt-text"));
+      details.addEventListener("toggle", () => {
+        if (details.open) promptExpanded.add(j.id);
+        else promptExpanded.delete(j.id);
+      });
+      item.append(details);
+    }
     if (expandedId === j.id) item.append(live || createLive(j.id));
-    host.append(item);
+    groups[activeStatuses.has(j.status) ? "active" : "history"].append(item);
   }
   // Browsers may reset scrollTop when a preserved node is detached and reattached.
   if (priorScroll != null && $("live-content"))
@@ -669,16 +717,35 @@ async function inspectBackend() {
 }
 // Cancellation is cooperative; closing the browser itself does not cancel a job.
 async function cancelJob(id) {
+  const current = jobs.find((job) => job.id === id);
+  if (
+    !current || !activeStatuses.has(current.status) ||
+    current.cancel_requested || cancellingJobs.has(id)
+  ) return;
+  cancellingJobs.add(id);
+  renderJobsForCancellation();
   try {
     const response = await jsonFetch(`/api/jobs/${id}/cancel`, {
       method: "POST",
     });
     const data = await response.json();
     if (!response.ok) throw Error(errorText(data, "Cancellation failed"));
+    const job = jobs.find((job) => job.id === id);
+    if (job) {
+      job.cancel_requested = !!data.cancel_requested;
+      job.status = data.status;
+    }
     await refresh(true);
   } catch (error) {
     feedback.textContent = error.message;
+  } finally {
+    cancellingJobs.delete(id);
+    renderJobsForCancellation();
   }
+}
+function renderJobsForCancellation() {
+  renderedJobs = null;
+  renderJobs();
 }
 // Fetch bounded metrics on demand, outside the frequent progress polling loop.
 async function showMetrics(id, item) {
@@ -747,54 +814,6 @@ async function showMetrics(id, item) {
       );
   } catch (error) {
     output.textContent = error.message;
-  }
-}
-// Retain the stable download URL while giving actionable HTTP/network feedback.
-async function downloadReport(event, link, id) {
-  event.preventDefault();
-  if (link.dataset.downloading) return;
-  link.dataset.downloading = "true";
-  link.textContent = t("Downloading…");
-  const controller = new AbortController();
-  let timer;
-  try {
-    const blob = await Promise.race([
-      (async () => {
-        const response = await fetch(`/api/jobs/${id}/report`, {
-          signal: controller.signal,
-        });
-        if (!response.ok)
-          throw Error(
-            t(
-              response.status === 404
-                ? "Report not found."
-                : "Report unavailable.",
-            ),
-          );
-        return response.blob();
-      })(),
-      new Promise((_, reject) => {
-        timer = setTimeout(() => {
-          controller.abort();
-          reject(Error(t("Request timed out.")));
-        }, 30000);
-      }),
-    ]);
-    const url = URL.createObjectURL(blob),
-      anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = link.download;
-    document.body.append(anchor);
-    anchor.click();
-    anchor.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-    link.textContent = t("Download Markdown report");
-  } catch (error) {
-    link.textContent = t("Download failed. Try again.");
-    feedback.textContent = error.message;
-  } finally {
-    clearTimeout(timer);
-    delete link.dataset.downloading;
   }
 }
 if ($("uiLanguage"))

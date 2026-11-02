@@ -30,13 +30,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from document_processor import config as job_config, jobs as job_store, profiles, prompts, pipeline
+from document_processor import reports
+from document_processor.observability import configure_logging, event, failure
 from document_processor.model_client import ModelClient as BackendClient, ThinkingSplitter, ModelError, Cancelled
-from flask import Flask, abort, jsonify, render_template, request, send_file, g
+from flask import Flask, abort, jsonify, render_template, request, send_file, g, make_response
 from urllib.parse import urlsplit
 from pypdf import PdfReader
 import pymupdf
 from waitress import serve
-from werkzeug.exceptions import RequestEntityTooLarge
+from werkzeug.exceptions import Conflict, NotFound, RequestEntityTooLarge
 
 # Read the configuration once when the process starts.
 # Docker Compose passes variables from its .env file to the container.
@@ -65,11 +67,21 @@ MIN_USABLE_CHARS = 35
 DB_PATH = DATA / "jobs.sqlite3"
 SYSTEM_FILE = Path(os.getenv("SYSTEM_PROMPT_FILE", "/app/config/system_prompt.txt"))
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+configure_logging()
 log = logging.getLogger("document-processor")
-app = Flask(__name__)
+
+
+class ProcessorFlask(Flask):
+    def log_exception(self, exc_info):
+        """Prevent Flask's default traceback logger from leaking exception bodies."""
+        failure("request_failed", exc_info[1], endpoint=request.endpoint)
+
+
+app = ProcessorFlask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_MB * 1024 * 1024 + 65536
 worker_wakeup = threading.Event()
+TRANSLATIONS = json.loads((Path(__file__).parent / "static" / "translations.json").read_text(encoding="utf-8"))
+DEFAULT_QUESTIONS = {TRANSLATIONS[language]["default_question"] for language in ("en", "fr")} | {"Analyze the entire document"}
 
 
 def utcnow():
@@ -105,7 +117,9 @@ def init_db():
     starting the worker.
     """
     DATA.mkdir(parents=True, exist_ok=True)
+    event("workspace_ready", status="available")
     with db_conn() as con:
+        event("sqlite_initializing", status="connected")
         con.execute("PRAGMA journal_mode=WAL")
         con.execute("""CREATE TABLE IF NOT EXISTS jobs (
           id TEXT PRIMARY KEY, filename TEXT NOT NULL, question TEXT NOT NULL,
@@ -117,9 +131,14 @@ def init_db():
         columns = {r["name"] for r in con.execute("PRAGMA table_info(jobs)")}
         if "progress_percent" not in columns:
             con.execute("ALTER TABLE jobs ADD COLUMN progress_percent INTEGER NOT NULL DEFAULT 0")
+            event("sqlite_migration", column="progress_percent", status="applied")
         job_store.migrate(con)
+        interrupted = con.execute("SELECT id,cancel_requested FROM jobs WHERE status='running' OR (status='queued' AND cancel_requested=1)").fetchall()
         con.execute("UPDATE jobs SET status='cancelled', stage='Cancelled', phase_code='cancelled' WHERE cancel_requested=1 AND status IN ('queued','running')")
         con.execute("UPDATE jobs SET status='queued', stage='Resuming after restart', queued_at=? WHERE status='running'", (utcnow(),))
+        for row in interrupted:
+            event("job_recovered", job_id=row["id"], status="cancelled" if row["cancel_requested"] else "queued")
+    event("sqlite_ready", status="initialized")
 
 
 def update_job(job_id, **values):
@@ -135,7 +154,7 @@ def update_job(job_id, **values):
     if values.get("status") == "done":
         values["progress_percent"] = 100
     allowed = {"status", "stage", "pages", "total_chunks", "done_chunks", "error", "progress_percent",
-               "phase_code", "phase_args", "error_code", "cancel_requested", "queued_at"}
+               "phase_code", "phase_args", "error_code", "cancel_requested", "queued_at", "report_name"}
     if set(values) - allowed:
         raise ValueError("Unsupported job update field")
     values["updated_at"] = utcnow()
@@ -147,6 +166,11 @@ def update_job(job_id, **values):
             if row and row["cancel_requested"]:
                 raise Cancelled()
         con.execute(f"UPDATE jobs SET {parts} WHERE id=?", [*values.values(), job_id])
+    if "status" in values:
+        event("job_state", job_id=job_id, status=values["status"], stage=values.get("phase_code"))
+    elif "progress_percent" in values:
+        event("job_progress", job_id=job_id, stage=values.get("phase_code"),
+              progress_percent=values["progress_percent"])
 
 
 def serialize_job(row):
@@ -158,12 +182,15 @@ def serialize_job(row):
     """
     public = {"id", "filename", "question", "status", "stage", "pages", "total_chunks", "done_chunks",
               "error", "created_at", "updated_at", "progress_percent", "phase_code", "phase_args",
-              "error_code", "cancel_requested", "queued_at", "has_active_jobs"}
+              "error_code", "cancel_requested", "queued_at", "has_active_jobs", "report_name", "question_custom"}
     job = {key: row[key] for key in row.keys() if key in public}
     job["phase_args"] = json.loads(job.get("phase_args") or "{}")
     # The migration also initialized older completed jobs to 0 percent.
     if job["status"] == "done":
         job["progress_percent"] = 100
+        directory = job_dir(job["id"])
+        path = directory / "rapport_final.md"
+        job["report_available"] = not path.is_symlink() and path.is_file() and path.resolve().parent == directory.resolve()
     return job
 
 
@@ -189,8 +216,14 @@ def job_dir(job_id):
     """
     # IDs are generated by the application, never from the PDF filename.
     if not re.fullmatch(r"[0-9a-f]{32}", job_id):
+        event("invalid_job_id", logging.WARNING, status="rejected")
         abort(404)
-    return DATA / "jobs" / job_id
+    directory = DATA / "jobs" / job_id
+    # Also reject symlinked job roots, not only traversal in the ID.
+    if directory.resolve() != DATA.resolve() / "jobs" / job_id:
+        event("invalid_job_path", logging.WARNING, job_id=job_id, status="rejected")
+        abort(404)
+    return directory
 
 
 def atomic_text(path, text):
@@ -203,8 +236,13 @@ def atomic_text(path, text):
     """
     path = Path(path)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError as exc:
+        event("artifact_write_failed", logging.ERROR, artifact=path.name,
+              job_id=getattr(threading.current_thread(), "job_id", None), error_type=type(exc).__name__)
+        raise
 
 
 def atomic_json(path, data):
@@ -412,6 +450,9 @@ def ocr_page(page, number, settings=None):
     settings = settings or runtime_defaults()["extraction"]
     if not settings["enabled"]:
         return ""
+    started = time.monotonic()
+    job_id = getattr(threading.current_thread(), "job_id", None)
+    event("ocr_started", job_id=job_id, page=number)
     # Reduce the render before allocation to limit memory use.
     pixels_at_dpi = (page.rect.width * settings["dpi"] / 72) * (page.rect.height * settings["dpi"] / 72)
     scale = min(1.0, math.sqrt(settings["max_pixels"] / max(1.0, pixels_at_dpi)))
@@ -430,17 +471,23 @@ def ocr_page(page, number, settings=None):
             timeout=settings["timeout"], check=False,
         )
     except FileNotFoundError as exc:
+        event("ocr_failed", logging.ERROR, job_id=job_id, page=number, error_code="ocr_missing")
         raise RuntimeError("Tesseract is missing from the container; rebuild the Docker image") from exc
     except subprocess.TimeoutExpired as exc:
+        event("ocr_failed", logging.ERROR, job_id=job_id, page=number, error_code="ocr_timeout")
         raise ModelError("ocr_timeout", f"OCR timed out on page {number}.") from None
     finally:
         del png
     if process.returncode:
+        event("ocr_failed", logging.ERROR, job_id=job_id, page=number, error_code="ocr_failed")
         raise ModelError("ocr_failed", f"OCR failed on page {number}. Check installed language packs.")
     try:
         text = process.stdout.decode("utf-8")
     except UnicodeDecodeError:
+        event("ocr_failed", logging.ERROR, job_id=job_id, page=number, error_code="invalid_ocr_encoding")
         raise ModelError("invalid_ocr_encoding", "OCR returned text that is not valid UTF-8.") from None
+    event("ocr_finished", job_id=job_id, page=number,
+          duration_ms=round((time.monotonic() - started) * 1000, 1), characters=len(text))
     return normalize_extracted_text(text)
 
 
@@ -479,7 +526,8 @@ def extract_pdf(pdf_path, progress=None, settings=None):
             try:
                 text = normalize_extracted_text(page.get_text("text", sort=True))
             except Exception as exc:
-                log.warning("extraction_fallback page=%d reader=pymupdf", number)
+                event("extraction_fallback", logging.WARNING, page=number, reader="pymupdf",
+                      job_id=getattr(threading.current_thread(), "job_id", None))
                 text = ""
             if not text_is_usable(text):
                 # Try another reader for unusual or incorrectly encoded fonts.
@@ -490,7 +538,8 @@ def extract_pdf(pdf_path, progress=None, settings=None):
                     if text_is_usable(alternate) or len(alternate) > len(text):
                         text = alternate
                 except Exception as exc:
-                    log.warning("extraction_fallback page=%d reader=pypdf", number)
+                    event("extraction_fallback", logging.WARNING, page=number, reader="pypdf",
+                          job_id=getattr(threading.current_thread(), "job_id", None))
             if not text_is_usable(text) and settings["enabled"]:
                 if progress:
                     progress(f"OCR recognition: page {number}/{count}")
@@ -505,9 +554,11 @@ def extract_pdf(pdf_path, progress=None, settings=None):
             # Drop the page reference before moving to the next page.
             del page
         if not any(text_is_usable(p["text"]) for p in pages):
+            event("extraction_empty", logging.WARNING, job_id=getattr(threading.current_thread(), "job_id", None), pages=count)
             detail = "even after OCR" if settings["enabled"] else "(OCR disabled)"
             raise ValueError(f"No usable text found in this PDF {detail}. Check the source PDF.")
-        log.info("PDF extraction: %d pages, OCR pages=%s, insufficient pages=%s", count, ocr_pages, missing)
+        event("extraction_summary", job_id=getattr(threading.current_thread(), "job_id", None), pages=count,
+              ocr_pages=len(ocr_pages), insufficient_pages=len(missing), characters=sum(len(p["text"]) for p in pages))
         return pages, count, missing, ocr_pages
 
 
@@ -541,19 +592,23 @@ def worker_loop():
                     con.execute("UPDATE jobs SET status='running', stage='Starting', updated_at=? WHERE id=?", (utcnow(), row["id"]))
             if row:
                 job_id = row["id"]
+                threading.current_thread().job_id = job_id
+                event("job_state", job_id=job_id, status="running", stage="starting")
                 try:
                     analyze_job(job_id)
                 except Cancelled:
                     update_job(job_id, status="cancelled", stage="Cancelled", phase_code="cancelled", error="", error_code="cancelled")
                 except Exception as exc:
                     code = getattr(exc, "code", "analysis_failed")
-                    log.error("job_failed job_id=%s code=%s type=%s", job_id, code, type(exc).__name__)
+                    failure("job_failed", exc, job_id=job_id)
                     message = str(exc) if isinstance(exc, (ModelError, job_config.ConfigurationError)) else "Analysis failed. Check the PDF, configuration and local diagnostics."
                     update_job(job_id, status="failed", stage="Error", phase_code="failed", error_code=code, error=message)
                     # Keep the last preview to help diagnose the error.
+                finally:
+                    threading.current_thread().job_id = None
                 continue
-        except Exception:
-            log.error("worker_database_error")
+        except Exception as exc:
+            failure("worker_database_error", exc)
         worker_wakeup.wait(timeout=6)
         worker_wakeup.clear()
 
@@ -564,14 +619,14 @@ def too_large(_):
 
     The _ parameter is Flask's exception and is unused here.
     """
+    event("upload_rejected", logging.WARNING, error_code="upload_limit")
     return jsonify(error=f"PDF too large (limit: {MAX_UPLOAD_MB} MiB)", error_code="upload_limit"), 413
 
 
 @app.get("/")
 def index():
     """Serve the HTML page and its PDF size limit."""
-    translations = json.loads((Path(__file__).parent / "static" / "translations.json").read_text(encoding="utf-8"))
-    return render_template("index.html", limit=MAX_UPLOAD_MB, translations=translations)
+    return render_template("index.html", limit=MAX_UPLOAD_MB, translations=TRANSLATIONS)
 
 
 @app.get("/api/health")
@@ -629,10 +684,10 @@ def create_job():
     options = job_config.parse_options(request.form.get("options"))
     config = new_snapshot(options, cached_capabilities())
     uploaded = request.files.get("file")
-    question = (request.form.get("question") or "Analyze the entire document").strip()
+    question = request.form.get("question") or "Analyze the entire document"
     if not uploaded or not uploaded.filename:
         return jsonify(error="Select a PDF file", error_code="invalid_pdf"), 400
-    if not question or len(question) > MAX_QUESTION_CHARS:
+    if not question.strip() or len(question) > MAX_QUESTION_CHARS:
         return jsonify(error=f"Instructions required (maximum {MAX_QUESTION_CHARS} characters)", error_code="invalid_question"), 400
     filename = uploaded.filename.replace("\\", "/").split("/")[-1][:120]
     if not filename.lower().endswith(".pdf"):
@@ -649,8 +704,9 @@ def create_job():
             raise RequestEntityTooLarge()
         config["source_hash"] = job_store.file_hash(directory / "source.pdf")
         with db_conn() as con:
-            con.execute("""INSERT INTO jobs (id, filename, question, status, stage, created_at, updated_at)
-              VALUES (?, ?, ?, 'queued', 'Queued', ?, ?)""", (job_id, filename, question, utcnow(), utcnow()))
+            con.execute("""INSERT INTO jobs (id, filename, question, status, stage, created_at, updated_at, question_custom)
+              VALUES (?, ?, ?, 'queued', 'Queued', ?, ?, ?)""",
+                        (job_id, filename, question, utcnow(), utcnow(), int(question.strip() not in DEFAULT_QUESTIONS)))
             con.execute("UPDATE jobs SET queued_at=? WHERE id=?", (utcnow(), job_id))
             job_store.save_config(con, job_id, config)
     except Exception:
@@ -658,6 +714,11 @@ def create_job():
         directory.rmdir()
         raise
     worker_wakeup.set()
+    event("job_created", job_id=job_id, filename=filename, bytes=(directory / "source.pdf").stat().st_size,
+          profile=config["profile"], custom_prompt=question.strip() not in DEFAULT_QUESTIONS,
+          chunk_tokens=config["chunk_tokens"], analysis_tokens=config["analysis_tokens"],
+          merge_tokens=config["merge_tokens"], final_tokens=config["final_tokens"],
+          report_language=config["report_language"])
     return jsonify(id=job_id, status="queued", configuration=job_config.public_config(config)), 201
 
 
@@ -723,31 +784,84 @@ def retry_job(job_id):
         return jsonify(error="Only failed or cancelled jobs can be retried", error_code="retry_conflict"), 409
     worker_wakeup.set()
     legacy = job_store.load_config(db_conn, job_id) is None
+    event("job_retry", job_id=job_id, attempt=attempts + 1, status="queued", legacy=legacy)
     return jsonify(status="queued", warnings=["legacy_recomputed"] if legacy else [])
 
 
 
 @app.get("/api/jobs/<job_id>/report")
 def report(job_id):
-    """Send the completed report as a UTF-8 Markdown attachment.
+    """Stream the original Markdown with a descriptive attachment filename."""
+    try:
+        job, path = resolve_report(job_id)
+        name = ensure_report_name(job, path)
+        response = send_file(path, mimetype="text/markdown", as_attachment=True, download_name=name)
+    except OSError:
+        event("report_missing", logging.WARNING, job_id=job_id, status="unavailable")
+        abort(404)
+    event("report_download", job_id=job_id, filename=name, bytes=response.content_length)
+    # Names are portable ASCII; include the RFC 5987 form for UTF-8-aware clients too.
+    response.headers["Content-Disposition"] += "; filename*=UTF-8''" + name
+    response.headers["Content-Type"] = "text/markdown; charset=utf-8"
+    return response
 
-    job_id determines rapport_final.md and the download name
-    ``analysis_<first 8 characters>.md``. Return HTTP 404 when the job or
-    file is missing, and 409 when the job is not in ``done`` state.
-    """
+
+def resolve_report(job_id):
+    """Authorize the only publicly available artifact; never accept a filename."""
+    directory = job_dir(job_id)
     job = get_job(job_id)
     if not job:
         abort(404)
     if job["status"] != "done":
         abort(409)
-    path = job_dir(job_id) / "rapport_final.md"
-    if not path.is_file() or path.resolve().parent != job_dir(job_id).resolve():
+    path = directory / "rapport_final.md"
+    if path.is_symlink() or not path.is_file() or path.resolve().parent != directory.resolve():
+        event("report_missing", logging.WARNING, job_id=job_id, status="unavailable")
         abort(404)
-    if path.stat().st_size == 0:
-        abort(409)
-    response = send_file(path, mimetype="text/markdown", as_attachment=True,
-                         download_name="analysis_" + job_id[:8] + ".md")
-    response.headers["Content-Type"] = "text/markdown; charset=utf-8"
+    return job, path
+
+
+def ensure_report_name(job, path):
+    """Calculate old report names lazily, without loading a whole file or history."""
+    if job.get("report_name"):
+        return job["report_name"]
+    with path.open(encoding="utf-8", errors="replace") as stream:
+        name = reports.report_filename(stream.read(reports.TITLE_SCAN_CHARS), job["filename"])
+    with db_conn() as con:
+        con.execute("UPDATE jobs SET report_name=? WHERE id=? AND report_name IS NULL", (name, job["id"]))
+    return name
+
+
+@app.get("/api/jobs/<job_id>/report/view")
+def view_report(job_id):
+    """Render bounded Markdown on the server; viewing never schedules model work."""
+    language = request.args.get("lang", "en")
+    if language not in ("en", "fr"):
+        language = "en"
+    translate = lambda key: TRANSLATIONS[language].get(key, key)
+    try:
+        job, path = resolve_report(job_id)
+        name = ensure_report_name(job, path)
+        # Bounded read also handles a file growing between stat and read.
+        with path.open("rb") as stream:
+            content = stream.read(reports.PREVIEW_MAX_BYTES + 1)
+        if len(content) > reports.PREVIEW_MAX_BYTES:
+            html, message, status = "", "Preview is limited to 1 MiB. Download the original Markdown.", 413
+        else:
+            html = reports.render_markdown(content.decode("utf-8")) if content.strip() else ""
+            message, status = ("" if html else "No content is available."), 200
+    except (OSError, UnicodeError):
+        event("report_unreadable", logging.WARNING, job_id=job_id)
+        name, html, message, status = translate("Markdown report"), "", "Report not found or unreadable.", 404
+    except (NotFound, Conflict) as exc:
+        name, html, message, status = translate("Markdown report"), "", "Report not found or not ready.", exc.code
+    event("report_view", job_id=job_id, status=status)
+    response = make_response(render_template("report.html", report_name=name, content=html, message=message,
+        job_id=job_id, available=status in (200, 413), language=language, t=translate), status)
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'none'; style-src 'self'; script-src 'self'; img-src 'none'; "
+        "connect-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+    response.headers["Referrer-Policy"] = "no-referrer"
     return response
 
 
@@ -778,15 +892,18 @@ def finish_request(response):
     if request.path.startswith("/api/"):
         response.headers["Cache-Control"] = "no-store"
         response.headers["X-Content-Type-Options"] = "nosniff"
-    if request.path.endswith("/report"):
-        log.info("report_response status=%d duration_ms=%.1f bytes=%s", response.status_code,
-                 (time.monotonic() - g.started) * 1000, response.content_length)
+    if request.endpoint in ("report", "view_report"):
+        event("report_response", job_id=(request.view_args or {}).get("job_id"), status=response.status_code,
+              duration_ms=round((time.monotonic() - g.started) * 1000, 1), bytes=response.content_length)
+    if response.status_code >= 400 and request.method == "POST":
+        event("request_rejected", logging.WARNING, endpoint=request.endpoint, status=response.status_code)
     return response
 
 
 @app.errorhandler(job_config.ConfigurationError)
 def invalid_configuration(exc):
     """Return stable validation codes for translated browser errors."""
+    event("configuration_rejected", logging.WARNING, error_code=exc.code)
     return jsonify(error=str(exc), error_code=exc.code), 400
 
 
@@ -834,6 +951,7 @@ def diagnostics():
             client = BackendClient(LLAMA_BASE, KEY, runtime_defaults(), "")
             try:
                 value = client.inspect()
+                event("backend_checked", status=value.get("status", "unknown"), source="diagnostics")
             finally:
                 client.session.close()
             _capability_cache.update(value=value, expires=time.monotonic() + 30)
@@ -869,22 +987,26 @@ def cancel_job(job_id):
     """Request cancellation idempotently; active OCR stops at its next safe boundary."""
     with db_conn() as con:
         con.execute("BEGIN IMMEDIATE")
-        row = con.execute("SELECT status FROM jobs WHERE id=?", (job_id,)).fetchone()
+        row = con.execute("SELECT status,cancel_requested FROM jobs WHERE id=?", (job_id,)).fetchone()
         if row is None:
             abort(404)
         if row["status"] == "cancelled":
             return jsonify(status="cancelled"), 200
         if row["status"] not in ("queued", "running"):
             return jsonify(error="This job cannot be cancelled.", error_code="cancel_conflict"), 409
+        if row["cancel_requested"]:
+            return jsonify(status=row["status"], cancel_requested=True), 202
         queued = row["status"] == "queued"
         con.execute("UPDATE jobs SET cancel_requested=1, status=?, phase_code=?, stage=?, updated_at=? WHERE id=?",
                     ("cancelled" if queued else "running", "cancelled" if queued else "cancelling",
                      "Cancelled" if queued else "Cancellation requested", utcnow(), job_id))
     worker_wakeup.set()
+    event("job_cancel_requested", job_id=job_id, status="cancelled" if queued else "cancelling")
     return jsonify(status="cancelled" if queued else "running", cancel_requested=True), 202
 
 
 if __name__ == "__main__":
+    event("processor_initializing", status="starting")
     job_config.resolve(runtime_defaults())
     init_db()
     threading.Thread(target=worker_loop, name="pdf-worker", daemon=True).start()

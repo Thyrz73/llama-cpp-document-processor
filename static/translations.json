@@ -197,7 +197,23 @@
     "error.invalid_adapter": "Invalid administrator reasoning adapter.",
     "Waiting for model output…": "Waiting for model output…",
     "default_question": "Analyze this entire document: objectives, methods, results, key figures, assumptions, limitations, and conclusions. Cite relevant pages and flag anything that cannot be verified.",
-    "Workflow progress": "Workflow progress"
+    "Workflow progress": "Workflow progress",
+    "Active analyses": "Active analyses",
+    "Analysis history": "Analysis history",
+    "No analyses in progress.": "No analyses in progress.",
+    "No analysis history yet.": "No analysis history yet.",
+    "View": "View",
+    "Download": "Download",
+    "Markdown report": "Markdown report",
+    "Custom analysis instructions": "Custom analysis instructions",
+    "Saved analysis instructions": "Saved analysis instructions",
+    "Requesting cancellation…": "Requesting cancellation…",
+    "Report actions": "Report actions",
+    "Back to analyses": "Back to analyses",
+    "Preview is limited to 1 MiB. Download the original Markdown.": "Preview is limited to 1 MiB. Download the original Markdown.",
+    "No content is available.": "No content is available.",
+    "Report not found or unreadable.": "Report not found or unreadable.",
+    "Report not found or not ready.": "Report not found or not ready."
   },
   "fr": {
     "Language": "Langue",
@@ -397,6 +413,22 @@
     "error.invalid_adapter": "Adaptateur de raisonnement administrateur invalide.",
     "Waiting for model output…": "En attente de la sortie du modèle…",
     "default_question": "Analysez ce document dans son ensemble : objectifs, méthodes, résultats, chiffres clés, hypothèses, limites et conclusions. Citez les pages pertinentes et signalez ce qui ne peut pas être vérifié.",
-    "Workflow progress": "Progression des étapes"
+    "Workflow progress": "Progression des étapes",
+    "Active analyses": "Analyses en cours",
+    "Analysis history": "Historique des analyses",
+    "No analyses in progress.": "Aucune analyse en cours.",
+    "No analysis history yet.": "Aucun historique pour le moment.",
+    "View": "Consulter",
+    "Download": "Télécharger",
+    "Markdown report": "Rapport Markdown",
+    "Custom analysis instructions": "Instructions d’analyse personnalisées",
+    "Saved analysis instructions": "Instructions d’analyse enregistrées",
+    "Requesting cancellation…": "Demande d’annulation…",
+    "Report actions": "Actions du rapport",
+    "Back to analyses": "Retour aux analyses",
+    "Preview is limited to 1 MiB. Download the original Markdown.": "L’aperçu est limité à 1 Mio. Téléchargez le Markdown original.",
+    "No content is available.": "Aucun contenu disponible.",
+    "Report not found or unreadable.": "Rapport introuvable ou illisible.",
+    "Report not found or not ready.": "Rapport introuvable ou pas encore disponible."
   }
 }

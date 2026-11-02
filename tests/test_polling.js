@@ -11,6 +11,7 @@ async function runPollingTests(template, translations={en:{},fr:{}}) {
  const flush=async()=>{for(let i=0;i<20;i++)await Promise.resolve()};
  // Build a reproducible job with a status, progress, and ID.
  const job=(status='running',progress=52,id='a'.repeat(32))=>({id,status,progress_percent:progress,filename:'example.pdf',created_at:'2026-10-31T12:00:00Z'});
+ const descendants=node=>node.children.flatMap(child=>[child,...descendants(child)]);
  // Create a fresh environment with controlled DOM, requests, and timers.
  // These tests start neither a real browser nor an HTTP server.
  function setup(withSettings=false) {
@@ -57,7 +58,7 @@ async function runPollingTests(template, translations={en:{},fr:{}}) {
   const requests=[];
   // Keep each request pending until the scenario resolves it.
   const fetch=(url,options)=>new Promise((resolve,reject)=>requests.push({url,options,resolve,reject}));
-  const api=new Function('document','localStorage','matchMedia','fetch','setTimeout','clearTimeout','setInterval','FormData','alert',source+'\nreturn {refresh,toggleLive,loadLive,retry,selectedOptions,previewConfig,schedulePreview};')(
+  const api=new Function('document','localStorage','matchMedia','fetch','setTimeout','clearTimeout','setInterval','FormData','alert',source+'\nreturn {refresh,toggleLive,loadLive,retry,cancelJob,selectedOptions,previewConfig,schedulePreview};')(
    document,{getItem(){return null},setItem(){}},()=>({matches:false,addEventListener(){}}),fetch,
    (fn,delay)=>timer(fn,delay,false),id=>timers.delete(id),(fn,delay)=>timer(fn,delay,true),class {constructor(){this.values=new Map()}set(k,v){this.values.set(k,v)}get(k){return this.values.get(k)}},message=>{throw Error(message)});
   // Resolve request index with payload, then run its asynchronous continuations.
@@ -72,7 +73,7 @@ async function runPollingTests(template, translations={en:{},fr:{}}) {
   const click=()=>elements.refresh.handlers.click[0]({type:'click'});
   // Simulate form submission and return its processing promise.
   const upload=()=>elements.uploadForm.handlers.submit[0]({preventDefault(){},target:elements.uploadForm});
-  return {api,elements,document,requests,respond,polls,tick,visible,click,upload};
+  return {api,elements,document,requests,respond,polls,tick,visible,click,upload,article:()=>elements.jobs.children.flatMap(section=>section.children.flatMap(node=>node.children)).find(node=>node.tag==='article')};
  }
  const results=[];
  // Run scenario fn and record its name only after it succeeds.
@@ -98,10 +99,10 @@ async function runPollingTests(template, translations={en:{},fr:{}}) {
   const h=setup(),jobs=[job('done',100)];
   await h.respond(0,{jobs,has_active_jobs:true});
   assert(h.polls().length===1,'An older active job still needs polling');
-  const article=h.elements.jobs.children[0];
+  const article=h.article();
   await h.tick(6000);await h.respond(1,{jobs,has_active_jobs:false});
   assert(h.polls().length===0,'Stop once all jobs are terminal');
-  assert(h.elements.jobs.children[0]===article,'Metadata-only changes must not rebuild cards');
+  assert(h.article()===article,'Metadata-only changes must not rebuild cards');
  });
  await test('manual and timer refreshes share an in-flight request and a single timer',async()=>{
   const h=setup();const pending=h.api.refresh();assert(h.api.refresh()===pending,'Requests must share a promise');h.click();
@@ -112,14 +113,71 @@ async function runPollingTests(template, translations={en:{},fr:{}}) {
  });
  await test('unchanged data preserves DOM and completed report attributes',async()=>{
   const h=setup();const jobs=[job('done',100)];await h.respond(0,{jobs});
-  const article=h.elements.jobs.children[0],replacements=h.elements.jobs.replacements;
+  const article=h.article(),replacements=h.elements.jobs.replacements;
   h.click();await h.respond(1,{jobs});
   assert(h.elements.jobs.replacements===replacements,'Unchanged data must not rebuild DOM');
-  assert(h.elements.jobs.children[0]===article,'Preserve article identity');
+  assert(h.article()===article,'Preserve article identity');
   const track=article.children.find(c=>c.attributes.role==='progressbar');
   assert(track.attributes['aria-valuenow']==='100'&&track.children[0].style.width==='100%','Completed progress');
-  const link=article.children.find(c=>c.className==='actions').children.find(c=>c.tag==='a');
-  assert(link.href===`/api/jobs/${jobs[0].id}/report`&&link.download==='analysis_aaaaaaaa.md','Native report download');
+  const link=article.children.find(c=>c.className==='actions').children.find(c=>c.tag==='a'&&c.download!==undefined);
+  assert(link.href===`/api/jobs/${jobs[0].id}/report`&&link.download==='','Native report download');
+  const view=article.children.find(c=>c.className==='actions').children.find(c=>c.tag==='a'&&c.target==='_blank');
+  assert(view.href===`/api/jobs/${jobs[0].id}/report/view?lang=en`&&view.rel.includes('noopener'),'Secure separate preview link');
+ });
+ await test('active and history groups show empty states and move completed analyses',async()=>{
+  const h=setup();await h.respond(0,{jobs:[]});
+  const groups=h.elements.jobs.children;
+  assert(groups[0].className==='job-group job-group-active'&&groups[1].className==='job-group job-group-history','Active group precedes distinct history');
+  assert(groups[0].children[1].children[0].textContent==='No analyses in progress.','Empty active state');
+  assert(groups[1].children[1].children[0].textContent==='No analysis history yet.','Empty history state');
+  h.click();await h.respond(1,{jobs:[job('done'),job('running',25,'b'.repeat(32)),job('queued',0,'c'.repeat(32))]});
+  assert(h.elements.jobs.children[0].children[1].children.length===2,'Both active analyses shown first');
+  assert(h.elements.jobs.children[1].children[1].children.length===1,'Completed analysis in history');
+  h.click();await h.respond(2,{jobs:[job('done'),job('done',100,'b'.repeat(32)),job('queued',0,'c'.repeat(32))]});
+  assert(h.elements.jobs.children[1].children[1].children.length===2,'A finished analysis moves into history');
+ });
+ await test('saved prompt text is collapsible, literal and present for active and historical jobs',async()=>{
+  for(const status of ['running','done']){
+   const h=setup(),request={...job(status),question:'Private <script>alert(1)</script>\nDeuxième ligne',question_custom:1,report_name:'Subject_rapport.md'};
+   await h.respond(0,{jobs:[request]});
+   const details=descendants(h.elements.jobs).find(node=>node.className==='custom-prompt');
+   assert(details.tag==='details'&&!details.open,'Prompt starts collapsed');
+   assert(details.children[1].textContent===request.question&&details.children[1].children.length===0,'Prompt rendered as literal text');
+   details.open=true;details.handlers.toggle[0]();
+   h.click();await h.respond(1,{jobs:[{...request,progress_percent:70}]});
+   assert(descendants(h.elements.jobs).find(node=>node.className==='custom-prompt').open,'Keep prompt expanded during progress updates');
+   if(status==='done'){
+    const download=descendants(h.elements.jobs).find(node=>node.download!==undefined);
+    assert(download.download===request.report_name,'Displayed filename matches native download');
+   }
+  }
+  for(const question_custom of [0,null]){
+   const h=setup();await h.respond(0,{jobs:[{...job('done'),question:question_custom===0?'Default instructions':null,question_custom}]});
+   assert(!descendants(h.elements.jobs).some(node=>node.className==='custom-prompt'),'No empty or default prompt blocks');
+  }
+ });
+ await test('cancellation disables duplicate clicks and awaits backend confirmation',async()=>{
+  const h=setup();await h.respond(0,{jobs:[job()]});
+  const pending=h.api.cancelJob('a'.repeat(32));h.api.cancelJob('a'.repeat(32));
+  const cancel=descendants(h.elements.jobs).find(node=>node.className==='button-danger');
+  assert(cancel.disabled&&cancel.attributes['aria-busy']==='true','Pending cancellation is disabled and accessible');
+  assert(cancel.textContent==='Requesting cancellation…','Do not claim cancellation before confirmation');
+  assert(h.requests.filter(request=>request.options?.method==='POST').length===1,'Only one cancellation request');
+  await h.respond(1,{status:'running',cancel_requested:true});
+  await h.respond(2,{jobs:[{...job(),cancel_requested:1}]});await pending;
+  const requested=descendants(h.elements.jobs).find(node=>node.className==='button-danger');
+  assert(requested.disabled&&requested.textContent==='Cancellation requested','Running work remains pending after backend acknowledgment');
+  h.api.cancelJob('a'.repeat(32));assert(h.requests.length===3,'Confirmed requests cannot be repeated');
+  h.click();await h.respond(3,{jobs:[job('cancelled')]});
+  assert(!descendants(h.elements.jobs).some(node=>node.className==='button-danger'),'Final jobs have no cancel action');
+  h.api.cancelJob('a'.repeat(32));assert(h.requests.length===4,'Final jobs cannot be cancelled');
+ });
+ await test('failed cancellation restores the control without changing job status',async()=>{
+  const h=setup();await h.respond(0,{jobs:[job()]});
+  const pending=h.api.cancelJob('a'.repeat(32));h.requests[1].reject(Error('Offline'));await pending;
+  const cancel=descendants(h.elements.jobs).find(node=>node.className==='button-danger');
+  assert(!cancel.disabled&&cancel.textContent==='Cancel','Failed cancellation remains retryable');
+  assert(h.elements.feedback.textContent==='Offline','Error is visible');
  });
  await test('hidden tabs stop polling and visibility performs one fresh load',async()=>{
   const h=setup();await h.respond(0,{jobs:[job()]});await h.visible(false);
@@ -163,11 +221,11 @@ async function runPollingTests(template, translations={en:{},fr:{}}) {
   await h.tick(6000);await h.respond(3,{jobs:[job('running')]});assert(h.polls().length===1,'Recovered active list');
  });
  await test('transient list errors preserve cards and recover without unnecessary rendering',async()=>{
-  const h=setup();const jobs=[job()];await h.respond(0,{jobs});const article=h.elements.jobs.children[0];
+  const h=setup();const jobs=[job()];await h.respond(0,{jobs});const article=h.article();
   await h.tick(6000);h.requests[1].reject(Error('Offline'));await flush();
-  assert(h.elements.jobs.children[0]===article&&!h.elements.jobsError.hidden,'Keep cards and show an error');
+  assert(h.article()===article&&!h.elements.jobsError.hidden,'Keep cards and show an error');
   assert(h.polls().length===1,'Keep polling last known active work');await h.tick(6000);await h.respond(2,{jobs});
-  assert(h.elements.jobs.children[0]===article&&h.elements.jobsError.hidden,'Recover without rebuilding cards');
+  assert(h.article()===article&&h.elements.jobsError.hidden,'Recover without rebuilding cards');
  });
  await test('initial failure can be recovered manually without idle polling',async()=>{
   const h=setup();await h.respond(0,{},false);assert(h.polls().length===0,'No active work is known');

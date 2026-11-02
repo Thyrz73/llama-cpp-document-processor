@@ -12,7 +12,8 @@ There is no authentication or per-user isolation. Browser POSTs from another ori
 | `GET /api/jobs` | `jobs`: latest 100; `has_active_jobs`: activity across the whole queue |
 | `GET /api/jobs/<id>` | Job status, progress, phase, question, filename and public configuration |
 | `POST /api/jobs` | Multipart PDF upload; returns 201 with ID, queued status and configuration |
-| `GET /api/jobs/<id>/report` | UTF-8 Markdown attachment, `analysis_<first 8 ID characters>.md` |
+| `GET /api/jobs/<id>/report` | Original UTF-8 Markdown attachment with a descriptive portable filename |
+| `GET /api/jobs/<id>/report/view?lang=en` | Server-rendered Markdown reader, optional `lang=en` or `lang=fr`; never starts generation |
 | `GET /api/jobs/<id>/live` | Latest bounded preview; never starts generation |
 | `POST /api/jobs/<id>/retry` | Empty body; requeues a failed/cancelled job with its original settings |
 | `POST /api/jobs/<id>/cancel` | Requests cancellation |
@@ -21,7 +22,11 @@ There is no authentication or per-user isolation. Browser POSTs from another ori
 | `POST /api/config/preview` | JSON options; returns preliminary configuration without creating a job |
 | `GET /api/diagnostics` | Read-only backend inspection, cached for 30 seconds; no inference |
 
-Missing jobs return 404. Report downloads return 409 unless the job is done, 404 if the file is missing, and 409 if empty. The content type is `text/markdown; charset=utf-8`.
+Missing jobs return 404. Report access returns 409 unless the job is done and 404 if the file is missing or outside its authorized directory. Empty reports download as empty Markdown and show a message in the reader. Downloads keep `text/markdown; charset=utf-8` and set attachment `filename` and UTF-8 `filename*` parameters. The internal filename remains `rapport_final.md`.
+
+The reader escapes raw HTML, rejects executable link schemes, disables images and sends a restrictive Content Security Policy. Previews over 1 MiB return an HTML page with status 413 and an original download link. The reader also provides localized HTML messages for missing, unreadable and unfinished reports. Download errors retain the JSON API format. No arbitrary file or intermediate artifact route is exposed.
+
+Job responses additionally include `report_name` (null for old jobs until first report access), `report_available` for completed jobs, and `question_custom` (`1` for explicitly customized instructions, `0` for known defaults, null when historical origin is unknown). `question` preserves the original submitted text, including whitespace; the model still receives the same trimmed instructions as before. Configuration snapshots and system prompts remain private.
 
 ## Creating a job
 

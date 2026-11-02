@@ -11,6 +11,7 @@ services:
       LLAMA_API_KEY: ${LLAMA_API_KEY:-}
       SYSTEM_PROMPT_FILE: /app/config/system_prompt.txt
       DATA_DIR: /app/data
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
       CONTEXT_TOKENS: ${CONTEXT_TOKENS:-16384}
       CHUNK_TOKENS: ${CHUNK_TOKENS:-3000}
       ANALYSIS_TOKENS: ${ANALYSIS_TOKENS:-1000}

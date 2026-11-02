@@ -1,6 +1,6 @@
 # Document Processor for llama.cpp
 
-A self-hosted PDF analysis app using an **existing llama.cpp server**. Upload a PDF, ask a question and download a Markdown report with page references. One worker processes one document at a time.
+A self-hosted PDF analysis app using an **existing llama.cpp server**. Upload a PDF, ask a question and view or download a Markdown report with page references. One worker processes one document at a time.
 
 The app includes English/French interface controls, report language and detail settings, selective OCR, live output, cancellation and saved progress. It does not install a model or reconfigure llama.cpp.
 
@@ -67,7 +67,13 @@ Keep these same `-f` options for later Compose commands. The base installation n
 1. Upload a PDF and enter a request (maximum 1,500 characters).
 2. Choose a profile, report language and detail level. Review the applied settings, then start.
 3. Follow progress or open live output. Closing the browser does not stop the analysis.
-4. Download the completed report as `analysis_<first 8 job-ID characters>.md`.
+4. Choose **View** to read the formatted report in a new tab, or **Download** to save the original Markdown.
+
+Active analyses appear first in a highlighted section; history appears below a separate heading. Saved custom analysis instructions are available in a collapsible block on each job, during processing and in history. Line breaks and the complete submitted text are preserved. Default instructions do not create a custom-prompt block. Older jobs show their saved request with a neutral label when its origin is unknown; server system prompts and task templates stay private.
+
+Reports use a deterministic descriptive download name such as `Consommation_energetique_des_batiments_2025-2026_rapport.md`, derived from an existing Markdown heading. Generic headings are skipped; the fallback is `<original PDF stem>_rapport.md`. Names use portable ASCII and stay within 100 characters. No model call or PDF reanalysis is needed. The internal `rapport_final.md` path stays unchanged, and older reports remain supported.
+
+The server-rendered reader supports headings, lists, tables, quotes, links and code, with selectable Unicode text and the saved light/dark theme. Raw HTML is escaped, executable link schemes are rejected and images are disabled. A restrictive Content Security Policy blocks embedded resources. Preview is limited to **1 MiB**; larger files remain downloadable without loading the full file into application memory. Empty reports show an explicit message and can still be downloaded. Only completed final reports are exposed; private configurations and intermediate pipeline files are not published.
 
 **Cancel** stops queued jobs immediately and requests cancellation of running work. OCR finishes its current subprocess first; a remote model may take longer to stop. **Retry** is available for failed or cancelled jobs and keeps their original settings. Create a new analysis to change budgets, language or prompts.
 
@@ -115,6 +121,7 @@ Compose reads `.env`. These settings configure the installation; the token budge
 | `LLAMA_BASE_URL` | `http://host.docker.internal:8080` | Model API address |
 | `LLAMA_API_KEY` | empty | Optional backend key |
 | `BIND_ADDRESS` / `APP_PORT` | `127.0.0.1` / `9932` | Published interface and port |
+| `LOG_LEVEL` | `INFO` | Python application logging: `ERROR`, `WARNING`, `INFO`, `DEBUG` |
 | `PUID` / `PGID` | `1000` / `1000` | Container user and group |
 | `CONTEXT_TOKENS` | `16384` | Application context ceiling; stay within the engine's capacity |
 | `CHUNK_TOKENS` | `3000` | Section input budget |
@@ -154,11 +161,15 @@ data/jobs/<id>/
 
 On restart, interrupted running jobs return to the queue unless cancellation was requested. Compatible completed steps are reused after dependency and file-hash checks. Failed/cancelled jobs wait for Retry. Old jobs without saved settings are recomputed with a warning. Files and metrics have no automatic cleanup, and there is no delete action.
 
+Startup applies an additive, idempotent SQLite migration for the descriptive report name and custom-instructions indicator. Existing request text is reused; no private prompt is copied into the public configuration. New names are saved at finalization; old report names are calculated and cached only on first view/download. Listing history does not read Markdown contents.
+
 Preserve `.env`, `config/system_prompt.txt` and `data/` across updates. Stop the processor before copying SQLite and its WAL/SHM files. Back up the old source/image too if you need rollback. Follow [migration and rollback](docs/migration-v2.md).
 
 Never commit private configuration, documents or reports. The supplied ignore files exclude common private paths; check what you stage.
 
 ## Troubleshooting and limits
+
+Application events go to stdout/stderr for `docker compose logs -f`: startup, recovery, submissions, extraction/OCR, section/merge/final steps, reuse, cancellation and report access. Events include job IDs, durations measured with a monotonic clock, progress and token usage when the backend supplies it. Logs contain neither PDF text nor full prompts/model responses. Tracebacks retain frame locations while omitting source lines and private exception messages. Streaming updates are never logged, including at DEBUG. Existing on-disk generation diagnostics remain separate. Docker log rotation stays under deployment control.
 
 ```bash
 docker compose ps

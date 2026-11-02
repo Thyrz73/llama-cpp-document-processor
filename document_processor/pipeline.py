@@ -1,12 +1,15 @@
 """Sequential, resumable document processing with explicit artifact dependencies."""
 
 import json
+import logging
 import re
 import time
 
 from . import jobs, prompts, reliability
 from .config import fingerprint
 from .model_client import Cancelled, ModelError
+from .observability import event
+from .reports import report_filename
 
 
 def plan_groups(notes, fits, max_group=4):
@@ -35,6 +38,7 @@ def run(job_id, runtime):
     r = runtime
     directory = r.job_dir(job_id)
     job = r.get_job(job_id)
+    question = job["question"].strip()
     config = jobs.load_config(r.db_conn, job_id)
     if config is None:
         # Historic artifacts remain untouched. Their original settings are unknowable.
@@ -59,16 +63,21 @@ def run(job_id, runtime):
     preview_path = directory / "live_preview.json"
     phase_args = {}
     quality = {"version": reliability.VERSION, "steps": {}}
+    last_percent = None
 
     def phase(code, label, percent=None, **args):
         """Persist stable phase identifiers alongside the historical English label."""
-        nonlocal phase_args
+        nonlocal phase_args, last_percent
         model.check_cancelled()
         phase_args = args
         values = {"stage": label, "phase_code": code, "phase_args": json.dumps(args)}
-        if percent is not None:
+        if percent is not None and percent != last_percent:
             values["progress_percent"] = percent
+            last_percent = percent
         r.update_job(job_id, **values)
+        # Page extraction can be frequent: phase changes belong in INFO, page detail in DEBUG.
+        event("job_phase", logging.DEBUG if code in ("extraction", "ocr") else logging.INFO,
+              job_id=job_id, stage=code, progress_percent=percent, **args)
         if r.LIVE_OUTPUT_ENABLED and code != "saving":
             r.atomic_json(preview_path, {"phase": label, "phase_code": code, "phase_args": args,
                                         "content": "", "reasoning": "", "active": False,
@@ -170,6 +179,7 @@ def run(job_id, runtime):
     try:
         phase("preparing", "Preparing document", 2)
         capabilities = model.inspect()
+        event("backend_checked", job_id=job_id, status=capabilities.get("status", "unknown"))
         recorder.provenance(capabilities)
         # A name is only a weak identity. Unknown fields remain unknown in diagnostics.
         identity = {"model_id_hash": fingerprint(model.model()),
@@ -208,11 +218,12 @@ def run(job_id, runtime):
         if not chunks:
             raise ModelError("empty_document", "Document contains no analyzable text.")
         r.update_job(job_id, total_chunks=len(chunks), progress_percent=10)
+        event("sections_ready", job_id=job_id, total_chunks=len(chunks))
         notes = []
         for i, chunk in enumerate(chunks):
             phase("section", f"Analyzing section {i + 1}/{len(chunks)}", 10 + round(70 * i / len(chunks)),
                   index=i + 1, total=len(chunks), pages=chunk["pages"])
-            instruction = prompts.instruction(config, "section", job["question"],
+            instruction = prompts.instruction(config, "section", question,
                 f"Excerpt {i + 1} of {len(chunks)}. Physical PDF pages: {chunk['pages']}. "
                 "Page references inside source prose are not extraction metadata.")
             name = f"analysis_{i:04d}.md"
@@ -226,8 +237,8 @@ def run(job_id, runtime):
             r.update_job(job_id, done_chunks=i + 1, progress_percent=10 + round(70 * (i + 1) / len(chunks)))
 
         warnings = f"Pages with insufficient extracted/OCR text: {missing}. OCR pages: {ocr_pages}."
-        final_instruction = prompts.instruction(config, "final", job["question"], warnings)
-        merge_instruction = prompts.instruction(config, "merge", job["question"])
+        final_instruction = prompts.instruction(config, "final", question, warnings)
+        merge_instruction = prompts.instruction(config, "merge", question)
         level = 0
         while True:
             model.current_stage = "final"
@@ -284,10 +295,14 @@ def run(job_id, runtime):
                 archive = directory / "previous_reports"
                 archive.mkdir(exist_ok=True)
                 r.atomic_text(archive / (jobs.file_hash(previous_report) + ".md"), previous_report.read_text(encoding="utf-8"))
-            r.atomic_text(directory / "rapport_final.md", header + final + "\n"
-                          + reliability.report_warnings(quality, config["report_language"]))
+            report_text = header + final + "\n" + reliability.report_warnings(quality, config["report_language"])
+            r.atomic_text(directory / "rapport_final.md", report_text)
+            name = report_filename(final, job["filename"])
             model.check_cancelled()
-            r.update_job(job_id, status="done", stage="Analysis completed", phase_code="done", error="", error_code="")
+            r.update_job(job_id, status="done", stage="Analysis completed", phase_code="done", error="", error_code="",
+                         report_name=name)
+            event("report_saved", job_id=job_id, stage="saving", filename=name,
+                  bytes=(directory / "rapport_final.md").stat().st_size)
             recorder.end(handle, "done")
         except Exception:
             recorder.end(handle, "failed", {"error_code": "report_save_failed"})

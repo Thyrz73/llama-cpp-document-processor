@@ -100,6 +100,24 @@ class V2Tests(unittest.TestCase):
             (3000, 3072, 2048, 3072),
         )
 
+    def test_debug_logs_stay_bounded_during_frequent_stream_updates(self):
+        identifier = self.create()
+        original = FakeModel.complete
+
+        def streaming(model, instruction, content, max_tokens, *, on_update=None):
+            for _ in range(50):
+                on_update("PRIVATE_STREAM_CONTENT", "PRIVATE_REASONING", False)
+            return original(model, instruction, content, max_tokens, on_update=on_update)
+
+        with patch.object(FakeModel, "complete", streaming), self.assertLogs(app.log, "DEBUG") as captured:
+            self.run_job(identifier, 1)
+        output = "\n".join(captured.output)
+        for private in ("PRIVATE_STREAM_CONTENT", "PRIVATE_REASONING", "KEEP_PRIVATE"):
+            self.assertNotIn(private, output)
+        self.assertLess(len(captured.records), 45)
+        self.assertEqual(len(FakeModel.calls), 2, "Naming and logs must not add generation calls")
+        self.assertEqual(sum("step_started" in line for line in captured.output), 5)
+
     def test_legacy_options_keep_environment_defaults(self):
         with patch.object(app, "ANALYSIS_TOKENS", 1500):
             identifier = self.create()
@@ -237,7 +255,7 @@ class V2Tests(unittest.TestCase):
         app.init_db()
         self.assertEqual(app.get_job(identifier), before)
         with app.db_conn() as con:
-            self.assertEqual(con.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0], 1)
+            self.assertEqual([row[0] for row in con.execute("SELECT version FROM schema_migrations ORDER BY version")], [2, 3])
 
     def test_cancel_and_retry_are_idempotent_and_configuration_cannot_be_replaced(self):
         identifier = self.create()

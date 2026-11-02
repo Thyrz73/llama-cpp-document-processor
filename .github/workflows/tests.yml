@@ -29,6 +29,7 @@ jobs:
       - name: Validate frontend syntax and Compose
         run: |
           node --check static/app.js
+          node --check static/report.js
           docker compose config --quiet
       - name: Check application packaging
         run: docker build -t document-processor:test .

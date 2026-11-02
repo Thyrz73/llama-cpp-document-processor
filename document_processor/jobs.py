@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .config import fingerprint
+from .observability import event
 
 
 def now():
@@ -21,9 +22,11 @@ def migrate(con):
         "phase_code": "TEXT NOT NULL DEFAULT ''", "phase_args": "TEXT NOT NULL DEFAULT '{}'",
         "error_code": "TEXT NOT NULL DEFAULT ''", "cancel_requested": "INTEGER NOT NULL DEFAULT 0",
         "queued_at": "TEXT",
+        "report_name": "TEXT", "question_custom": "INTEGER",
     }.items():
         if name not in columns:
             con.execute(f"ALTER TABLE jobs ADD COLUMN {name} {declaration}")
+            event("sqlite_migration", column=name, status="applied")
     con.execute("""CREATE TABLE IF NOT EXISTS job_configs (
         job_id TEXT PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
         snapshot TEXT NOT NULL, fingerprint TEXT NOT NULL, created_at TEXT NOT NULL)""")
@@ -40,6 +43,7 @@ def migrate(con):
     con.execute("CREATE INDEX IF NOT EXISTS job_steps_by_job ON job_steps(job_id, id)")
     con.execute("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
     con.execute("INSERT OR IGNORE INTO schema_migrations VALUES (2, ?)", (now(),))
+    con.execute("INSERT OR IGNORE INTO schema_migrations VALUES (3, ?)", (now(),))
     # Interrupted records remain visible as attempts, rather than looking active forever.
     con.execute("UPDATE job_steps SET status='interrupted', finished_at=? WHERE status='running'", (now(),))
     con.execute("UPDATE job_runs SET status='interrupted', finished_at=? WHERE status='running'", (now(),))
@@ -133,6 +137,8 @@ class Recorder:
             self.run_id = con.execute(
                 "INSERT INTO job_runs (job_id, started_at, status, queue_ms) VALUES (?, ?, 'running', ?)",
                 (job_id, now(), queue_ms)).lastrowid
+        event("job_attempt_started", job_id=job_id, attempt_id=self.run_id, queue_ms=queue_ms)
+        self.steps = {}
 
     def provenance(self, value):
         """Store sanitized backend observations separately from immutable options."""
@@ -145,6 +151,8 @@ class Recorder:
             identifier = con.execute(
                 "INSERT INTO job_steps (run_id,job_id,stage,step_key,started_at,status) VALUES (?,?,?,?,?,'running')",
                 (self.run_id, self.job_id, stage, key, now())).lastrowid
+        self.steps[identifier] = (stage, key)
+        event("step_started", job_id=self.job_id, stage=stage, artifact=key, status="running")
         return identifier, time.monotonic()
 
     def end(self, handle, status, metrics=None):
@@ -156,12 +164,19 @@ class Recorder:
         with self.connect() as con:
             con.execute("UPDATE job_steps SET finished_at=?, status=?, metrics=? WHERE id=?",
                         (now(), status, json.dumps(values, allow_nan=False), identifier))
+        stage, key = self.steps.pop(identifier, ("unknown", "unknown"))
+        counts = {name: values[name] for name in
+                  ("prompt_tokens", "output_tokens", "finish_reason", "error_code") if name in values}
+        event("step_finished", job_id=self.job_id, stage=stage, artifact=key,
+              status=status, duration_ms=values["duration_ms"], **counts)
 
     def finish(self, status):
         """Close an attempt without conflating its duration with queue waiting."""
         with self.connect() as con:
             con.execute("UPDATE job_runs SET finished_at=?,status=?,duration_ms=? WHERE id=?",
                         (now(), status, (time.monotonic() - self.started) * 1000, self.run_id))
+        event("job_attempt_finished", job_id=self.job_id, attempt_id=self.run_id,
+              status=status, duration_ms=round((time.monotonic() - self.started) * 1000, 1))
 
 
 def metrics(connect, job_id, limit=200, before=None):
