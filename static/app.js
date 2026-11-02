@@ -84,6 +84,9 @@ let expandedId = null,
 const activeStatuses = new Set(["queued", "running"]);
 const cancellingJobs = new Set();
 const promptExpanded = new Set();
+const selectedJobs = new Set();
+const terminalStatuses = new Set(["done", "failed", "cancelled"]);
+let deleting = false, deleteIntent = null, deleteTrigger = null, historyNotice = null;
 let jobs = [],
   renderedJobs = null,
   hasActiveJobs = false,
@@ -364,11 +367,112 @@ function refresh(afterChange = false) {
   });
   return jobsRequest;
 }
+// Selection only concerns currently visible terminal jobs, never hidden history.
+function updateSelection() {
+  const eligible = jobs.filter((job) => terminalStatuses.has(job.status));
+  const all = $("selectAllJobs");
+  if (!all) return;
+  all.checked = eligible.length > 0 && selectedJobs.size === eligible.length;
+  all.indeterminate = selectedJobs.size > 0 && selectedJobs.size < eligible.length;
+  all.disabled = deleting || !eligible.length;
+  for (const checkbox of $("jobs").querySelectorAll("[data-select-job]")) {
+    checkbox.checked = selectedJobs.has(checkbox.dataset.selectJob);
+    checkbox.disabled = deleting;
+  }
+  for (const item of $("jobs").querySelectorAll("[data-job-id]"))
+    item.classList.toggle("item-selected", selectedJobs.has(item.dataset.jobId));
+  $("selectionActions").hidden = !selectedJobs.size;
+  $("selectionCount").textContent = t("{count} analyses selected", { count: selectedJobs.size });
+  $("clearSelection").disabled = deleting;
+  $("deleteSelection").disabled = deleting;
+  $("deleteSelection").textContent = t(deleting ? "Deleting…" : "Delete selection");
+  $("deleteSelection").setAttribute("aria-busy", String(deleting));
+}
+function renderDeleteDialog() {
+  if (!deleteIntent) return;
+  $("deleteTitle").textContent = t(deleteIntent.bulk ? "Delete selected analyses?" : "Delete analysis?");
+  $("deleteMessage").textContent = t(deleteIntent.bulk
+    ? "Permanently delete {count} analyses? This action cannot be undone."
+    : "Delete this analysis from history? This action cannot be undone.", { count: deleteIntent.ids.length });
+  $("deleteDocument").textContent = deleteIntent.bulk ? "" : deleteIntent.name;
+}
+function confirmDeletion(ids, bulk, trigger) {
+  if (deleting || deleteIntent) return;
+  const eligible = ids.filter((id) => jobs.some((job) => job.id === id && terminalStatuses.has(job.status)));
+  if (!eligible.length) return;
+  deleteIntent = { ids: [...new Set(eligible)], bulk, name: jobs.find((job) => job.id === eligible[0]).filename };
+  deleteTrigger = trigger;
+  renderDeleteDialog();
+  $("deleteDialog").showModal();
+  $("deleteCancel").focus();
+}
+function closeDeleteDialog() {
+  deleteIntent = null;
+  $("deleteDialog").close();
+  (deleteTrigger?.isConnected ? deleteTrigger : $("selectAllJobs"))?.focus();
+}
+function renderHistoryNotice() {
+  const node = $("historyNotice");
+  if (!node || !historyNotice) return;
+  node.hidden = false;
+  node.className = "history-notice" + (historyNotice.error || historyNotice.failed || historyNotice.warnings ? " warning" : "");
+  node.textContent = historyNotice.error || t("Deleted: {count}.", { count: historyNotice.deleted });
+  if (historyNotice.failed)
+    node.textContent += " " + t("Could not delete: {count}.", { count: historyNotice.failed }) + " " +
+      historyNotice.reasons.map((code) => t("error." + code)).join(" ");
+  if (historyNotice.warnings)
+    node.textContent += " " + t("Some associated files were retained. Check the server storage.");
+}
+async function submitDeletion() {
+  if (!deleteIntent || deleting) return;
+  const { ids, bulk } = deleteIntent;
+  closeDeleteDialog();
+  deleting = true;
+  renderJobs();
+  try {
+    const response = await jsonFetch(bulk ? "/api/jobs/delete" : `/api/jobs/${ids[0]}/delete`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: bulk ? JSON.stringify({ ids }) : undefined,
+    }, 120000);
+    const data = await response.json();
+    if (!response.ok && !data.error_code) throw Error(t("Deletion failed. Refresh history before trying again."));
+    const results = bulk ? data.results : [data];
+    if (!Array.isArray(results)) throw Error(errorText(data, "Deletion failed. Refresh history before trying again."));
+    const removed = new Set(results.filter((result) => result.deleted === true && ids.includes(result.id)).map((result) => result.id));
+    const failures = results.filter((result) => !result.deleted);
+    historyNotice = { deleted: removed.size, failed: ids.length - removed.size,
+      warnings: results.some((result) => result.deleted && result.warning_code),
+      reasons: [...new Set(failures.map((result) => result.error_code || "generic"))] };
+    jobs = jobs.filter((job) => !removed.has(job.id));
+    for (const id of removed) { selectedJobs.delete(id); promptExpanded.delete(id); }
+    if (removed.has(expandedId)) expandedId = null;
+    // Invalidate an older GET so it cannot resurrect deleted entries.
+    refreshPending = true;
+    renderJobs();
+    renderHistoryNotice();
+    await refresh();
+  } catch (error) {
+    historyNotice = { error: error.message };
+    renderHistoryNotice();
+  } finally {
+    deleting = false;
+    renderJobs();
+    $("selectAllJobs")?.focus();
+  }
+}
+if ($("deleteDialog")) {
+  $("deleteCancel").addEventListener("click", closeDeleteDialog);
+  $("deleteDialog").addEventListener("cancel", (event) => { event.preventDefault(); closeDeleteDialog(); });
+  $("deleteConfirm").addEventListener("click", submitDeletion);
+}
 // Rebuild cards only when data or the open panel changes.
 // Reuse the Live node to preserve its text, channel, and scroll position.
 function renderJobs() {
-  const signature = JSON.stringify([jobs, expandedId]);
+  const eligible = new Set(jobs.filter((job) => terminalStatuses.has(job.status)).map((job) => job.id));
+  for (const id of selectedJobs) if (!eligible.has(id)) selectedJobs.delete(id);
+  const signature = JSON.stringify([jobs, expandedId, deleting]);
   if (signature === renderedJobs) return;
+  const focused = document.activeElement;
   const live = expandedId ? $("live-" + expandedId) : null,
     host = $("jobs");
   const priorScroll = live ? $("live-content")?.scrollTop : null;
@@ -386,6 +490,39 @@ function renderJobs() {
     section.append(title);
     const list = el("div", undefined, "job-list");
     section.append(list);
+    if (key === "history") {
+      const controls = el("div", undefined, "history-controls");
+      const label = el("label", undefined, "selection-label");
+      const all = el("input");
+      all.type = "checkbox";
+      all.id = "selectAllJobs";
+      all.addEventListener("change", () => {
+        for (const id of eligible) {
+          if (all.checked) selectedJobs.add(id);
+          else selectedJobs.delete(id);
+        }
+        updateSelection();
+      });
+      label.append(all, el("span", t("Select all displayed analyses")));
+      controls.append(label);
+      const bar = el("div", undefined, "selection-actions");
+      bar.id = "selectionActions";
+      const count = el("span");
+      count.id = "selectionCount";
+      count.setAttribute("role", "status");
+      const clear = el("button", t("Deselect"), "button-secondary");
+      clear.id = "clearSelection";
+      clear.type = "button";
+      clear.addEventListener("click", () => { selectedJobs.clear(); updateSelection(); });
+      const remove = el("button", t("Delete selection"), "button-danger");
+      remove.id = "deleteSelection";
+      remove.type = "button";
+      remove.addEventListener("click", () => confirmDeletion([...selectedJobs], true, remove));
+      bar.append(count, clear, remove);
+      controls.append(bar);
+      // Keep the heading and list order stable; the toolbar sits above the cards.
+      list.append(controls);
+    }
     host.append(section);
     groups[key] = list;
     if (!jobs.some((job) => activeStatuses.has(job.status) === (key === "active")))
@@ -394,8 +531,41 @@ function renderJobs() {
   for (const j of jobs) {
     const item = el("article", undefined, "item"),
       top = el("div", undefined, "top");
-    top.append(el("div", j.filename, "name"));
+    item.dataset.jobId = j.id;
+    const identity = el("div", undefined, "job-identity");
+    if (terminalStatuses.has(j.status)) {
+      const checkbox = el("input");
+      checkbox.type = "checkbox";
+      checkbox.dataset.selectJob = j.id;
+      checkbox.setAttribute("aria-label", t("Select analysis: {name}", { name: j.filename }));
+      checkbox.addEventListener("change", () => {
+        if (checkbox.checked) selectedJobs.add(j.id);
+        else selectedJobs.delete(j.id);
+        updateSelection();
+      });
+      identity.append(checkbox);
+    }
+    identity.append(el("div", j.filename, "name"));
+    top.append(identity);
     top.append(el("span", t(codes[j.status] || j.status), `pill ${j.status}`));
+    if (terminalStatuses.has(j.status)) {
+      const remove = el("button", undefined, "button-danger button-icon");
+      remove.type = "button";
+      remove.title = t("Delete analysis");
+      remove.setAttribute("aria-label", t("Delete analysis: {name}", { name: j.filename }));
+      remove.dataset.deleteJob = j.id;
+      remove.disabled = deleting;
+      const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      icon.setAttribute("viewBox", "0 0 24 24");
+      icon.setAttribute("class", "trash-icon");
+      icon.setAttribute("aria-hidden", "true");
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.setAttribute("d", "M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7m4-7v7");
+      icon.append(path);
+      remove.append(icon);
+      remove.addEventListener("click", () => confirmDeletion([j.id], false, remove));
+      top.append(remove);
+    }
     item.append(top);
     item.append(el("div", phaseLabel(j), "meta"));
     if (j.configuration)
@@ -437,22 +607,26 @@ function renderJobs() {
     item.append(el("div", pct + t("% of workflow completed"), "micro muted"));
     if (j.error) item.append(el("div", errorText(j, j.error), "error"));
     const actions = el("div", undefined, "actions");
+    const reportActions = el("div", undefined, "actions report-actions");
     if (j.status === "done" && j.report_available !== false) {
       item.append(
         el("div", j.report_name || t("Markdown report"), "meta report-name"),
       );
-      const view = el("a", t("View"));
+      const view = el("a", t("View"), "button-secondary report-button");
       view.href = `/api/jobs/${j.id}/report/view?lang=${uiLanguage}`;
       view.target = "_blank";
       view.rel = "noopener noreferrer";
-      const link = el("a", t("Download"));
+      const link = el("a", t("Download"), "button-secondary report-button");
       link.href = `/api/jobs/${j.id}/report`;
       link.download = j.report_name || "";
-      actions.append(view, link);
+      reportActions.append(view, link);
+    } else if (j.status === "done") {
+      item.append(el("div", t("Report unavailable"), "meta"));
     }
     if (["failed", "cancelled"].includes(j.status)) {
       const b = el("button", t("Retry"), "button-secondary");
       b.type = "button";
+      b.disabled = deleting;
       b.addEventListener("click", () => retry(j.id));
       actions.append(b);
     }
@@ -511,11 +685,23 @@ function renderJobs() {
       item.append(details);
     }
     if (expandedId === j.id) item.append(live || createLive(j.id));
+    if (reportActions.children.length) item.append(reportActions);
     groups[activeStatuses.has(j.status) ? "active" : "history"].append(item);
   }
   // Browsers may reset scrollTop when a preserved node is detached and reattached.
   if (priorScroll != null && $("live-content"))
     $("live-content").scrollTop = priorScroll;
+  updateSelection();
+  // Progress refreshes must not interrupt keyboard selection in the history.
+  const focusSelector = focused?.dataset?.selectJob ? "[data-select-job]"
+    : focused?.dataset?.deleteJob ? "[data-delete-job]" : null;
+  if (focusSelector) {
+    const replacement = [...host.querySelectorAll(focusSelector)].find((node) =>
+      node.dataset.selectJob === focused.dataset.selectJob && node.dataset.deleteJob === focused.dataset.deleteJob);
+    replacement?.focus();
+  } else if (["selectAllJobs", "clearSelection", "deleteSelection"].includes(focused?.id)) {
+    $(focused.id)?.focus();
+  }
   loadLive();
 }
 // When the tab becomes visible, request one jobs and Live refresh.
@@ -756,7 +942,7 @@ async function showMetrics(id, item) {
   }
   const output = el("div", t("Loading…"), "metrics");
   output.id = "metrics-" + id;
-  item.append(output);
+  item.insertBefore(output, item.querySelector(".report-actions"));
   try {
     const response = await jsonFetch(`/api/jobs/${id}/metrics`);
     const data = await response.json();
@@ -831,6 +1017,8 @@ if ($("uiLanguage"))
             : "Reasoning (if available)",
         );
     renderJobs();
+    renderDeleteDialog();
+    renderHistoryNotice();
     if (profileConfig) renderConfig(profileConfig);
   });
 if ($("profile")) {

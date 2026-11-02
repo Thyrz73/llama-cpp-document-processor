@@ -308,7 +308,7 @@ Analyze this entire document: objectives, methods, results, key figures, assumpt
         </form>
       </section>
       <section class="panel">
-        <div class="top" style="margin-bottom: 18px">
+        <div class="top jobs-heading">
           <h2 data-i18n="Analysis jobs">Analysis jobs</h2>
           <button
             class="button-secondary"
@@ -320,6 +320,7 @@ Analyze this entire document: objectives, methods, results, key figures, assumpt
           </button>
         </div>
         <div id="jobsError" class="error" role="status" hidden></div>
+        <div id="historyNotice" class="history-notice" role="status" aria-live="polite" hidden></div>
         <div id="jobs">Loading…</div>
       </section>
       <section class="panel">
@@ -350,6 +351,15 @@ Analyze this entire document: objectives, methods, results, key figures, assumpt
         generation preview · Reports persist on disk.
       </footer>
     </main>
+    <dialog id="deleteDialog" aria-labelledby="deleteTitle" aria-describedby="deleteMessage">
+      <h2 id="deleteTitle"></h2>
+      <p id="deleteMessage"></p>
+      <p id="deleteDocument" class="name"></p>
+      <div class="dialog-actions">
+        <button id="deleteCancel" type="button" class="button-secondary" data-i18n="Cancel" autofocus>Cancel</button>
+        <button id="deleteConfirm" type="button" class="button-danger" data-i18n="Delete">Delete</button>
+      </div>
+    </dialog>
     <script id="translations" type="application/json">
       {{ translations|tojson }}
     </script>

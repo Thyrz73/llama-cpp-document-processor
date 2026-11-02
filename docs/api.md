@@ -17,6 +17,8 @@ There is no authentication or per-user isolation. Browser POSTs from another ori
 | `GET /api/jobs/<id>/live` | Latest bounded preview; never starts generation |
 | `POST /api/jobs/<id>/retry` | Empty body; requeues a failed/cancelled job with its original settings |
 | `POST /api/jobs/<id>/cancel` | Requests cancellation |
+| `POST /api/jobs/<id>/delete` | Deletes one terminal analysis; returns its individual outcome |
+| `POST /api/jobs/delete` | JSON `{"ids":["<id>","<id>"]}`; deletes up to 100 analyses with per-ID outcomes |
 | `GET /api/jobs/<id>/metrics` | Attempts, step records and summary counts |
 | `GET /api/profiles` | Profiles, environment defaults and cached backend capabilities |
 | `POST /api/config/preview` | JSON options; returns preliminary configuration without creating a job |
@@ -63,6 +65,20 @@ Retry returns 200 when queued, 409 for an incompatible status or an exhausted at
 Cancel returns 202 when accepted, 200 if already cancelled and 409 for done/failed jobs. Queued jobs become cancelled immediately. Running jobs keep their status with `cancel_requested=true` until cancellation takes effect. OCR finishes or times out first; remote engine release depends on the backend.
 
 After cancellation or a generation deadline, the next generation waits cooperatively for the previous HTTP reader to exit. Cleanup does not cause subsequent jobs to fail, and cancellation remains available while waiting. The next generation's deadline starts after this wait; request/step duration metrics still include elapsed waiting time. If response headers have not arrived, cleanup may wait for the existing network timeout.
+
+## History deletion
+
+The interface confirms individual and bulk removal separately. Selection covers only terminal analyses in the currently displayed list (at most 100), and is reconciled on refresh. Active analyses cannot be selected.
+
+Individual deletion returns `{ "id": "<id>", "deleted": true, "warning_code": null }` on success. Failures return `deleted: false` and an `error_code`: `invalid_job_id` (400), `job_not_found` (404), `delete_active` (409), or `delete_database` (500). Queued/running jobs and terminal jobs whose worker attempt is still finishing are protected. Deletion and retry/worker claims are serialized using SQLite `BEGIN IMMEDIATE`.
+
+Bulk deletion validates the entire list before making changes, deduplicates IDs and processes each analysis independently through the same helper. Invalid, empty or oversized lists return 400 (`invalid_job_ids`), with no deletions. Responses contain `results`, one outcome per unique ID, with HTTP 200 when all records were removed or 207 when any failed. The interface removes only confirmed successes, keeps failed selections and distinguishes record-removal failures from file-cleanup warnings.
+
+Deleting a job cascades to its configuration, attempts and step measurements. The database transaction commits **before** physical cleanup: a database failure never removes files. Only `DATA/jobs/<validated-id>` is eligible for recursive cleanup, including its PDF, reports, previews, artifacts and private logs. No client filename/path or manifest path is used. Shared/global application logs, SQLite files, prompts and other job directories are preserved.
+
+If the private tree is missing, deletion still succeeds. If its root or descendants contain symlinks, hardlinks, mount points, special files, or cannot be verified safely, the entire tree is retained (`warning_code: delete_files_unsafe`). Cleanup requires a symlink-attack-resistant `shutil.rmtree`; unsupported platforms retain files. Filesystem errors return `delete_files_failed`; cleanup may already be partial, but the committed history deletion remains successful. Both warnings are shown in the interface and require administrator inspection of server storage. A process crash between commit and cleanup can likewise leave an orphan directory; there is no automatic orphan purge. These directories are never reused by retry because their job record no longer exists. Storage assumes the application's UUID directories are private and are not deliberately shared by an administrator through external references.
+
+Both endpoints reuse the existing same-origin POST protection and the application's existing access model (no authentication or per-user isolation).
 
 ## Live output, metrics and diagnostics
 

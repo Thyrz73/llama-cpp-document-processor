@@ -668,6 +668,52 @@ def job_info(job_id):
     return jsonify(job)
 
 
+def delete_history_job(job_id):
+    """Commit history removal before touching files; serialize against retry/claim."""
+    if not isinstance(job_id, str) or not re.fullmatch(r"[0-9a-f]{32}", job_id):
+        return {"id": job_id, "deleted": False, "error_code": "invalid_job_id"}, 400
+    try:
+        with db_conn() as con:
+            con.execute("BEGIN IMMEDIATE")
+            row = con.execute("SELECT status FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if row is None:
+                return {"id": job_id, "deleted": False, "error_code": "job_not_found"}, 404
+            # A completed status can precede the worker's final metrics writes.
+            finishing = con.execute(
+                "SELECT 1 FROM job_runs WHERE job_id=? AND status='running' LIMIT 1", (job_id,)
+            ).fetchone()
+            if row["status"] not in ("done", "failed", "cancelled") or finishing:
+                return {"id": job_id, "deleted": False, "error_code": "delete_active"}, 409
+            con.execute("DELETE FROM jobs WHERE id=?", (job_id,))
+    except sqlite3.Error as exc:
+        failure("history_delete_failed", exc, job_id=job_id)
+        return {"id": job_id, "deleted": False, "error_code": "delete_database"}, 500
+    warning = job_store.remove_private_files(DATA, job_id)
+    event("history_deleted", job_id=job_id, status="files_retained" if warning else "deleted")
+    return {"id": job_id, "deleted": True, "warning_code": warning}, 200
+
+
+@app.post("/api/jobs/<job_id>/delete")
+def delete_job(job_id):
+    """Delete one terminal analysis using only its server-generated ID."""
+    result, status = delete_history_job(job_id)
+    return jsonify(result), status
+
+
+@app.post("/api/jobs/delete")
+def delete_jobs():
+    """Return an explicit outcome per unique ID, including partial failures."""
+    if request.content_length and request.content_length > 8192:
+        return jsonify(error_code="invalid_job_ids"), 400
+    payload = request.get_json(silent=True)
+    ids = payload.get("ids") if isinstance(payload, dict) else None
+    if (not isinstance(ids, list) or not 1 <= len(ids) <= 100
+            or any(not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{32}", value) for value in ids)):
+        return jsonify(error_code="invalid_job_ids"), 400
+    results = [delete_history_job(job_id)[0] for job_id in dict.fromkeys(ids)]
+    return jsonify(results=results), 200 if all(item["deleted"] for item in results) else 207
+
+
 @app.post("/api/jobs")
 def create_job():
     """Store the uploaded PDF and create a queued job.

@@ -28,7 +28,6 @@
   --ongoing-bg: #e7efff;
   --danger: #b42335;
   --danger-hover: #951c2b;
-  --danger-text: #fff;
 }
 :root[data-theme="dark"] {
   color-scheme: dark;
@@ -52,7 +51,6 @@
   --ongoing-bg: #25406b;
   --danger: #f28d99;
   --danger-hover: #ffadb6;
-  --danger-text: #301018;
 }
 * {
   box-sizing: border-box;
@@ -248,24 +246,28 @@ button:disabled {
   border-color: var(--accent);
 }
 .button-danger {
-  background: var(--danger);
-  color: var(--danger-text);
+  background: transparent;
+  color: var(--danger);
+  border: 1px solid var(--danger);
   padding: 8px 12px;
   font-size: 0.82rem;
 }
 .button-danger:hover:not(:disabled) {
-  background: var(--danger-hover);
+  background: var(--negative-bg);
+  color: var(--danger-hover);
   filter: none;
+}
+.button-danger:active:not(:disabled) {
+  background: var(--negative-bg);
+  box-shadow: inset 0 0 0 1px var(--danger);
 }
 .button-danger:focus-visible {
   outline: 3px solid var(--danger);
   outline-offset: 3px;
 }
 .button-danger:disabled {
-  opacity: 1;
-  background: var(--negative-bg);
-  color: var(--negative);
-  border: 1px solid var(--negative);
+  opacity: 0.55;
+  background: transparent;
   filter: none;
 }
 .button-danger[aria-busy="true"] {
@@ -277,10 +279,144 @@ button:disabled {
   border-radius: 12px;
   padding: 16px;
 }
+.jobs-heading {
+  margin-bottom: 18px;
+}
 .job-group-history {
   margin-top: 28px;
-  border-top: 2px solid var(--border);
+  border-top: 1px solid var(--border);
   padding-top: 24px;
+}
+.job-group-history::before {
+  content: "";
+  display: block;
+  height: 18px;
+  margin: -24px -24px 24px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+.job-group-history > h3 {
+  font-size: 1.08rem;
+}
+.job-identity {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  min-width: 0;
+  gap: 10px;
+}
+.item > .top {
+  flex-wrap: nowrap;
+  align-items: flex-start;
+}
+.item-selected {
+  background: var(--accent-soft);
+  box-shadow: inset 3px 0 var(--accent);
+}
+.history-controls {
+  margin-bottom: 16px;
+}
+.selection-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 40px;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+input[type="checkbox"] {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.selection-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 9px;
+  padding: 12px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+#selectionCount {
+  margin-right: auto;
+  font-size: 0.85rem;
+}
+.button-icon {
+  display: inline-flex;
+  justify-content: center;
+  align-items: center;
+  min-width: 36px;
+  min-height: 36px;
+  padding: 8px;
+  flex-shrink: 0;
+}
+.trash-icon {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.report-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 36px;
+  border-radius: 10px;
+  font-weight: 650;
+  text-align: center;
+}
+.report-button:hover {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  text-decoration: none;
+}
+.report-button:active {
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+.item > .report-actions {
+  justify-content: flex-end;
+  flex-wrap: nowrap;
+  margin-top: auto;
+  padding-top: 16px;
+}
+.history-notice {
+  padding: 12px;
+  margin: 12px 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface2);
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}
+dialog {
+  width: min(460px, calc(100% - 32px));
+  max-height: calc(100% - 32px);
+  overflow: auto;
+  padding: 24px;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow);
+}
+dialog::backdrop {
+  background: rgb(0 0 0 / 45%);
+}
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 9px;
+}
+[hidden] {
+  display: none !important;
 }
 .job-group > h3 {
   font-size: 1rem;
@@ -369,7 +505,10 @@ summary:focus-visible {
   color: var(--muted);
 }
 .item {
-  padding: 19px 0;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: 19px 12px;
   border-top: 1px solid var(--border);
 }
 .item:first-child {
@@ -497,6 +636,20 @@ footer {
   }
   .drop {
     padding: 25px 11px;
+  }
+  .job-group-history::before {
+    margin-left: -17px;
+    margin-right: -17px;
+  }
+  .job-group-active {
+    padding: 12px;
+  }
+  .item {
+    padding-left: 4px;
+    padding-right: 4px;
+  }
+  .item > .top {
+    gap: 8px;
   }
 }
 
