@@ -57,7 +57,7 @@ BIND_ADDRESS=127.0.0.1
 APP_PORT=9932
 
 # Match, or stay below, your llama.cpp server's actual context size
-CONTEXT_TOKENS=8192
+CONTEXT_TOKENS=16384
 CHUNK_TOKENS=3000
 ```
 
@@ -124,7 +124,7 @@ Deployment settings are read from `.env` by Compose (see [.env.example](.env.exa
 | `APP_PORT` | `9932` | Port used by the Flask/Waitress application inside the container and published by Docker. |
 | `PUID` | `1000` | Container user ID; match the owner of the host `./data` directory. |
 | `PGID` | `1000` | Numeric group ID used to run the container and write `./data`. |
-| `CONTEXT_TOKENS` | `8192` | Input/output context budget, no greater than llama.cpp's actual context. Prompts and outputs need headroom; an insufficient budget is rejected. |
+| `CONTEXT_TOKENS` | `16384` | Input/output context budget, no greater than llama.cpp's actual context. Prompts and outputs need headroom; an insufficient budget is rejected. |
 | `CHUNK_TOKENS` | `3000` | Maximum document-text tokens sent to one section analysis. Validated range: `128`–`131072`, additionally constrained by the available context and output budget. |
 | `ANALYSIS_TOKENS` | `1000` | Maximum generated tokens for each document-section analysis. |
 | `MERGE_TOKENS` | `1200` | Maximum generated tokens for each intermediate consolidation pass. |
@@ -150,7 +150,7 @@ After editing `.env`, wait until the queue is idle and run `docker compose up -d
 
 Start with conservative token budgets. An API request without `options` keeps the historical deployment defaults. An explicit profile replaces its section/analysis/merge defaults, then validated advanced overrides apply. All four profiles initially use one worker and one generation at a time; `ultra` does not enable parallel inference.
 
-The current experimental profile definitions are centralized in `document_processor/profiles.py`: low `3000/1000/1200`, medium `3500/1100/1300`, high `4000/1200/1400`, ultra `4500/1400/1600` (section/analysis/merge tokens). They are **not calibrated hardware recommendations**. Final output derives from `FINAL_TOKENS` and the separate detail choice (concise ×0.8, standard ×1, detailed ×1.5); an explicit final-output override wins. No speed gain or exact ETA is promised.
+The current experimental profile definitions are centralized in `document_processor/profiles.py`: low `3000/3072/2048/3072`, medium `4000/3584/3072/4096`, high `5500/4096/4096/6144`, ultra `7000/6144/6144/8192` (section/analysis/merge/final tokens). They are **not calibrated hardware recommendations**. Final output is adjusted by the separate detail choice (concise ×0.8, standard ×1, detailed ×1.5); an explicit final-output override wins. No speed gain or exact ETA is promised.
 
 Changing environment variables, language, prompts or profile does not alter existing jobs. **Retry uses the original snapshot. Create a new analysis to change settings**, including after a `length` failure. Snapshots include private prompt text; protect the data volume like the source PDFs.
 

@@ -87,9 +87,18 @@ class V2Tests(unittest.TestCase):
         for name in ("low", "medium", "high", "ultra"):
             resolved = config.resolve(app.runtime_defaults(), {"profile": name})
             values.append((resolved["chunk_tokens"], resolved["analysis_tokens"], resolved["merge_tokens"]))
-            self.assertEqual((resolved["final_tokens"], resolved["concurrency"]), (app.FINAL_TOKENS, 1))
+            self.assertEqual((resolved["final_tokens"], resolved["concurrency"]),
+                             ({"low": 3072, "medium": 4096, "high": 6144, "ultra": 8192}[name], 1))
             self.assertIn("profile_uncalibrated", resolved["warnings"])
         self.assertEqual(len(set(values)), 4)
+
+    def test_low_profile_uses_reference_budgets(self):
+        resolved = config.resolve(app.runtime_defaults(), {"profile": "low"})
+        self.assertEqual(
+            (resolved["chunk_tokens"], resolved["analysis_tokens"],
+             resolved["merge_tokens"], resolved["final_tokens"]),
+            (3000, 3072, 2048, 3072),
+        )
 
     def test_legacy_options_keep_environment_defaults(self):
         with patch.object(app, "ANALYSIS_TOKENS", 1500):

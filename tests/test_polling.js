@@ -221,7 +221,7 @@ async function runPollingTests(template, translations={en:{},fr:{}}) {
   assert(h.requests.every(r=>!r.options?.method||r.options.method==='GET'),'Live must issue only GETs');
   await h.respond(2,{content:'Recovered',active:true});assert(h.document.getElementById('live-content').textContent==='Recovered','Live recovers');
  });
- const resolved={profile:'low',chunk_tokens:3000,analysis_tokens:1000,merge_tokens:1200,final_tokens:1800,context_tokens:8192,warnings:[],thinking_section:'inherit',thinking_merge:'inherit',thinking_final:'inherit'};
+ const resolved={profile:'low',chunk_tokens:3000,analysis_tokens:3072,merge_tokens:2048,final_tokens:3072,context_tokens:16384,warnings:[],thinking_section:'inherit',thinking_merge:'inherit',thinking_final:'inherit'};
  async function settingsReady(){const h=setup(true);await h.respond(0,{jobs:[]});await h.respond(1,{thinking_supported:false});await h.respond(2,{configuration:resolved});return h}
  await test('profile preview is server-resolved and keeps advanced reasoning disabled when unsupported',async()=>{
   const h=await settingsReady();assert(!h.elements.send.disabled,'Validated preview enables submission');
