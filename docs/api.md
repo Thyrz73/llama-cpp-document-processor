@@ -17,7 +17,7 @@ The existing Flask application, port, SQLite file, data volume and report URLs r
   "profile": "low",
   "report_language": "fr",
   "detail_level": "standard",
-  "overrides": {"analysis_tokens": 1100}
+  "overrides": { "analysis_tokens": 1100 }
 }
 ```
 

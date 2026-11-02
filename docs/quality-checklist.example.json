@@ -1,4 +1,4 @@
 [
-  {"id": "temperature-and-unit", "terms": ["25", "°C", "[Page 1]"]},
-  {"id": "uncertainty", "terms": ["0.5"]}
+  { "id": "temperature-and-unit", "terms": ["25", "°C", "[Page 1]"] },
+  { "id": "uncertainty", "terms": ["0.5"] }
 ]

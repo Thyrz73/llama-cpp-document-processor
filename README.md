@@ -116,33 +116,33 @@ The job list polls every six seconds while any job is queued or running, pauses 
 
 Deployment settings are read from `.env` by Compose (see [.env.example](.env.example)). Defaults come from [compose.yaml](compose.yaml), except the optional network setting. Running `python app.py` directly does not load `.env` automatically.
 
-| Variable | Default | Description |
-| --- | --- | --- |
-| `LLAMA_BASE_URL` | `http://host.docker.internal:8080` | llama.cpp API URL reachable from the processor container; use its service name/IP and port. |
-| `LLAMA_API_KEY` | empty | Optional bearer token for llama.cpp; leave empty if authentication is not required. |
-| `BIND_ADDRESS` | `127.0.0.1` | Host interface on which Docker publishes the web port. Use a LAN IP only when LAN access is intended. |
-| `APP_PORT` | `9932` | Port used by the Flask/Waitress application inside the container and published by Docker. |
-| `PUID` | `1000` | Container user ID; match the owner of the host `./data` directory. |
-| `PGID` | `1000` | Numeric group ID used to run the container and write `./data`. |
-| `CONTEXT_TOKENS` | `16384` | Input/output context budget, no greater than llama.cpp's actual context. Prompts and outputs need headroom; an insufficient budget is rejected. |
-| `CHUNK_TOKENS` | `3000` | Maximum document-text tokens sent to one section analysis. Validated range: `128`–`131072`, additionally constrained by the available context and output budget. |
-| `ANALYSIS_TOKENS` | `1000` | Maximum generated tokens for each document-section analysis. |
-| `MERGE_TOKENS` | `1200` | Maximum generated tokens for each intermediate consolidation pass. |
-| `FINAL_TOKENS` | `1800` | Maximum generated tokens for the final Markdown report. |
-| `OUTPUT_LANGUAGE` | `auto` | Output language. `auto` follows the user's request; otherwise use a language name such as `English` or `French`. |
-| `LIVE_OUTPUT_ENABLED` | `true` | Saves/exposes the bounded live preview. Disabling it does not disable LLM streaming. True values: `1`, `true`, `yes`, `on` (case-insensitive); use `false` to disable. |
-| `LIVE_PREVIEW_CHARS` | `12000` | Recent characters retained per preview channel, clamped to `1000`–`50000`. |
-| `MAX_PAGES` | `120` | Maximum number of PDF pages accepted for one job. |
-| `MAX_UPLOAD_MB` | `20` | Maximum uploaded PDF size in MiB. |
-| `REQUEST_TIMEOUT_SECONDS` | `21600` | Read/inactivity timeout in seconds for streamed generations, not a generation/job deadline. Tokenizer/model-list requests use a separate 90-second read timeout; connection timeout is 10 seconds. |
-| `OCR_ENABLED` | `true` | Enables OCR on pages whose extracted text is insufficient. Accepted true values: `1`, `true`, `yes`, `on`. |
-| `OCR_LANGUAGES` | `eng+fra` | Tesseract language pack(s) used for OCR, separated with `+`. The image includes English (`eng`) and French (`fra`). |
-| `OCR_DPI` | `150` | OCR rendering resolution; higher values can improve recognition at greater CPU/memory cost. |
-| `OCR_MAX_PIXELS` | `5000000` | Target pixel budget per OCR page. Rendering resolution is reduced to fit, and rejects pages that cannot fit even at minimum rendering resolution. |
-| `OCR_TIMEOUT_SECONDS` | `180` | Maximum OCR time allowed for one page. |
-| `PROCESSOR_MEMORY_LIMIT` | `512m` | Docker memory limit for the processor container. `memswap_limit` is set to the same value, so swap is not added. |
-| `PROCESSOR_CPUS` | `0.75` | Docker CPU quota for the processor container. Tesseract is also limited to one OpenMP thread by Compose. |
-| `LLAMA_DOCKER_NETWORK` | unset | Name of an existing external Docker network containing llama.cpp. Used only with `compose.network.example.yaml`; required by that optional overlay. |
+| Variable                  | Default                            | Description                                                                                                                                                                                        |
+| ------------------------- | ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `LLAMA_BASE_URL`          | `http://host.docker.internal:8080` | llama.cpp API URL reachable from the processor container; use its service name/IP and port.                                                                                                        |
+| `LLAMA_API_KEY`           | empty                              | Optional bearer token for llama.cpp; leave empty if authentication is not required.                                                                                                                |
+| `BIND_ADDRESS`            | `127.0.0.1`                        | Host interface on which Docker publishes the web port. Use a LAN IP only when LAN access is intended.                                                                                              |
+| `APP_PORT`                | `9932`                             | Port used by the Flask/Waitress application inside the container and published by Docker.                                                                                                          |
+| `PUID`                    | `1000`                             | Container user ID; match the owner of the host `./data` directory.                                                                                                                                 |
+| `PGID`                    | `1000`                             | Numeric group ID used to run the container and write `./data`.                                                                                                                                     |
+| `CONTEXT_TOKENS`          | `16384`                            | Input/output context budget, no greater than llama.cpp's actual context. Prompts and outputs need headroom; an insufficient budget is rejected.                                                    |
+| `CHUNK_TOKENS`            | `3000`                             | Maximum document-text tokens sent to one section analysis. Validated range: `128`–`131072`, additionally constrained by the available context and output budget.                                   |
+| `ANALYSIS_TOKENS`         | `1000`                             | Maximum generated tokens for each document-section analysis.                                                                                                                                       |
+| `MERGE_TOKENS`            | `1200`                             | Maximum generated tokens for each intermediate consolidation pass.                                                                                                                                 |
+| `FINAL_TOKENS`            | `1800`                             | Maximum generated tokens for the final Markdown report.                                                                                                                                            |
+| `OUTPUT_LANGUAGE`         | `auto`                             | Output language. `auto` follows the user's request; otherwise use a language name such as `English` or `French`.                                                                                   |
+| `LIVE_OUTPUT_ENABLED`     | `true`                             | Saves/exposes the bounded live preview. Disabling it does not disable LLM streaming. True values: `1`, `true`, `yes`, `on` (case-insensitive); use `false` to disable.                             |
+| `LIVE_PREVIEW_CHARS`      | `12000`                            | Recent characters retained per preview channel, clamped to `1000`–`50000`.                                                                                                                         |
+| `MAX_PAGES`               | `120`                              | Maximum number of PDF pages accepted for one job.                                                                                                                                                  |
+| `MAX_UPLOAD_MB`           | `20`                               | Maximum uploaded PDF size in MiB.                                                                                                                                                                  |
+| `REQUEST_TIMEOUT_SECONDS` | `21600`                            | Read/inactivity timeout in seconds for streamed generations, not a generation/job deadline. Tokenizer/model-list requests use a separate 90-second read timeout; connection timeout is 10 seconds. |
+| `OCR_ENABLED`             | `true`                             | Enables OCR on pages whose extracted text is insufficient. Accepted true values: `1`, `true`, `yes`, `on`.                                                                                         |
+| `OCR_LANGUAGES`           | `eng+fra`                          | Tesseract language pack(s) used for OCR, separated with `+`. The image includes English (`eng`) and French (`fra`).                                                                                |
+| `OCR_DPI`                 | `150`                              | OCR rendering resolution; higher values can improve recognition at greater CPU/memory cost.                                                                                                        |
+| `OCR_MAX_PIXELS`          | `5000000`                          | Target pixel budget per OCR page. Rendering resolution is reduced to fit, and rejects pages that cannot fit even at minimum rendering resolution.                                                  |
+| `OCR_TIMEOUT_SECONDS`     | `180`                              | Maximum OCR time allowed for one page.                                                                                                                                                             |
+| `PROCESSOR_MEMORY_LIMIT`  | `512m`                             | Docker memory limit for the processor container. `memswap_limit` is set to the same value, so swap is not added.                                                                                   |
+| `PROCESSOR_CPUS`          | `0.75`                             | Docker CPU quota for the processor container. Tesseract is also limited to one OpenMP thread by Compose.                                                                                           |
+| `LLAMA_DOCKER_NETWORK`    | unset                              | Name of an existing external Docker network containing llama.cpp. Used only with `compose.network.example.yaml`; required by that optional overlay.                                                |
 
 Compose fixes `DATA_DIR=/app/data`, `SYSTEM_PROMPT_FILE=/app/config/system_prompt.txt`, and `OMP_THREAD_LIMIT=1`. Adding these names to `.env` alone has no effect. The paths match the `./data` and read-only `./config` mounts; changing them requires matching Compose changes.
 
@@ -154,15 +154,15 @@ The current experimental profile definitions are centralized in `document_proces
 
 Changing environment variables, language, prompts or profile does not alter existing jobs. **Retry uses the original snapshot. Create a new analysis to change settings**, including after a `length` failure. Snapshots include private prompt text; protect the data volume like the source PDFs.
 
-| Additional variable | Default | Purpose |
-| --- | --- | --- |
-| `STEP_TIMEOUT_SECONDS` | `21600` | Actual generation deadline, including a silent prefill; distinct from the socket inactivity timeout. |
-| `MAX_MODEL_CALLS` | `500` | Maximum generation calls per processing attempt. |
-| `MAX_JOB_ATTEMPTS` | `10` | Maximum manual/restart attempts accepted for a job; no automatic generation retries. |
-| `LLAMA_USAGE_SUPPORTED` | `false` | Request streaming usage only after verifying backend support. Optional returned usage/timings are parsed regardless. |
-| `LLAMA_APPLY_TEMPLATE_SUPPORTED` | `false` | Use `/apply-template` for input sizing after verifying it matches completion templating and reasoning options. Otherwise use tokenization plus a marked template estimate. |
-| `LLAMA_THINKING_ADAPTER` | `unsupported` | `unsupported`, `chat_template`, or `prompt`. Enable only after verifying the exact GGUF/build/template. |
-| `LLAMA_INITIAL_THINKING` | `false` | Start the parser inside a reasoning block when the verified template opens `<think>` without emitting it. |
+| Additional variable              | Default       | Purpose                                                                                                                                                                    |
+| -------------------------------- | ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `STEP_TIMEOUT_SECONDS`           | `21600`       | Actual generation deadline, including a silent prefill; distinct from the socket inactivity timeout.                                                                       |
+| `MAX_MODEL_CALLS`                | `500`         | Maximum generation calls per processing attempt.                                                                                                                           |
+| `MAX_JOB_ATTEMPTS`               | `10`          | Maximum manual/restart attempts accepted for a job; no automatic generation retries.                                                                                       |
+| `LLAMA_USAGE_SUPPORTED`          | `false`       | Request streaming usage only after verifying backend support. Optional returned usage/timings are parsed regardless.                                                       |
+| `LLAMA_APPLY_TEMPLATE_SUPPORTED` | `false`       | Use `/apply-template` for input sizing after verifying it matches completion templating and reasoning options. Otherwise use tokenization plus a marked template estimate. |
+| `LLAMA_THINKING_ADAPTER`         | `unsupported` | `unsupported`, `chat_template`, or `prompt`. Enable only after verifying the exact GGUF/build/template.                                                                    |
+| `LLAMA_INITIAL_THINKING`         | `false`       | Start the parser inside a reasoning block when the verified template opens `<think>` without emitting it.                                                                  |
 
 The thinking adapter controls whether advanced per-stage `inherit/on/off` policies are available. `chat_template` sends `chat_template_kwargs.enable_thinking`; `prompt` uses `/think` or `/no_think`. The default inherits engine behavior. **Masking reasoning in the interface does not reduce inference work.** Never assume a Qwen3 derivative supports the official model's controls.
 

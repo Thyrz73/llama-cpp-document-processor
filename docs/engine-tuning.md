@@ -26,15 +26,15 @@ Tokenization counts are cached inside a job with bounded hashed keys. Page marke
 
 Verify syntax and support against the **installed build**, not only today's documentation:
 
-| Experiment | What to measure and protect |
-| --- | --- |
-| Generation threads: 1 vs 2 on the reference CPU | Decode throughput, total duration, quality and other load. Four logical threads do not prove four threads are faster. |
-| Prompt threads, batch and ubatch | Prefill duration, working buffers, peak memory; vary independently. |
-| Engine context: e.g. 16K vs 12K | Actual KV allocation and context capacity. Changing application `CONTEXT_TOKENS` alone does not resize engine memory. |
-| KV F16 vs Q8 where supported | Memory, compatible attention kernels, throughput and factual quality. Q4_K_M model weights do not identify the KV type. |
-| Flash Attention / GPU offload | Confirm backend/build support and actual offload in logs; measure prefill and decode independently. |
-| Slots / concurrency | Keep one local generation initially. Parallel sections require measured headroom and coordinated scheduling/recovery, not merely a larger UI profile. |
-| mmap/mlock | Do not promise memory reduction from mlock. Watch host pressure and other services. |
+| Experiment                                      | What to measure and protect                                                                                                                           |
+| ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Generation threads: 1 vs 2 on the reference CPU | Decode throughput, total duration, quality and other load. Four logical threads do not prove four threads are faster.                                 |
+| Prompt threads, batch and ubatch                | Prefill duration, working buffers, peak memory; vary independently.                                                                                   |
+| Engine context: e.g. 16K vs 12K                 | Actual KV allocation and context capacity. Changing application `CONTEXT_TOKENS` alone does not resize engine memory.                                 |
+| KV F16 vs Q8 where supported                    | Memory, compatible attention kernels, throughput and factual quality. Q4_K_M model weights do not identify the KV type.                               |
+| Flash Attention / GPU offload                   | Confirm backend/build support and actual offload in logs; measure prefill and decode independently.                                                   |
+| Slots / concurrency                             | Keep one local generation initially. Parallel sections require measured headroom and coordinated scheduling/recovery, not merely a larger UI profile. |
+| mmap/mlock                                      | Do not promise memory reduction from mlock. Watch host pressure and other services.                                                                   |
 
 On the reference 8 GB host, never load a second full model concurrently for benchmarking. Pauses normally add time and are not introduced automatically. Consider them only when synchronized measurements establish a recoverable constraint.
 

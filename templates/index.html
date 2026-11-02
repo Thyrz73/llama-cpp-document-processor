@@ -1,58 +1,358 @@
 <!doctype html>
 <html lang="en">
-<head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="color-scheme" content="light dark">
-<title>Document Processor · Local PDF analysis</title>
-<link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
-<script>
-// Apply the remembered theme before rendering to avoid a color flash.
-(function(){const preferred=localStorage.getItem('document-processor-theme')||'system';document.documentElement.dataset.theme=preferred==='system'?(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'):preferred;})();
-</script>
-</head>
-<body><main>
-<header class="hero top">
-  <div><div class="brand"><div class="brand-icon" aria-hidden="true">◫</div><h1>Document Processor</h1></div><p class="muted" data-i18n="Analyze large PDFs locally with your llama.cpp model. Jobs continue on your server even if you close the browser.">Analyze large PDFs locally with your llama.cpp model. Jobs continue on your server even if you close the browser.</p></div>
-  <div class="theme-controls">
-    <div class="theme-box"><img id="languageFlag" src="{{ url_for('static', filename='en.svg') }}" width="24" height="16" alt=""><label for="uiLanguage" data-i18n="Language">Language</label><select id="uiLanguage"><option value="en">English</option><option value="fr">Français</option></select></div>
-    <div class="theme-box"><label for="theme" class="small muted" data-i18n="Theme">Theme</label><select id="theme" aria-label="Theme"><option value="system" data-i18n="System">System</option><option value="light" data-i18n="Light">Light</option><option value="dark" data-i18n="Dark">Dark</option></select></div>
-  </div>
-</header>
-<section class="panel"><div class="top"><h2 data-i18n="New analysis">New analysis</h2><span class="pill" data-i18n="Local · sequential processing">Local · sequential processing</span></div>
-<form id="uploadForm">
-<label class="drop" id="drop" for="file"><strong id="fileLabel">📄 Drop a PDF or click to browse</strong><span class="muted"><span data-i18n="Text or scanned PDF">Text or scanned PDF</span> · {{ limit }} MiB · OCR FR/EN</span><input id="file" name="file" type="file" accept=".pdf,application/pdf" required></label>
-<label class="field-label" for="question" data-i18n="Analysis instructions">Analysis instructions</label><textarea id="question" name="question" maxlength="1500">Analyze this entire document: objectives, methods, results, key figures, assumptions, limitations, and conclusions. Cite relevant pages and flag anything that cannot be verified.</textarea>
-<div class="settings-grid">
-<div><label class="field-label" for="profile" data-i18n="Performance profile">Performance profile</label><select id="profile" name="profile">
-<option value="low" data-i18n="Limited resources">Limited resources</option><option value="medium" data-i18n="Moderate resources">Moderate resources</option><option value="high" data-i18n="High performance">High performance</option><option value="ultra" data-i18n="AI workstation">AI workstation</option></select></div>
-<div><label class="field-label" for="reportLanguage" data-i18n="Report language">Report language</label><select id="reportLanguage"><option value="auto" data-i18n="Follow the request">Follow the request</option><option value="fr">Français</option><option value="en">English</option></select></div>
-<div><label class="field-label" for="detailLevel" data-i18n="Report detail">Report detail</label><select id="detailLevel"><option value="concise" data-i18n="Concise">Concise</option><option value="standard" selected data-i18n="Standard">Standard</option><option value="detailed" data-i18n="Detailed">Detailed</option></select></div>
-</div>
-<p id="profileHelp" class="small muted"></p>
-<details id="advanced"><summary data-i18n="Advanced settings">Advanced settings</summary>
-<p class="small muted" data-i18n="Leave fields empty to use the profile. Overrides create a customized configuration.">Leave fields empty to use the profile. Overrides create a customized configuration.</p>
-<div class="settings-grid">
-<div><label for="chunk_tokens" data-i18n="Section tokens">Section tokens</label><input id="chunk_tokens" type="number" min="128" max="131072" step="1"></div>
-<div><label for="analysis_tokens" data-i18n="Analysis output tokens">Analysis output tokens</label><input id="analysis_tokens" type="number" min="64" max="65536" step="1"></div>
-<div><label for="merge_tokens" data-i18n="Merge output tokens">Merge output tokens</label><input id="merge_tokens" type="number" min="64" max="65536" step="1"></div>
-<div><label for="final_tokens" data-i18n="Final output tokens">Final output tokens</label><input id="final_tokens" type="number" min="64" max="65536" step="1"></div>
-<div><label for="temperature" data-i18n="Temperature">Temperature</label><input id="temperature" type="number" min="0" max="2" step="0.05"></div>
-<div><label for="top_p" data-i18n="Top P">Top P</label><input id="top_p" type="number" min="0" max="1" step="0.05"></div>
-<div><label for="top_k" data-i18n="Top K">Top K</label><input id="top_k" type="number" min="0" max="1000" step="1"></div>
-<div><label for="min_p" data-i18n="Min P">Min P</label><input id="min_p" type="number" min="0" max="1" step="0.05"></div>
-<div><label for="step_timeout_seconds" data-i18n="Generation time limit (seconds)">Generation time limit (seconds)</label><input id="step_timeout_seconds" type="number" min="1" max="86400" step="1"></div>
-<div><label for="max_calls" data-i18n="Maximum model calls">Maximum model calls</label><input id="max_calls" type="number" min="1" max="2000" step="1"></div>
-<div><label for="thinking_section" data-i18n="Section reasoning">Section reasoning</label><select id="thinking_section" disabled><option value="inherit" data-i18n="Engine default">Engine default</option><option value="off" data-i18n="Off">Off</option><option value="on" data-i18n="On">On</option></select></div>
-<div><label for="thinking_merge" data-i18n="Merge reasoning">Merge reasoning</label><select id="thinking_merge" disabled><option value="inherit" data-i18n="Engine default">Engine default</option><option value="off" data-i18n="Off">Off</option><option value="on" data-i18n="On">On</option></select></div>
-<div><label for="thinking_final" data-i18n="Final reasoning">Final reasoning</label><select id="thinking_final" disabled><option value="inherit" data-i18n="Engine default">Engine default</option><option value="off" data-i18n="Off">Off</option><option value="on" data-i18n="On">On</option></select></div>
-</div>
-<p class="small muted" data-i18n="Reasoning controls require an administrator-verified model and template. Hiding reasoning does not disable it.">Reasoning controls require an administrator-verified model and template. Hiding reasoning does not disable it.</p>
-</details>
-<div class="preview" aria-live="polite"><strong data-i18n="Applied settings">Applied settings</strong><div id="configPreview"></div><div id="configWarnings" class="small muted"></div><p class="micro muted" data-i18n="Each complete prompt is validated again before generation.">Each complete prompt is validated again before generation.</p></div>
-<div class="top" style="margin-top:14px"><span class="muted small" data-i18n="One job at a time. Progress is saved to disk.">One job at a time. Progress is saved to disk.</span><button type="submit" id="send" data-i18n="Start analysis">Start analysis</button></div><div id="feedback" role="status" aria-live="polite"></div>
-</form></section>
-<section class="panel"><div class="top" style="margin-bottom:18px"><h2 data-i18n="Analysis jobs">Analysis jobs</h2><button class="button-secondary" id="refresh" type="button" data-i18n="Refresh">Refresh</button></div><div id="jobsError" class="error" role="status" hidden></div><div id="jobs" class="muted">Loading…</div></section>
-<section class="panel"><details><summary data-i18n="Engine diagnostics">Engine diagnostics</summary><p class="small muted" data-i18n="Read-only information. Profiles never change model, threads, GPU, slots or KV cache.">Read-only information. Profiles never change model, threads, GPU, slots or KV cache.</p><button type="button" id="diagnostics" class="button-secondary" data-i18n="Check backend">Check backend</button><div id="diagnosticOutput" role="status"></div></details></section>
-<footer data-i18n="Lightweight local processing · No external AI service · Optional live generation preview · Reports persist on disk.">Lightweight local processing · No external AI service · Optional live generation preview · Reports persist on disk.</footer>
-</main><script id="translations" type="application/json">{{ translations|tojson }}</script>
-<script src="{{ url_for('static', filename='app.js') }}" defer></script></body></html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Document Processor · Local PDF analysis</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}" />
+    <script>
+      // Apply the remembered theme before rendering to avoid a color flash.
+      (function () {
+        const preferred =
+          localStorage.getItem("document-processor-theme") || "system";
+        document.documentElement.dataset.theme =
+          preferred === "system"
+            ? matchMedia("(prefers-color-scheme: dark)").matches
+              ? "dark"
+              : "light"
+            : preferred;
+      })();
+    </script>
+  </head>
+  <body>
+    <main>
+      <header class="hero top">
+        <div>
+          <div class="brand">
+            <div class="brand-icon" aria-hidden="true">◫</div>
+            <h1>Document Processor</h1>
+          </div>
+          <p
+            class="muted"
+            data-i18n="Analyze large PDFs locally with your llama.cpp model. Jobs continue on your server even if you close the browser."
+          >
+            Analyze large PDFs locally with your llama.cpp model. Jobs continue
+            on your server even if you close the browser.
+          </p>
+        </div>
+        <div class="theme-controls">
+          <div class="theme-box">
+            <img
+              id="languageFlag"
+              src="{{ url_for('static', filename='en.svg') }}"
+              width="24"
+              height="16"
+              alt=""
+            /><label for="uiLanguage" data-i18n="Language">Language</label
+            ><select id="uiLanguage">
+              <option value="en">English</option>
+              <option value="fr">Français</option>
+            </select>
+          </div>
+          <div class="theme-box">
+            <label for="theme" class="small muted" data-i18n="Theme"
+              >Theme</label
+            ><select id="theme" aria-label="Theme">
+              <option value="system" data-i18n="System">System</option>
+              <option value="light" data-i18n="Light">Light</option>
+              <option value="dark" data-i18n="Dark">Dark</option>
+            </select>
+          </div>
+        </div>
+      </header>
+      <section class="panel">
+        <div class="top">
+          <h2 data-i18n="New analysis">New analysis</h2>
+          <span class="pill" data-i18n="Local · sequential processing"
+            >Local · sequential processing</span
+          >
+        </div>
+        <form id="uploadForm">
+          <label class="drop" id="drop" for="file"
+            ><strong id="fileLabel">📄 Drop a PDF or click to browse</strong
+            ><span class="muted"
+              ><span data-i18n="Text or scanned PDF">Text or scanned PDF</span>
+              · {{ limit }} MiB · OCR FR/EN</span
+            ><input
+              id="file"
+              name="file"
+              type="file"
+              accept=".pdf,application/pdf"
+              required
+          /></label>
+          <label
+            class="field-label"
+            for="question"
+            data-i18n="Analysis instructions"
+            >Analysis instructions</label
+          ><textarea id="question" name="question" maxlength="1500">
+Analyze this entire document: objectives, methods, results, key figures, assumptions, limitations, and conclusions. Cite relevant pages and flag anything that cannot be verified.</textarea
+          >
+          <div class="settings-grid">
+            <div>
+              <label
+                class="field-label"
+                for="profile"
+                data-i18n="Performance profile"
+                >Performance profile</label
+              ><select id="profile" name="profile">
+                <option value="low" data-i18n="Limited resources">
+                  Limited resources
+                </option>
+                <option value="medium" data-i18n="Moderate resources">
+                  Moderate resources
+                </option>
+                <option value="high" data-i18n="High performance">
+                  High performance
+                </option>
+                <option value="ultra" data-i18n="AI workstation">
+                  AI workstation
+                </option>
+              </select>
+            </div>
+            <div>
+              <label
+                class="field-label"
+                for="reportLanguage"
+                data-i18n="Report language"
+                >Report language</label
+              ><select id="reportLanguage">
+                <option value="auto" data-i18n="Follow the request">
+                  Follow the request
+                </option>
+                <option value="fr">Français</option>
+                <option value="en">English</option>
+              </select>
+            </div>
+            <div>
+              <label
+                class="field-label"
+                for="detailLevel"
+                data-i18n="Report detail"
+                >Report detail</label
+              ><select id="detailLevel">
+                <option value="concise" data-i18n="Concise">Concise</option>
+                <option value="standard" selected data-i18n="Standard">
+                  Standard
+                </option>
+                <option value="detailed" data-i18n="Detailed">Detailed</option>
+              </select>
+            </div>
+          </div>
+          <p id="profileHelp" class="small muted"></p>
+          <details id="advanced">
+            <summary data-i18n="Advanced settings">Advanced settings</summary>
+            <p
+              class="small muted"
+              data-i18n="Leave fields empty to use the profile. Overrides create a customized configuration."
+            >
+              Leave fields empty to use the profile. Overrides create a
+              customized configuration.
+            </p>
+            <div class="settings-grid">
+              <div>
+                <label for="chunk_tokens" data-i18n="Section tokens"
+                  >Section tokens</label
+                ><input
+                  id="chunk_tokens"
+                  type="number"
+                  min="128"
+                  max="131072"
+                  step="1"
+                />
+              </div>
+              <div>
+                <label for="analysis_tokens" data-i18n="Analysis output tokens"
+                  >Analysis output tokens</label
+                ><input
+                  id="analysis_tokens"
+                  type="number"
+                  min="64"
+                  max="65536"
+                  step="1"
+                />
+              </div>
+              <div>
+                <label for="merge_tokens" data-i18n="Merge output tokens"
+                  >Merge output tokens</label
+                ><input
+                  id="merge_tokens"
+                  type="number"
+                  min="64"
+                  max="65536"
+                  step="1"
+                />
+              </div>
+              <div>
+                <label for="final_tokens" data-i18n="Final output tokens"
+                  >Final output tokens</label
+                ><input
+                  id="final_tokens"
+                  type="number"
+                  min="64"
+                  max="65536"
+                  step="1"
+                />
+              </div>
+              <div>
+                <label for="temperature" data-i18n="Temperature"
+                  >Temperature</label
+                ><input
+                  id="temperature"
+                  type="number"
+                  min="0"
+                  max="2"
+                  step="0.05"
+                />
+              </div>
+              <div>
+                <label for="top_p" data-i18n="Top P">Top P</label
+                ><input id="top_p" type="number" min="0" max="1" step="0.05" />
+              </div>
+              <div>
+                <label for="top_k" data-i18n="Top K">Top K</label
+                ><input id="top_k" type="number" min="0" max="1000" step="1" />
+              </div>
+              <div>
+                <label for="min_p" data-i18n="Min P">Min P</label
+                ><input id="min_p" type="number" min="0" max="1" step="0.05" />
+              </div>
+              <div>
+                <label
+                  for="step_timeout_seconds"
+                  data-i18n="Generation time limit (seconds)"
+                  >Generation time limit (seconds)</label
+                ><input
+                  id="step_timeout_seconds"
+                  type="number"
+                  min="1"
+                  max="86400"
+                  step="1"
+                />
+              </div>
+              <div>
+                <label for="max_calls" data-i18n="Maximum model calls"
+                  >Maximum model calls</label
+                ><input
+                  id="max_calls"
+                  type="number"
+                  min="1"
+                  max="2000"
+                  step="1"
+                />
+              </div>
+              <div>
+                <label for="thinking_section" data-i18n="Section reasoning"
+                  >Section reasoning</label
+                ><select id="thinking_section" disabled>
+                  <option value="inherit" data-i18n="Engine default">
+                    Engine default
+                  </option>
+                  <option value="off" data-i18n="Off">Off</option>
+                  <option value="on" data-i18n="On">On</option>
+                </select>
+              </div>
+              <div>
+                <label for="thinking_merge" data-i18n="Merge reasoning"
+                  >Merge reasoning</label
+                ><select id="thinking_merge" disabled>
+                  <option value="inherit" data-i18n="Engine default">
+                    Engine default
+                  </option>
+                  <option value="off" data-i18n="Off">Off</option>
+                  <option value="on" data-i18n="On">On</option>
+                </select>
+              </div>
+              <div>
+                <label for="thinking_final" data-i18n="Final reasoning"
+                  >Final reasoning</label
+                ><select id="thinking_final" disabled>
+                  <option value="inherit" data-i18n="Engine default">
+                    Engine default
+                  </option>
+                  <option value="off" data-i18n="Off">Off</option>
+                  <option value="on" data-i18n="On">On</option>
+                </select>
+              </div>
+            </div>
+            <p
+              class="small muted"
+              data-i18n="Reasoning controls require an administrator-verified model and template. Hiding reasoning does not disable it."
+            >
+              Reasoning controls require an administrator-verified model and
+              template. Hiding reasoning does not disable it.
+            </p>
+          </details>
+          <div class="preview" aria-live="polite">
+            <strong data-i18n="Applied settings">Applied settings</strong>
+            <div id="configPreview"></div>
+            <div id="configWarnings" class="small muted"></div>
+            <p
+              class="micro muted"
+              data-i18n="Each complete prompt is validated again before generation."
+            >
+              Each complete prompt is validated again before generation.
+            </p>
+          </div>
+          <div class="top" style="margin-top: 14px">
+            <span
+              class="muted small"
+              data-i18n="One job at a time. Progress is saved to disk."
+              >One job at a time. Progress is saved to disk.</span
+            ><button type="submit" id="send" data-i18n="Start analysis">
+              Start analysis
+            </button>
+          </div>
+          <div id="feedback" role="status" aria-live="polite"></div>
+        </form>
+      </section>
+      <section class="panel">
+        <div class="top" style="margin-bottom: 18px">
+          <h2 data-i18n="Analysis jobs">Analysis jobs</h2>
+          <button
+            class="button-secondary"
+            id="refresh"
+            type="button"
+            data-i18n="Refresh"
+          >
+            Refresh
+          </button>
+        </div>
+        <div id="jobsError" class="error" role="status" hidden></div>
+        <div id="jobs" class="muted">Loading…</div>
+      </section>
+      <section class="panel">
+        <details>
+          <summary data-i18n="Engine diagnostics">Engine diagnostics</summary>
+          <p
+            class="small muted"
+            data-i18n="Read-only information. Profiles never change model, threads, GPU, slots or KV cache."
+          >
+            Read-only information. Profiles never change model, threads, GPU,
+            slots or KV cache.
+          </p>
+          <button
+            type="button"
+            id="diagnostics"
+            class="button-secondary"
+            data-i18n="Check backend"
+          >
+            Check backend
+          </button>
+          <div id="diagnosticOutput" role="status"></div>
+        </details>
+      </section>
+      <footer
+        data-i18n="Lightweight local processing · No external AI service · Optional live generation preview · Reports persist on disk."
+      >
+        Lightweight local processing · No external AI service · Optional live
+        generation preview · Reports persist on disk.
+      </footer>
+    </main>
+    <script id="translations" type="application/json">
+      {{ translations|tojson }}
+    </script>
+    <script src="{{ url_for('static', filename='app.js') }}" defer></script>
+  </body>
+</html>
