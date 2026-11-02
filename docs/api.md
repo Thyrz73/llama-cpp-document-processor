@@ -1,46 +1,68 @@
-# Application API and compatibility
+# Application API
 
-The existing Flask application, port, SQLite file, data volume and report URLs remain in use. No separate V2 service is created. Responses contain public configuration only; the private system prompt and template snapshots are never returned.
+The API uses the same origin as the web interface (port 9932 by default). Responses under `/api/` have `Cache-Control: no-store`. Errors contain `error` and, where available, `error_code`. Job IDs are 32 lowercase hexadecimal characters.
 
-## Existing routes
+There is no authentication or per-user isolation. Browser POSTs from another origin are rejected, but this does not replace access control.
 
-- `GET /api/health`: application liveness only, no model request.
-- `GET /api/jobs`: latest 100 jobs and activity across the whole queue. Existing fields remain. New fields include `phase_code`, `phase_args`, `error_code`, `cancel_requested`, `queued_at` and, for new jobs, `configuration`.
-- `GET /api/jobs/<id>`: the same public job representation.
-- `POST /api/jobs`: multipart `file` and `question` remain supported. Optional `options` contains JSON as shown below. Unknown fields, invalid budgets and unsupported reasoning controls return 400.
-- `GET /api/jobs/<id>/live`: bounded useful output, phase, activity and available metrics. Reasoning is omitted by default; `?include_reasoning=true` explicitly requests the retained emitted channel. This privacy change requires old clients displaying reasoning to add the parameter. No generation is started.
-- `POST /api/jobs/<id>/retry`: failed or cancelled jobs only; empty body. Reuses the original snapshot. Changing parameters requires a new job. Concurrent/repeated requests return 409 once the job is queued. Historical jobs without snapshots return a `legacy_recomputed` warning. Attempts are bounded by the saved administrative limit.
-- `GET /api/jobs/<id>/report`: unchanged Markdown attachment, `analysis_<8-character-id>.md`; 404 for missing files/jobs, 409 for unfinished/empty results. Never starts inference.
+## Routes
+
+| Method and path | Behavior |
+| --- | --- |
+| `GET /api/health` | Web app liveness only; no model or worker check |
+| `GET /api/jobs` | `jobs`: latest 100; `has_active_jobs`: activity across the whole queue |
+| `GET /api/jobs/<id>` | Job status, progress, phase, question, filename and public configuration |
+| `POST /api/jobs` | Multipart PDF upload; returns 201 with ID, queued status and configuration |
+| `GET /api/jobs/<id>/report` | UTF-8 Markdown attachment, `analysis_<first 8 ID characters>.md` |
+| `GET /api/jobs/<id>/live` | Latest bounded preview; never starts generation |
+| `POST /api/jobs/<id>/retry` | Empty body; requeues a failed/cancelled job with its original settings |
+| `POST /api/jobs/<id>/cancel` | Requests cancellation |
+| `GET /api/jobs/<id>/metrics` | Attempts, step records and summary counts |
+| `GET /api/profiles` | Profiles, environment defaults and cached backend capabilities |
+| `POST /api/config/preview` | JSON options; returns preliminary configuration without creating a job |
+| `GET /api/diagnostics` | Read-only backend inspection, cached for 30 seconds; no inference |
+
+Missing jobs return 404. Report downloads return 409 unless the job is done, 404 if the file is missing, and 409 if empty. The content type is `text/markdown; charset=utf-8`.
+
+## Creating a job
+
+Multipart fields are `file`, `question` (maximum 1,500 characters) and optional `options` containing a JSON object:
 
 ```json
 {
   "profile": "low",
   "report_language": "fr",
   "detail_level": "standard",
-  "overrides": { "analysis_tokens": 1100 }
+  "overrides": { "analysis_tokens": 3072 }
 }
 ```
 
-Omitting `options` uses historical environment defaults. Explicit profiles are `low`, `medium`, `high`, `ultra`. Report language is `auto`, `fr` or `en`; detail is `concise`, `standard` or `detailed`. Advanced overrides allow `chunk_tokens`, `analysis_tokens`, `merge_tokens`, `final_tokens`, `temperature`, `top_p`, `top_k`, `min_p`, `max_calls`, `step_timeout_seconds`, and `thinking_section/merge/final` (`inherit/on/off`). URLs, credentials, context ceilings, engine commands and concurrency are not job options.
+The PDF extension, header and upload size are checked at submission. Readability, encryption and page limits are checked during processing. If the question is omitted or empty, the API uses “Analyze the entire document”; whitespace-only requests are rejected.
 
-## Additional routes
+Options:
 
-- `GET /api/profiles`: central profile registry, legacy defaults, cached capabilities and reasoning-control availability. No inference or engine probe.
-- `POST /api/config/preview`: JSON options; returns preliminary resolved settings and warnings without creating a job. Every complete prompt is checked again immediately before generation. Preview calls use a recent diagnostic cache if available.
-- `GET /api/diagnostics`: cached (30 seconds) read-only `/v1/models` and optional `/props` observations. Missing properties remain unknown. Model names are reduced to a basename; URLs, raw templates, slot prompts and arbitrary build metadata are not exposed. Process RSS measures **Document Processor**, not the model container or whole host. No Docker socket is needed.
-- `GET /api/jobs/<id>/metrics?limit=200&before=<step-id>`: attempt summaries and step records, newest first. `limit` is 1–500; `next_before` enables pagination. No prompt, PDF or reasoning text appears in measurements.
-- `POST /api/jobs/<id>/cancel`: 202 for an accepted request, 200 when already cancelled, 409 for completed/failed jobs. A running job remains `running` with `cancel_requested=true` until a safe cancellation boundary; then it becomes `cancelled`.
+- `profile`: `legacy`, `low`, `medium`, `high`, `ultra`. Omitted profile uses environment budgets; the browser selects Low by default.
+- `report_language`: `auto`, `fr`, `en`. Automatic follows the request.
+- `detail_level`: `concise`, `standard`, `detailed`. Scales the final budget by 0.8, 1 or 1.5 before explicit overrides.
+- `overrides`: `chunk_tokens`, `analysis_tokens`, `merge_tokens`, `final_tokens`, `temperature`, `top_p`, `top_k`, `min_p`, `max_calls`, `step_timeout_seconds`, `thinking_section`, `thinking_merge`, `thinking_final`.
 
-API responses use `Cache-Control: no-store`. Errors include a stable code where available and a safe English fallback. The browser translates codes rather than translating generated reports. Cross-origin browser POSTs are rejected; this is not user authentication.
+Reasoning policies are `inherit`, `on` or `off`; on/off requires an administrator-configured adapter. Context ceilings, endpoints, credentials and concurrency cannot be set per job. Unsupported options and invalid values return 400.
 
-## Metrics and limits
+Preview accepts the options object directly as JSON. Both preview and creation use cached capabilities without probing the backend. The full prompt is checked against context limits before generation.
 
-Each attempt has queue waiting and execution duration. Each step records its duration, reuse/failure status and optional model metrics. Usage and timing values carry their source. Missing values are null, never inferred from SSE event count or the Markdown. First event/content latency includes request overhead and backend waiting; it is not equivalent to engine prefill time. `length` is recorded as a limit failure without assuming whether output or context caused it. `[DONE]` without an explicit reason is accepted for compatibility but recorded as `done_without_reason`.
+## Progress, retries and cancellation
 
-Generated tokens include reasoning only to the extent defined by the engine's usage fields. A useful-token count is derived only from a consistent explicit completion/reasoning breakdown. Mechanical numeric/page-reference checks are advisory counts, not semantic coverage guarantees.
+Statuses are `queued`, `running`, `done`, `failed`, `cancelled`. `progress_percent` measures workflow progress, not remaining time; done is always shown as 100. `phase_code` and `phase_args` support interface translation.
 
-The real generation deadline and cancellation monitor run independently of network token arrival. If an HTTP reader takes time to close, a process-wide gate prevents another local generation until it exits. A remote server may take longer to release its slot. OCR cancellation takes effect after its bounded subprocess finishes or times out. Tokenizer requests retain bounded network timeouts. There are no automatic generation retries or automatic continuations after `length`.
+Retry returns 200 when queued, 409 for an incompatible status or an exhausted attempt limit, and 400 for a nonempty body. It preserves saved budgets and prompts. Jobs predating snapshots get `legacy_recomputed` and current settings when processed. Create a new job to use new settings.
 
-## Deployment boundary
+Cancel returns 202 when accepted, 200 if already cancelled and 409 for done/failed jobs. Queued jobs become cancelled immediately. Running jobs keep their status with `cancel_requested=true` until cancellation takes effect. OCR finishes or times out first; remote engine release depends on the backend.
 
-The service remains for a trusted private installation. There are no accounts or per-user ownership checks. Anyone with application access can read its jobs, reports and explicitly requested live reasoning. Use an authenticated reverse proxy and restrict network/filesystem access; do not describe this as an isolated public multi-user service. Engine URL/credentials are administrator-owned environment variables. A user's uploaded PDF or advanced options cannot select arbitrary network targets.
+## Live output, metrics and diagnostics
+
+Live output keeps only the latest pass, with bounded content and reasoning. The `reasoning` field is empty unless `?include_reasoning=true` is supplied. Only emitted reasoning is available; it may be incomplete. Disabling live output leaves generation streaming enabled.
+
+Metrics accept `?limit=200&before=<step-id>`: limit is 1–500, steps are newest first, and `next_before` identifies the next page. Responses include up to 100 attempts, queue/execution durations, step reuse/failure status and available backend measurements.
+
+Unknown token/timing values remain null or absent. First-event/content latency includes transport and backend waiting. `length` is a failure; `[DONE]` without an explicit finish reason is accepted as `done_without_reason`. There are no automatic generation retries or continuations. Numeric/page-reference checks count warnings, not semantic correctness.
+
+Diagnostics reads `/v1/models` and optional `/props`. It exposes sanitized observations, not credentials, URLs, raw templates or prompts. RSS is the processor's memory, not the engine's or host's. Private system prompts and saved templates are never included in these API responses.

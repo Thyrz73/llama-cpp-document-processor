@@ -1,54 +1,53 @@
-# Engine diagnostics, optimization and calibration
+# Performance, reasoning and benchmarks
 
-Profiles change application work, not machine resources. They do not load another model, add a GPU, change llama.cpp slots, resize KV cache or alter threads. All four profiles are experimental and sequential until measured on a verified backend. Report detail is a separate preference.
+Profiles change token budgets, not machine resources. They do not change the model, threads, GPU, slots or KV cache. All profiles run sequentially and remain experimental; larger budgets do not promise better quality or shorter runs.
 
-## Establish a baseline
+## Understand the measurements
 
-Record the actual llama.cpp build, GGUF identity/hash, quantization, chat template, context per request/slot, slots, threads, batch/ubatch, KV types and relevant container limits. Use sanitized startup logs and already available diagnostics. Current environment values do not prove what a historic task used.
+The app records queue waiting, step durations, tokenization calls and optional backend usage/timings. Diagnostics shows sanitized backend properties and processor RSS. It cannot measure model memory, host swap activity or the exact GGUF identity.
 
-For the audit's task 1570, the reported 1,841 generated tokens versus the repository's default section budget of 1,000 still requires the historic payload/configuration, stage association and finish reason. The code does send `max_tokens`. Do not explain the difference as a separate extra reasoning allowance without evidence. Sections do not accumulate previous conversation history.
+First-event latency includes network and backend waiting; it is not engine prefill time. Reasoning tokens are counted only when the backend supplies a usable breakdown. Numeric/page-reference checks are warnings, not factual-quality scores.
 
-The audit's approximately 50-minute request is a reported observation, not a measurement of this implementation. No speed gain or memory saving is claimed by the profile values.
+Record the deployed build, model/hash, quantization, template, context per slot and resource limits when comparing runs. An advertised model name or current environment does not prove what an older job used.
 
-## Application experiments
+## Application settings
 
-Start with fresh jobs and compare one variable at a time:
+The browser initially selects Low: section input 3000, analysis output 3072, merge output 2048 and final output 3072 tokens. See [all profiles](../README.md#profiles-and-configuration). API jobs without a profile use environment budgets instead.
 
-1. Compact factual notes: preserve facts, numbers/units, uncertainty, contradictions and page references; inspect intermediate notes and merges, not only the final report.
-2. Verified stage-specific reasoning. Compare section, merge and final separately. Qwen3 official controls do not prove support by an abliterated derivative. Keep sampling stable during this comparison.
-3. Output budgets: detect `length`; do not exchange useful work for silently truncated notes. No automatic continuation is enabled.
-4. Chunk size: shorter prompts may increase calls and repeated prefill. Judge whole-document time and quality.
-5. Adaptive grouping: inspect depth, costs and lost facts. The implementation partitions deterministically, passes singletons through and refuses non-progressing plans.
+Change one setting at a time, using fresh jobs:
 
-Tokenization counts are cached inside a job with bounded hashed keys. Page markers and paragraph/newline boundaries are preserved where possible; oversized fragments still need splitting. No overlap is added without evidence that its cost improves document coverage. OCR does not interpret figures or complex table semantics.
+- **Chunk size:** smaller sections shorten input but may add calls and repeated prompt processing.
+- **Output budgets:** preserve essential evidence; output ending with `length` fails rather than being accepted as a complete note.
+- **Report detail:** changes the final budget independently of the profile.
+- **Reasoning:** compare each stage separately and keep sampling stable.
 
-## External engine experiments — separate approval/window
+The pipeline caches token counts within an attempt, merges groups of up to four notes when needed and passes singleton groups through. It rejects merge plans that cannot reduce the notes. Each request is independent; it does not accumulate a chat history.
 
-Verify syntax and support against the **installed build**, not only today's documentation:
+Quality review should cover the notes, merges and final report: figures/units, assumptions, limits, page references, causal wording and actual contradictions. Synthesis only receives notes. Better prompts do not remove the need to check the PDF.
 
-| Experiment                                      | What to measure and protect                                                                                                                           |
-| ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Generation threads: 1 vs 2 on the reference CPU | Decode throughput, total duration, quality and other load. Four logical threads do not prove four threads are faster.                                 |
-| Prompt threads, batch and ubatch                | Prefill duration, working buffers, peak memory; vary independently.                                                                                   |
-| Engine context: e.g. 16K vs 12K                 | Actual KV allocation and context capacity. Changing application `CONTEXT_TOKENS` alone does not resize engine memory.                                 |
-| KV F16 vs Q8 where supported                    | Memory, compatible attention kernels, throughput and factual quality. Q4_K_M model weights do not identify the KV type.                               |
-| Flash Attention / GPU offload                   | Confirm backend/build support and actual offload in logs; measure prefill and decode independently.                                                   |
-| Slots / concurrency                             | Keep one local generation initially. Parallel sections require measured headroom and coordinated scheduling/recovery, not merely a larger UI profile. |
-| mmap/mlock                                      | Do not promise memory reduction from mlock. Watch host pressure and other services.                                                                   |
+## Reasoning controls
 
-On the reference 8 GB host, never load a second full model concurrently for benchmarking. Pauses normally add time and are not introduced automatically. Consider them only when synchronized measurements establish a recoverable constraint.
+Set `LLAMA_THINKING_ADAPTER` only after verifying the installed model and template:
 
-Investigate extreme `0.02 token/s` episodes separately from gradual decode slowdown. Align engine timestamps with active swap in/out, major faults, memory pressure, CPU quotas/throttling, frequencies, temperatures and competing work. Allocated swap is not proof of active paging. Processor RSS from the application diagnostic is not model memory or total host RAM.
+| Adapter | Behavior |
+| --- | --- |
+| `unsupported` | Default; only `inherit` is allowed |
+| `chat_template` | Sends `chat_template_kwargs.enable_thinking` for on/off |
+| `prompt` | Adds `/think` or `/no_think` for on/off |
 
-## Reproducible benchmark client
+`LLAMA_INITIAL_THINKING=true` is only for templates that open a reasoning block without emitting its opening tag. Hiding the reasoning panel does not disable generation.
 
-Prepare a plan, without any network access:
+`LLAMA_USAGE_SUPPORTED` requests streamed usage; `LLAMA_APPLY_TEMPLATE_SUPPORTED` enables rendered-template sizing. Leave both false until backend support is verified. Otherwise sizing uses tokenization with estimated template headroom. A Qwen derivative's name does not establish support for a particular control.
+
+## Benchmark script
+
+Prepare an offline plan; this makes no network requests:
 
 ```bash
 python scripts/benchmark.py --variants docs/benchmark-variants.example.json --repeat 3
 ```
 
-Only in an authorized test window, with an authorized PDF and a plain text question file:
+To run it against your instance with a test PDF and UTF-8 question file:
 
 ```bash
 python scripts/benchmark.py --variants docs/benchmark-variants.example.json \
@@ -57,17 +56,16 @@ python scripts/benchmark.py --variants docs/benchmark-variants.example.json \
   --repeat 3 --cache-condition unknown --output /path/to/new-results.json
 ```
 
-The tool creates a new job per trial, alternates variant order, collects all metric pages and prints median/min/max duration for successful trials. It never uses Retry to change options. Output excludes question/PDF/report text. Optional proxy credentials come from `PROCESSOR_BENCH_TOKEN`, not command-line arguments. A timeout or keyboard interruption requests cancellation of the current benchmark job; remote backend cancellation still depends on the server.
+This creates a new job per trial, alternates variant order and collects paginated metrics. Choose a new output path; the script refuses an existing one. It prints median/min/max execution duration for successful trials, excluding queue waiting. Timeout or keyboard interruption requests cancellation of the current benchmark job.
 
-Changing the profile changes multiple budgets; comparisons require `--allow-combined` and cannot establish an individual causal effect. Separate cold/warm cache conditions honestly: the tool records the declared condition but does not flush caches or restart the engine. Compare compatible model/build/template observations and report failures as well as successes.
+Profile comparisons require `--allow-combined` because several budgets change together. `--cache-condition` records your declared condition; it does not flush caches. Optional reverse-proxy bearer credentials come from `PROCESSOR_BENCH_TOKEN`. Exported results exclude the PDF, question and report text.
 
-An optional `--checklist` accepts entries with an `id` and required `terms`, as in `quality-checklist.example.json`. These are exact text matches and can miss paraphrases or accept misleading text. They are **not** a factual verifier. Build a human-reviewed checklist from the PDF covering facts, units, uncertainty, contradictions and page references; check every synthesis level. Calibrate permanent defaults only after acceptable quality, repeated measurements and documented resource conditions.
+An optional `--checklist docs/quality-checklist.example.json` checks exact report substrings. Adapt the example to the PDF. Matches can accept misleading statements or miss correct paraphrases, so review factual accuracy separately.
 
-## References to verify against the actual deployment
+## External engine settings
 
-- [llama.cpp server API and options](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md)
-- [Official Qwen3-4B model card](https://huggingface.co/Qwen/Qwen3-4B)
-- [llama-bench](https://github.com/ggml-org/llama.cpp/blob/master/tools/llama-bench/README.md)
-- [Linux cgroup v2 counters and pressure](https://docs.kernel.org/admin-guide/cgroup-v2.html)
+Change llama.cpp separately from the app. Verify supported options in the installed build and measure one change at a time: threads, batch sizes, context, KV format or GPU offload. Application `CONTEXT_TOKENS` is a ceiling; it does not resize the engine's KV cache.
 
-These upstream pages change. They describe potential capabilities, not proof of the installed server configuration.
+For very slow generation, compare engine logs with CPU load, container quotas, memory pressure and active swap in/out. Allocated swap alone does not prove active paging. On a constrained host, avoid loading a second model just to benchmark.
+
+Upstream references: [llama.cpp server](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md), [llama-bench](https://github.com/ggml-org/llama.cpp/blob/master/tools/llama-bench/README.md), [Qwen3-4B model card](https://huggingface.co/Qwen/Qwen3-4B). These do not establish the capabilities of your installed build.

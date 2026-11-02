@@ -1,44 +1,62 @@
-# Updating the existing application safely
+# Updates, saved jobs and rollback
 
-This is an in-place application update: `python app.py`, the Compose service, routes, port, source PDF names and report download path remain unchanged. New Python modules and static assets are included in the Docker image. No llama.cpp container, model or engine setting is modified by startup or migration.
+Updating Document Processor does not restart or reconfigure llama.cpp. Keep the existing `data/`, `.env` and private `config/system_prompt.txt`.
 
-## Before deployment
+## Update
 
-1. Finish or cancel queued/running work. Review historical incomplete jobs: their original parameters cannot be reconstructed reliably.
-2. Stop **Document Processor**, keeping llama.cpp unchanged.
-3. Back up the entire `data/` directory, `.env`, private `config/system_prompt.txt`, the old application source/image and deployment configuration. A raw copy of a live SQLite/WAL database is not a consistent backup; use a stopped processor or SQLite's backup API.
-4. Validate the backup and retain it separately. It contains private documents and prompts.
-5. Install the updated source including `document_processor/`, `static/`, `templates/`, `scripts/` and `Dockerfile`. Preserve mounted data and private configuration. The profile registry intentionally lives outside the mounted `config/` directory.
-6. Review `.env.example`; new engine capability controls default to disabled/unverified. Existing variables keep their meanings for clients without a selected profile.
+Wait for the queue to empty, then stop the processor and back up its state:
 
-Do not execute a deployment just because this file exists. Choose and authorize a deployment window separately.
+```bash
+docker compose stop document-processor
+umask 077
+tar -czf "../document-processor-backup-$(date +%Y%m%d-%H%M%S).tar.gz" \
+  .env config/system_prompt.txt data
+```
 
-## Migration behavior
+Keep the old source revision or image and Compose files for rollback. A stopped copy of `data/` must include SQLite and any WAL/SHM files. Do not make a raw copy of a live database.
 
-Startup applies additive, idempotent SQLite migrations. Existing job rows and finished timestamps are preserved except for normal recovery of interrupted running jobs. `job_configs`, `job_runs`, `job_steps` and `schema_migrations` store the new state. Private configuration is kept out of the public `jobs` row serializer.
+Update the source from the intended branch, then:
 
-New jobs capture their resolved configuration, source hash, private system prompt, task templates, algorithm version, OCR settings, language and reasoning policies. A retry cannot replace the snapshot. Credentials and endpoint URLs are not stored in it. Prompt changes apply only to new jobs.
+```bash
+docker compose config --quiet
+docker compose up -d --build --no-deps document-processor
+docker compose ps
+docker compose logs --tail=100 document-processor
+curl -f http://127.0.0.1:9932/api/health
+```
 
-Artifact files live under `data/jobs/<id>/artifacts/<configuration-hash>/`. A manifest records content hashes and input dependencies. A completed file without a matching manifest entry is recomputed after an interrupted write. A changed source PDF or known model/template identity refuses unsafe reuse. An advertised model name is not proof of a GGUF binary identity; absent engine metadata remains a reproducibility limitation.
+If using the network overlay, include `-f compose.yaml -f compose.network.example.yaml` in each command. Adapt the health URL to your bind address and port.
 
-Historical completed reports remain downloadable from the original path. Historical incomplete jobs without snapshots are recomputed under the current captured settings, with a `legacy_recomputed` warning. Their old extraction, chunk and note files are not deleted. If an existing root report is replaced, its previous bytes are retained under `previous_reports/<hash>.md`. This can consume additional disk space; there is no automatic retention cleanup.
+Check an existing report download, profile settings and a new small PDF. No model call is needed to view old reports or profiles.
 
-Inspect a stopped data directory or backup without starting a worker:
+## What happens to existing jobs
+
+Startup adds missing SQLite columns/tables without deleting old results. Interrupted running jobs return to the queue; pending cancellations become cancelled. Failed/cancelled jobs wait for Retry.
+
+New jobs save resolved options, OCR settings, source hash, system prompt and task templates in a private snapshot. Retries keep it. **Changing prompts, profiles or environment values applies to new analyses.** Credentials and the backend URL remain runtime settings.
+
+Work files live under `data/jobs/<id>/artifacts/<configuration-hash>/`. A manifest checks dependencies and file hashes before reuse. Missing, incomplete or damaged steps are recomputed. Changed source PDFs or detected model/template identity changes prevent reuse; the advertised model name alone cannot identify the exact GGUF file.
+
+Old completed reports remain downloadable. Incomplete jobs without snapshots get current settings and a `legacy_recomputed` warning; original files remain. The UTF-8 correction also recomputes generated steps saved before that correction on retry, while retaining compatible extraction. See [UTF-8 handling](utf8-correction.md).
+
+A replaced published report is archived under `previous_reports/<hash>.md`. There is no automatic cleanup.
+
+To inspect a stopped data directory or backup without starting a worker:
 
 ```bash
 python scripts/check_jobs.py /path/to/data
 ```
 
-The command opens SQLite in read-only mode and prints counts, not document contents. Historical jobs without snapshots are reported separately from integrity failures. Tests exercise repeated migrations, old databases, changed inputs, failed steps, corrupt artifacts and immutable prompts.
+This reads snapshots, source hashes and artifact manifests. It prints counts, not document text. Jobs without snapshots are counted separately; integrity failures produce a nonzero exit code.
 
-## After an authorized deployment
+## Prompts
 
-Check health, existing job listings and an existing Markdown download before starting an authorized small test PDF. Confirm that profile previews, language/theme choices, metrics and cancellation behave as expected. Verify filesystem permissions and reverse-proxy authentication. If using the optional Docker network overlay, keep including it in Compose commands.
+The shipped task templates now distinguish causal claims, hypotheses, forecast gaps and missing information. Section analysis checks citations against source markers; later stages preserve the evidence in the notes.
 
-No inference is required merely to inspect old reports or profiles. Diagnostics perform only read requests against the configured model backend. Do not run a full benchmark on the reference 8 GB machine as an installation check.
+Updating the code provides these templates to new jobs. The private `config/system_prompt.txt` is preserved: compare it with the updated example and merge useful wording manually. A completed job cannot be retried to apply new prompts; upload the PDF as a new analysis.
 
 ## Rollback
 
-Stop Document Processor. Back up the post-update data separately so new results are retained. Restore the **matching old application and its pre-update data/configuration backup together**. Do not merge SQLite databases or let old code blindly resume new jobs: its artifact rules and statuses differ. Returning only the code is not a safe reproducibility rollback. New Markdown reports may be retained separately as documents without transplanting their execution state into the old database.
+Stop the processor and save post-update data separately. Restore the old application **and its matching pre-update data/configuration backup together**. Do not merge SQLite databases or let old code resume newer execution state.
 
-No llama.cpp restart is required for application rollback. Keep both backups until the selected version and downloads are verified. This document provides a procedure; the application does not run these operations automatically.
+Recent Markdown reports can be retained separately. Keep both backups until the chosen version and downloads are verified. llama.cpp needs no restart.
