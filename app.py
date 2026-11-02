@@ -325,8 +325,9 @@ def make_chunks(pages, model, budget=None):
     reference, then group passages while the budget allows. Split passages
     that are still too long.
 
-    Return ``text``/``pages`` dictionaries; pages contains sorted unique page
-    numbers. Raise RuntimeError if a very small passage still exceeds the
+    Return ``text``/``pages``/``parts`` dictionaries; pages contains sorted unique
+    physical page numbers, parts retains exact passage/page pairs independently
+    of markers embedded in source text. Raise RuntimeError if a passage exceeds the
     budget. Propagate errors from the remote tokenizer.
     """
     budget = CHUNK_TOKENS if budget is None else budget
@@ -362,12 +363,14 @@ def make_chunks(pages, model, budget=None):
                 continue
             candidate = current + [piece]
             if current and model.tokenize(chunk_text(candidate)) > budget:
-                chunks.append({"text": chunk_text(current), "pages": sorted(set(v["page"] for v in current))})
+                chunks.append({"text": chunk_text(current), "pages": sorted(set(v["page"] for v in current)),
+                               "parts": list(current)})
                 current = [piece]
             else:
                 current = candidate
     if current:
-        chunks.append({"text": chunk_text(current), "pages": sorted(set(v["page"] for v in current))})
+        chunks.append({"text": chunk_text(current), "pages": sorted(set(v["page"] for v in current)),
+                       "parts": list(current)})
     return chunks
 
 

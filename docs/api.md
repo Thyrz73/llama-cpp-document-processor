@@ -65,4 +65,6 @@ Metrics accept `?limit=200&before=<step-id>`: limit is 1–500, steps are newest
 
 Unknown token/timing values remain null or absent. First-event/content latency includes transport and backend waiting. `length` is a failure; `[DONE]` without an explicit finish reason is accepted as `done_without_reason`. There are no automatic generation retries or continuations. Numeric/page-reference checks count warnings, not semantic correctness.
 
+Step `quality_checks` metrics keep historical raw-string recall counters and add `warnings`, `numeric_checks` and `semantic_validation: false`. Counts do not export entities, expected values or source extracts. Detailed checks, trusted page/section scope and skipped-check status remain in local `artifacts/<configuration-hash>/quality_checks.json`; source evidence is hash-verified in `source_evidence.json`. Neither file is exposed through a new API route. Warnings in the published Markdown do not change job success status. See [documentary reliability](documentary-reliability.md) for supported numeric formats and limits.
+
 Diagnostics reads `/v1/models` and optional `/props`. It exposes sanitized observations, not credentials, URLs, raw templates or prompts. RSS is the processor's memory, not the engine's or host's. Private system prompts and saved templates are never included in these API responses.

@@ -4,7 +4,7 @@ import json
 import re
 import time
 
-from . import jobs, prompts
+from . import jobs, prompts, reliability
 from .config import fingerprint
 from .model_client import Cancelled, ModelError
 
@@ -58,6 +58,7 @@ def run(job_id, runtime):
     calls = 0
     preview_path = directory / "live_preview.json"
     phase_args = {}
+    quality = {"version": reliability.VERSION, "steps": {}}
 
     def phase(code, label, percent=None, **args):
         """Persist stable phase identifiers alongside the historical English label."""
@@ -81,7 +82,8 @@ def run(job_id, runtime):
             # Pre-fix artifacts may contain Latin-1-decoded UTF-8 even when
             # their file hashes are valid. Recompute on an explicit retry;
             # never try to repair their Unicode strings heuristically.
-            dependencies = {**dependencies, "text_transport_version": 1}
+            dependencies = {**dependencies, "text_transport_version": 1,
+                            "reliability_version": reliability.VERSION}
         handle = recorder.start(stage, name)
         before_calls, before_ms = model.tokenization_calls, model.tokenization_ms
         before_hits = model.tokenization_cache_hits
@@ -110,7 +112,7 @@ def run(job_id, runtime):
             recorder.end(handle, "cancelled" if isinstance(exc, Cancelled) else "failed", measurements)
             raise
 
-    def generate(stage, instructions, text, budget):
+    def generate(stage, instructions, text, budget, source_pages):
         """Enforce the job call budget and publish only bounded preview channels."""
         nonlocal calls
         if calls >= config["max_calls"]:
@@ -137,21 +139,32 @@ def run(job_id, runtime):
 
         live("", "", False)
         answer = model.complete(instructions, text, budget, on_update=live)
-        # These mechanical checks are warning signals, not a factual-quality score.
-        # Persist counts only: the source's numerical values remain private.
+        # Public metrics contain counts only; detailed source values stay local.
+        check = reliability.audit(answer, evidence, source_pages)
+        # Retain historical recall counters for benchmark/API compatibility.
+        # These raw-string differences are not numerical or citation validation.
         references = set(re.findall(r"\[Page (\d+)\]", text))
         output_references = set(re.findall(r"\[Page (\d+)\]", answer))
         numbers = set(re.findall(r"(?<!\w)[+-]?\d+(?:[.,]\d+)?", text))
         output_numbers = set(re.findall(r"(?<!\w)[+-]?\d+(?:[.,]\d+)?", answer))
         model.current_metrics["quality_checks"] = {
-            "source": "mechanical_warning_only", "missing_page_references": len(references - output_references),
+            "source": "mechanical_warning_only", "semantic_validation": False,
+            "warnings": len(check["issues"]),
+            "numeric_checks": check["numeric"]["checked"],
+            "missing_page_references": len(references - output_references),
             "unseen_page_references": len(output_references - references),
             "missing_numeric_items": len(numbers - output_numbers)}
         return answer
 
-    def combined(notes):
-        """Retain stable ordering and delimit notes without adding conversation history."""
-        return "\n\n".join(f"## Notes {i + 1}\n{note}" for i, note in enumerate(notes))
+    def check_step(name, text, source_pages, sections, evidence_limit=None):
+        """Recheck even reused generations; persist trusted scope outside Markdown."""
+        check = reliability.audit(text, evidence, source_pages)
+        check.update(input_pages=sorted(set(source_pages)), source_sections=sorted(set(sections)))
+        if evidence_limit is not None:
+            check["evidence_prompt_limit"] = evidence_limit
+        quality["steps"][name] = check
+        r.atomic_json(artifacts.root / "quality_checks.json", quality)
+        return check
 
     status = "failed"
     try:
@@ -180,10 +193,17 @@ def run(job_id, runtime):
                                {"source": config["source_hash"], "extraction": config["extraction"]}, extract))
         pages, page_count = extracted["pages"], extracted["page_count"]
         missing, ocr_pages = extracted["missing"], extracted["ocr_pages"]
+        evidence_dependencies = {"extraction": fingerprint(extracted), "version": reliability.VERSION}
+        evidence_json = artifacts.read("source_evidence.json", evidence_dependencies)
+        if evidence_json is None:
+            evidence_json = json.dumps(reliability.build_evidence(pages, page_count, missing, ocr_pages), ensure_ascii=False)
+            artifacts.write("source_evidence.json", evidence_json, evidence_dependencies)
+        evidence = json.loads(evidence_json)
         r.update_job(job_id, pages=page_count)
         phase("chunking", "Splitting document", 7)
         chunks = json.loads(saved_step("chunks.json", "chunking",
-                            {"extracted": fingerprint(extracted), "budget": config["chunk_tokens"], "identity": identity},
+                            {"extracted": fingerprint(extracted), "budget": config["chunk_tokens"], "identity": identity,
+                             "chunk_format_version": 2},
                             lambda: json.dumps(r.make_chunks(pages, model, budget=config["chunk_tokens"]), ensure_ascii=False)))
         if not chunks:
             raise ModelError("empty_document", "Document contains no analyzable text.")
@@ -192,10 +212,17 @@ def run(job_id, runtime):
         for i, chunk in enumerate(chunks):
             phase("section", f"Analyzing section {i + 1}/{len(chunks)}", 10 + round(70 * i / len(chunks)),
                   index=i + 1, total=len(chunks), pages=chunk["pages"])
-            instruction = prompts.instruction(config, "section", job["question"], f"Excerpt {i + 1} of {len(chunks)}.")
-            notes.append(saved_step(f"analysis_{i:04d}.md", "section",
+            instruction = prompts.instruction(config, "section", job["question"],
+                f"Excerpt {i + 1} of {len(chunks)}. Physical PDF pages: {chunk['pages']}. "
+                "Page references inside source prose are not extraction metadata.")
+            name = f"analysis_{i:04d}.md"
+            text = chunk["text"]
+            answer = saved_step(name, "section",
                          {"chunk": fingerprint(chunk), "instruction": fingerprint(instruction), "identity": identity},
-                         lambda: generate("section", instruction, chunk["text"], config["analysis_tokens"])))
+                         lambda: generate("section", instruction, text, config["analysis_tokens"], chunk["pages"]))
+            check = check_step(name, answer, chunk["pages"], [i])
+            notes.append(reliability.note(answer, chunk["pages"], [i],
+                                          (issue["code"] for issue in check["issues"])))
             r.update_job(job_id, done_chunks=i + 1, progress_percent=10 + round(70 * (i + 1) / len(chunks)))
 
         warnings = f"Pages with insufficient extracted/OCR text: {missing}. OCR pages: {ocr_pages}."
@@ -204,14 +231,20 @@ def run(job_id, runtime):
         level = 0
         while True:
             model.current_stage = "final"
-            final_fits = model.fits(final_instruction, combined(notes), config["final_tokens"])[0]
+            final_text, final_fits, final_evidence_limit = reliability.prepare_input(notes, evidence,
+                lambda text: model.fits(final_instruction, text, config["final_tokens"])[0])
             if len(notes) <= 4 and final_fits:
                 break
             if len(notes) < 2 or level >= 32:
                 raise ModelError("merge_impossible", "The final report cannot fit the configured context.")
             model.current_stage = "merge"
-            groups = plan_groups(notes, lambda group: model.fits(
-                merge_instruction, combined(group), config["merge_tokens"])[0])
+            merge_evidence_limits = {}
+            def merge_fits(group):
+                _, fits, limit = reliability.prepare_input(group, evidence,
+                    lambda text: model.fits(merge_instruction, text, config["merge_tokens"])[0])
+                merge_evidence_limits[fingerprint(group)] = limit
+                return fits
+            groups = plan_groups(notes, merge_fits)
             reduced = []
             for index, group in enumerate(groups):
                 if len(group) == 1:
@@ -219,18 +252,29 @@ def run(job_id, runtime):
                     continue
                 phase("merge", f"Merging level {level + 1}, group {index + 1}/{len(groups)}",
                       min(94, 81 + level * 4), level=level + 1, index=index + 1, total=len(groups))
-                text = combined(group)
-                reduced.append(saved_step(f"merge_{level:02d}_{index:04d}.md", "merge",
-                               {"notes": fingerprint(group), "instruction": fingerprint(merge_instruction), "identity": identity},
-                               lambda: generate("merge", merge_instruction, text, config["merge_tokens"])))
+                evidence_limit = merge_evidence_limits[fingerprint(group)]
+                text = reliability.combined(group, evidence, evidence_limit)
+                name = f"merge_{level:02d}_{index:04d}.md"
+                source_pages = sorted({page for item in group for page in item["pages"]})
+                answer = saved_step(name, "merge",
+                               {"notes": fingerprint(group), "input": fingerprint(text),
+                                "instruction": fingerprint(merge_instruction), "identity": identity},
+                               lambda: generate("merge", merge_instruction, text, config["merge_tokens"], source_pages))
+                merged = reliability.merge_note(answer, group)
+                check = check_step(name, answer, merged["pages"], merged["sections"], evidence_limit)
+                merged["warning_codes"] = sorted(set(merged["warning_codes"]) | {issue["code"] for issue in check["issues"]})
+                reduced.append(merged)
             if len(reduced) >= len(notes):
                 raise ModelError("merge_impossible", "The merge plan did not reduce its input.")
             notes, level = reduced, level + 1
 
         phase("final", "Writing final report", 95)
+        source_pages = sorted({page for item in notes for page in item["pages"]})
         final = saved_step("rapport_final.md", "final",
-                           {"notes": fingerprint(notes), "instruction": fingerprint(final_instruction), "identity": identity},
-                           lambda: generate("final", final_instruction, combined(notes), config["final_tokens"]))
+                           {"notes": fingerprint(notes), "input": fingerprint(final_text),
+                            "instruction": fingerprint(final_instruction), "identity": identity},
+                           lambda: generate("final", final_instruction, final_text, config["final_tokens"], source_pages))
+        check_step("rapport_final.md", final, source_pages, range(len(chunks)), final_evidence_limit)
         phase("saving", "Saving report", 99)
         handle = recorder.start("saving", "report")
         try:
@@ -240,7 +284,8 @@ def run(job_id, runtime):
                 archive = directory / "previous_reports"
                 archive.mkdir(exist_ok=True)
                 r.atomic_text(archive / (jobs.file_hash(previous_report) + ".md"), previous_report.read_text(encoding="utf-8"))
-            r.atomic_text(directory / "rapport_final.md", header + final + "\n")
+            r.atomic_text(directory / "rapport_final.md", header + final + "\n"
+                          + reliability.report_warnings(quality, config["report_language"]))
             model.check_cancelled()
             r.update_job(job_id, status="done", stage="Analysis completed", phase_code="done", error="", error_code="")
             recorder.end(handle, "done")

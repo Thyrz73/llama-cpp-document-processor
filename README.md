@@ -180,6 +180,8 @@ There are no accounts or per-user access controls. Anyone with application acces
 
 Metrics report application durations and optional backend usage/timings. Unknown values stay unknown; first-event latency is not engine prefill time. Numeric/page-reference counts are warnings, not factual scores. See [API details](docs/api.md) and [benchmark instructions](docs/engine-tuning.md).
 
+Documentary checks retain physical page/passage provenance separately from model notes. They flag nonexistent pages, some exact-quotation page mismatches and possible entity/delta errors in explicitly structured numeric rows. Source reserves and figures are carried through merges in a bounded evidence block; omitted extracts remain in private `source_evidence.json`. Detailed checks are saved in `quality_checks.json`, and warnings appear in the downloaded report. These checks neither repair numbers automatically nor verify scientific correctness or every citation. All four profiles use the same checks without an additional LLM pass. See the [implementation, limits and validation report](docs/documentary-reliability.md).
+
 ## Development
 
 Docker and CI use Python 3.12. On Ubuntu/Debian, install `python3-venv`, `tesseract-ocr`, `tesseract-ocr-eng` and `tesseract-ocr-fra`, then:
