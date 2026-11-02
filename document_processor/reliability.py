@@ -429,7 +429,8 @@ def quote_checks(answer, evidence, input_pages):
             if len(quote) < 30:
                 continue
             source_pages = {page for page, text in items if quote in _normalized(text)}
-            if len(source_pages) == 1 and source_pages <= set(input_pages) and not refs <= source_pages:
+            # A line can cite several claims; abstain if it includes the quote's source.
+            if len(source_pages) == 1 and source_pages <= set(input_pages) and refs.isdisjoint(source_pages):
                 issues.append({'code': 'quote_page_mismatch', 'reference': ', '.join(f'[Page {p}]' for p in sorted(refs)),
                                'matching_pages': sorted(source_pages), 'detection': 'exact_text_only'})
     return issues

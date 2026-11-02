@@ -72,6 +72,8 @@ Le domaine des pages est `1..page_count`, issu du lecteur PDF, pas des numéros 
 
 **Une page existante ne prouve jamais que l’affirmation est étayée.** Le contrôle supplémentaire des citations textuelles se limite aux extraits du registre, normalisés pour la casse, les espaces et la ponctuation. Il signale une attribution douteuse ; il ne retrouve pas toutes les paraphrases et ne constitue pas une validation sémantique exhaustive.
 
+Lorsqu’une ligne contient plusieurs références, le contrôle s’abstient si la page source de la citation figure parmi elles. Les autres références peuvent concerner d’autres affirmations de la même ligne. Une citation retrouvée sur une seule page source disponible reste signalée lorsque cette page est absente de toutes les références de la ligne.
+
 Les enveloppes de notes conservent toutes leurs pages et sections d’origine, même si le modèle ne cite plus rien. Elles transmettent également les codes d’alertes antérieurs, éventuellement déjà résolus. Les réserves restent dans le registre source, jamais remplacées par les interprétations du modèle. Les mots-clés identifient des **candidats**, pas des faits scientifiquement qualifiés.
 
 Le bloc source ajouté aux fusions et au rapport est plafonné à **2 400 caractères**, compte d’omissions compris. Les lignes numériques disposent d’une première part bornée ; les réserves favorisent lexicalement les précautions causales et les hypothèses nommées. Le reste de l’espace est réutilisé. Les doublons purement fictifs ne sont pas tous répétés. Les extraits trop longs ne sont pas coupés en citations incomplètes : ils restent dans le registre, avec les autres extraits omis. Cette sélection ne garantit pas de choisir toutes les informations essentielles sur un long document.

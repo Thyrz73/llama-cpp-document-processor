@@ -74,6 +74,33 @@ class ReferenceTests(unittest.TestCase):
         self.assertEqual(r.quote_checks(f'« {MISSING} » [Page 3]', ev, [1, 2, 3]), [])
         self.assertEqual(r.quote_checks('« Un propos inconnu suffisamment long pour le test » [Page 2]', ev, [2]), [])
 
+    def test_exact_quote_with_correct_source_among_multiple_references_has_no_warning(self):
+        ev = evidence()
+        for opening, closing in (('"', '"'), ('«', '»'), ('“', '”')):
+            with self.subTest(quotation_marks=opening):
+                answer = f'Document fictif [Page 1] ; {opening}{MISSING}{closing} [Page 3].'
+                check = r.audit(answer, ev, [1, 2, 3])
+                self.assertEqual(check['issues'], [])
+                self.assertFalse(check['semantic_validation'])
+                self.assertEqual(r.report_warnings({'steps': {'rapport_final.md': check}}, 'fr'), '')
+
+    def test_exact_quote_with_only_wrong_references_still_warns(self):
+        ev = evidence()
+        answer = f'Document fictif [Page 1] ; "{MISSING}" [Page 2].'
+        issues = r.quote_checks(answer, ev, [1, 2, 3])
+        self.assertEqual(len(issues), 1)
+        self.assertEqual(issues[0]['code'], 'quote_page_mismatch')
+        self.assertEqual(issues[0]['matching_pages'], [3])
+        self.assertIn('Citation textuelle retrouvée sur une autre page source',
+                      r.report_warnings({'steps': {'rapport_final.md': {'issues': issues}}}, 'fr'))
+
+    def test_exact_quotes_with_ambiguous_or_out_of_scope_sources_abstain(self):
+        ev = evidence()
+        answer = f'"{MISSING}" [Page 1] [Page 2]'
+        self.assertEqual(r.quote_checks(answer, ev, [1, 2]), [])
+        ev['reserves'].append({'page': 2, 'text': MISSING})
+        self.assertEqual(r.quote_checks(answer, ev, [1, 2, 3]), [])
+
     def test_simulated_ocr_and_empty_page_keep_physical_numbering(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / 'scan.pdf'

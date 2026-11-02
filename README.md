@@ -77,6 +77,8 @@ The server-rendered reader supports headings, lists, tables, quotes, links and c
 
 **Cancel** stops queued jobs immediately and requests cancellation of running work. OCR finishes its current subprocess first; a remote model may take longer to stop. **Retry** is available for failed or cancelled jobs and keeps their original settings. Create a new analysis to change budgets, language or prompts.
 
+If a cancelled or timed-out HTTP reader is still closing, the next generation waits for it instead of failing subsequent jobs. This wait remains cancellable and does not consume the next generation's time limit. A response arriving after cancellation is closed before reading its body.
+
 The interface initially selects `low`, automatic report language and standard detail. Interface language and theme are saved in the browser; changing them does not translate existing reports. Automatic report language follows the request, not the interface language.
 
 Jobs refresh every six seconds while work is active, with backoff on errors. Live output refreshes every 1.7 seconds while its panel is open. Both pause when the tab is hidden. The list shows the latest 100 jobs; older jobs remain stored.

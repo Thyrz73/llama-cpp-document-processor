@@ -279,10 +279,12 @@ class ModelClient:
 
         Closing a socket is delegated to a daemon because some HTTP stacks wait
         for an ongoing read. The gate prevents overlapping local generations
-        until the reader actually exits. No automatic generation retry is made.
+        until the reader actually exits. Waiting is cancellable and does not
+        consume the next generation's deadline. No generation retry is made.
         """
-        if not _stream_gate.acquire(blocking=False):
-            raise ModelError("stream_closing", "A previous model stream is still closing. Retry later.")
+        self.check_cancelled()
+        while not _stream_gate.acquire(timeout=0.2):
+            self.check_cancelled()
         events = queue.Queue(maxsize=32)
         stopped = threading.Event()
         response_holder = []
@@ -303,6 +305,8 @@ class ModelClient:
                 with self.session.post(self.base_url + "/v1/chat/completions", json=payload,
                                        stream=True, timeout=(10, self.config["request_timeout"])) as response:
                     response_holder.append(response)
+                    if stopped.is_set():
+                        return
                     response.raise_for_status()
                     # Requests defaults text/* without a charset to Latin-1.
                     # Keep bytes until iter_lines has assembled a whole line:
@@ -320,7 +324,12 @@ class ModelClient:
                 _stream_gate.release()
 
         reader = threading.Thread(target=read, name="llama-stream-reader", daemon=True)
-        reader.start()
+        try:
+            self.check_cancelled()
+            reader.start()
+        except BaseException:
+            _stream_gate.release()
+            raise
         try:
             while True:
                 self.check_cancelled()

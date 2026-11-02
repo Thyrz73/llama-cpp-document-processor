@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 import app
+from document_processor import model_client
 from document_processor.model_client import Cancelled, ModelError, ThinkingSplitter, collect_metrics
 
 
@@ -147,6 +148,167 @@ class StreamTests(unittest.TestCase):
                 self.assertLess(time.monotonic() - start, 2)
             finally:
                 release.set()
+
+    def test_next_generation_waits_for_cleanup_before_headers_without_using_its_deadline(self):
+        for mode in ("deadline", "cancel"):
+            with self.subTest(mode=mode), patch.object(model_client, "_stream_gate", threading.Lock()):
+                gate = model_client._stream_gate
+                previous_started = threading.Event()
+                release_headers = threading.Event()
+                previous_closed = threading.Event()
+                previous_body_read = threading.Event()
+                following_started = threading.Event()
+                following_finished = threading.Event()
+                answers, errors = [], []
+
+                class LateResponse(Stream):
+                    def __exit__(self, *args):
+                        previous_closed.set()
+                        return False
+
+                    def iter_lines(self, **kwargs):
+                        previous_body_read.set()
+                        yield from super().iter_lines(**kwargs)
+
+                def wait_for_headers(*args, **kwargs):
+                    previous_started.set()
+                    if not release_headers.wait(5):
+                        raise RuntimeError("Test response headers were not released")
+                    return LateResponse([])
+
+                previous = self.client(step_timeout_seconds=0.05 if mode == "deadline" else 5)
+                previous.cancel_check = lambda: mode == "cancel" and previous_started.is_set()
+                following = self.client(step_timeout_seconds=0.2)
+
+                def following_cancel_check():
+                    following_started.set()
+                    return False
+
+                following.cancel_check = following_cancel_check
+
+                def next_response(*args, **kwargs):
+                    self.assertTrue(previous_closed.is_set(), "Previous HTTP response must close first")
+                    return Stream([delta("Next answer", "stop")])
+
+                def run_following():
+                    try:
+                        answers.append(following.complete("Analyze", "Source", 100))
+                    except Exception as exc:
+                        errors.append(exc)
+                    finally:
+                        following_finished.set()
+
+                thread = threading.Thread(target=run_following)
+                with patch.object(previous, "tokenize", return_value=10), \
+                     patch.object(previous, "model", return_value="fake"), \
+                     patch.object(previous.session, "post", side_effect=wait_for_headers) as previous_post, \
+                     patch.object(following, "tokenize", return_value=10), \
+                     patch.object(following, "model", return_value="fake"), \
+                     patch.object(following.session, "post", side_effect=next_response) as following_post:
+                    try:
+                        with self.assertRaises(Cancelled if mode == "cancel" else ModelError) as raised:
+                            previous.complete("Analyze", "Source", 100)
+                        self.assertEqual(raised.exception.code, "cancelled" if mode == "cancel" else "deadline")
+                        self.assertTrue(previous_started.is_set())
+                        self.assertTrue(gate.locked())
+                        thread.start()
+                        self.assertTrue(following_started.wait(1))
+                        self.assertFalse(following_finished.wait(0.3), "Next job must wait for the previous reader")
+                        following_post.assert_not_called()
+                        release_headers.set()
+                        self.assertTrue(following_finished.wait(2))
+                        self.assertEqual(errors, [])
+                        self.assertEqual(answers, ["Next answer"])
+                        previous_post.assert_called_once()
+                        following_post.assert_called_once()
+                        self.assertFalse(previous_body_read.is_set(), "A cancelled response must not start another read")
+                    finally:
+                        release_headers.set()
+                        if thread.ident is not None:
+                            thread.join(timeout=2)
+                        acquired = gate.acquire(timeout=2)
+                        if acquired:
+                            gate.release()
+                        self.assertTrue(acquired, "Readers must release the serialization gate")
+
+    def test_generation_waiting_for_cleanup_remains_cancellable(self):
+        gate = threading.Lock()
+        gate.acquire()
+        waiting = threading.Event()
+        cancel = threading.Event()
+        finished = threading.Event()
+        errors = []
+        client = self.client()
+
+        def cancel_check():
+            waiting.set()
+            return cancel.is_set()
+
+        client.cancel_check = cancel_check
+
+        def run():
+            try:
+                client.complete("Analyze", "Source", 100)
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                finished.set()
+
+        thread = threading.Thread(target=run)
+        with patch.object(model_client, "_stream_gate", gate), \
+             patch.object(client, "tokenize", return_value=10), \
+             patch.object(client, "model", return_value="fake"), \
+             patch.object(client.session, "post") as post:
+            try:
+                thread.start()
+                self.assertTrue(waiting.wait(1))
+                self.assertFalse(finished.wait(0.1))
+                cancel.set()
+                self.assertTrue(finished.wait(1), "Waiting must respond to cancellation")
+                self.assertEqual(len(errors), 1)
+                self.assertIsInstance(errors[0], Cancelled)
+                self.assertTrue(gate.locked(), "Cancellation must not release another reader's lock")
+                post.assert_not_called()
+            finally:
+                cancel.set()
+                if gate.locked():
+                    gate.release()
+                thread.join(timeout=2)
+            next_client = self.client()
+            self.assertEqual(self.complete(next_client, Stream([delta("Available", "stop")])), "Available")
+
+    def test_cancellation_after_acquiring_gate_releases_it_without_starting_http(self):
+        gate = threading.Lock()
+        cancel = threading.Event()
+        client = self.client()
+        client.cancel_check = cancel.is_set
+
+        class CancellingGate:
+            def acquire(self, **kwargs):
+                acquired = gate.acquire(**kwargs)
+                cancel.set()
+                return acquired
+
+            def release(self):
+                gate.release()
+
+        with patch.object(model_client, "_stream_gate", CancellingGate()), \
+             patch.object(client.session, "post") as post:
+            with self.assertRaises(Cancelled):
+                list(client.stream_lines({}))
+            post.assert_not_called()
+            self.assertFalse(gate.locked())
+
+    def test_http_reader_start_failure_does_not_leave_gate_locked(self):
+        gate = threading.Lock()
+        client = self.client()
+        with patch.object(model_client, "_stream_gate", gate), \
+             patch.object(threading.Thread, "start", side_effect=RuntimeError("Cannot start test reader")), \
+             patch.object(client.session, "post") as post:
+            with self.assertRaises(RuntimeError):
+                list(client.stream_lines({}))
+            post.assert_not_called()
+            self.assertFalse(gate.locked())
 
     def test_tokenization_cache_is_bounded_and_counts_hits(self):
         client = self.client()

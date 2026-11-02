@@ -62,6 +62,8 @@ Retry returns 200 when queued, 409 for an incompatible status or an exhausted at
 
 Cancel returns 202 when accepted, 200 if already cancelled and 409 for done/failed jobs. Queued jobs become cancelled immediately. Running jobs keep their status with `cancel_requested=true` until cancellation takes effect. OCR finishes or times out first; remote engine release depends on the backend.
 
+After cancellation or a generation deadline, the next generation waits cooperatively for the previous HTTP reader to exit. Cleanup does not cause subsequent jobs to fail, and cancellation remains available while waiting. The next generation's deadline starts after this wait; request/step duration metrics still include elapsed waiting time. If response headers have not arrived, cleanup may wait for the existing network timeout.
+
 ## Live output, metrics and diagnostics
 
 Live output keeps only the latest pass, with bounded content and reasoning. The `reasoning` field is empty unless `?include_reasoning=true` is supplied. Only emitted reasoning is available; it may be incomplete. Disabling live output leaves generation streaming enabled.
