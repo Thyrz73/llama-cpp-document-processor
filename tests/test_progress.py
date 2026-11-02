@@ -137,6 +137,7 @@ class ProgressTests(unittest.TestCase):
                     con.execute("DELETE FROM jobs")
                 self.insert_job(job_id, "queued", 0)
                 directory = Path(tmp)
+                (directory / "source.pdf").write_bytes(b"%PDF-test")
                 progress = []
                 update = app.update_job
 
@@ -145,12 +146,13 @@ class ProgressTests(unittest.TestCase):
                     update(identifier, **values)
                     progress.append(self.stored_job(identifier)["progress_percent"])
 
-                def extraction(path, progress):
+                def extraction(path, progress, settings=None):
                     """Simulate one page and call progress."""
                     progress("Extracting text: page 1/1")
                     return [{"page": 1, "text": "Example text"}], 1, [], []
 
-                with patch.object(app, "job_dir", return_value=directory), \
+                with patch.object(app, "read_system_prompt", return_value="Test instructions"), \
+                     patch.object(app, "job_dir", return_value=directory), \
                      patch.object(app, "ModelClient") as model_class, \
                      patch.object(app, "extract_pdf", side_effect=extraction), \
                      patch.object(app, "make_chunks", return_value=[
@@ -159,6 +161,13 @@ class ProgressTests(unittest.TestCase):
                      patch.object(app.worker_wakeup, "wait", side_effect=StopWorker):
                     model = model_class.return_value
                     model.tokenize.return_value = 10
+                    model.inspect.return_value = {"context_tokens": 8192, "model": "test"}
+                    model.model.return_value = "test"
+                    model.fits.return_value = (True, 10, "estimated_template", 384)
+                    model.current_metrics = {}
+                    model.tokenization_calls = 0
+                    model.tokenization_ms = 0
+                    model.tokenization_cache_hits = 0
                     # Simulate five sections, one merge, and the final report.
                     model.complete.side_effect = ["Notes [Page 1]"] * 6 + [
                         RuntimeError("Model unavailable") if fail else "Final report [Page 1]"]

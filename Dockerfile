@@ -9,7 +9,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir -r requirements.txt
 COPY app.py ./
+COPY document_processor ./document_processor
 COPY templates ./templates
+COPY static ./static
+COPY scripts ./scripts
 RUN useradd --uid 1000 --create-home --shell /usr/sbin/nologin appuser
 USER 1000:1000
 EXPOSE 9932

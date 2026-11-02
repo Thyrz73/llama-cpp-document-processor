@@ -11,7 +11,8 @@ services:
       LLAMA_API_KEY: ${LLAMA_API_KEY:-}
       SYSTEM_PROMPT_FILE: /app/config/system_prompt.txt
       DATA_DIR: /app/data
-      CONTEXT_TOKENS: ${CONTEXT_TOKENS:-8192}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      CONTEXT_TOKENS: ${CONTEXT_TOKENS:-16384}
       CHUNK_TOKENS: ${CHUNK_TOKENS:-3000}
       ANALYSIS_TOKENS: ${ANALYSIS_TOKENS:-1000}
       MERGE_TOKENS: ${MERGE_TOKENS:-1200}
@@ -22,6 +23,13 @@ services:
       MAX_PAGES: ${MAX_PAGES:-120}
       MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-20}
       REQUEST_TIMEOUT_SECONDS: ${REQUEST_TIMEOUT_SECONDS:-21600}
+      STEP_TIMEOUT_SECONDS: ${STEP_TIMEOUT_SECONDS:-21600}
+      MAX_MODEL_CALLS: ${MAX_MODEL_CALLS:-500}
+      MAX_JOB_ATTEMPTS: ${MAX_JOB_ATTEMPTS:-10}
+      LLAMA_USAGE_SUPPORTED: ${LLAMA_USAGE_SUPPORTED:-false}
+      LLAMA_APPLY_TEMPLATE_SUPPORTED: ${LLAMA_APPLY_TEMPLATE_SUPPORTED:-false}
+      LLAMA_THINKING_ADAPTER: ${LLAMA_THINKING_ADAPTER:-unsupported}
+      LLAMA_INITIAL_THINKING: ${LLAMA_INITIAL_THINKING:-false}
       APP_PORT: ${APP_PORT:-9932}
       OCR_ENABLED: ${OCR_ENABLED:-true}
       OCR_LANGUAGES: ${OCR_LANGUAGES:-eng+fra}
@@ -42,7 +50,13 @@ services:
     cpus: ${PROCESSOR_CPUS:-0.75}
     pids_limit: 64
     healthcheck:
-      test: ["CMD", "python", "-c", "import os,urllib.request; p=os.getenv('APP_PORT','9932'); urllib.request.urlopen('http://127.0.0.1:'+p+'/api/health',timeout=5)"]
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import os,urllib.request; p=os.getenv('APP_PORT','9932'); urllib.request.urlopen('http://127.0.0.1:'+p+'/api/health',timeout=5)",
+        ]
       interval: 30s
       timeout: 8s
       retries: 3

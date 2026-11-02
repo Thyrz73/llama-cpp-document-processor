@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="{{ language }}">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>{{ report_name }} · Document Processor</title>
+    <script src="{{ url_for('static', filename='report.js') }}"></script>
+    <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}" />
+  </head>
+  <body>
+    <main class="report-page">
+      <header class="panel">
+        <h1 class="name">{{ report_name }}</h1>
+        <nav class="actions" aria-label="{{ t('Report actions') }}">
+          <a href="{{ url_for('index') }}">{{ t('Back to analyses') }}</a>
+          {% if available %}<a href="{{ url_for('report', job_id=job_id) }}" download>{{ t('Download') }}</a>{% endif %}
+        </nav>
+      </header>
+      {% if message %}<p class="panel" role="status">{{ t(message) }}</p>{% endif %}
+      {% if content %}<article class="panel markdown-body">{{ content|safe }}</article>{% endif %}
+    </main>
+  </body>
+</html>

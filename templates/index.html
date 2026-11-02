@@ -1,170 +1,358 @@
 <!doctype html>
 <html lang="en">
-<head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="color-scheme" content="light dark">
-<title>Document Processor · Local PDF analysis</title>
-<style>
-:root{font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color-scheme:light;--bg:#f5f7fb;--surface:#fff;--surface2:#f1f5fa;--field:#fff;--text:#17253b;--muted:#5b6a7f;--border:#dce4ee;--accent:#385fdd;--accent-soft:#e9efff;--button-text:#fff;--track:#e4eaf4;--shadow:0 8px 26px rgba(24,49,87,.045);--positive:#16744c;--positive-bg:#e1f5e9;--negative:#a32937;--negative-bg:#fce6e8;--ongoing:#2758b0;--ongoing-bg:#e7efff}
-:root[data-theme="dark"]{color-scheme:dark;--bg:#0c1321;--surface:#141f30;--surface2:#1a293e;--field:#101a2b;--text:#edf3ff;--muted:#a3b4cc;--border:#2a3b51;--accent:#83a3ff;--accent-soft:#273a5b;--button-text:#0b1931;--track:#304058;--shadow:0 10px 30px rgba(0,0,0,.13);--positive:#9be6c3;--positive-bg:#1c473b;--negative:#ffb7bd;--negative-bg:#532932;--ongoing:#bfd6ff;--ongoing-bg:#25406b}
-*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;padding:28px 14px 46px;background:var(--bg);color:var(--text)}main{max-width:940px;margin:auto}p{line-height:1.55}h1{font-size:clamp(1.55rem,3vw,2rem);margin:0;letter-spacing:-.04em}h2{font-size:1.08rem;margin:0}h3{font-size:.95rem;margin:0}a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
-.muted{color:var(--muted)}.small{font-size:.85rem}.micro{font-size:.77rem}.top{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}.hero{margin-bottom:24px}.hero p{margin:9px 0 0;max-width:660px}.brand{display:flex;align-items:center;gap:12px}.brand-icon{display:grid;place-items:center;border-radius:12px;background:var(--accent-soft);color:var(--accent);width:43px;height:43px;font-size:1.35rem}.theme-box{display:flex;align-items:center;gap:9px}.theme-box select{background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:10px;padding:8px 9px;font:inherit;font-size:.85rem;cursor:pointer}
-.panel{background:var(--surface);border:1px solid var(--border);border-radius:18px;box-shadow:var(--shadow);padding:24px;margin:18px 0}.drop{border:1.6px dashed var(--accent);border-radius:14px;padding:30px 16px;text-align:center;background:var(--accent-soft);cursor:pointer;display:block;margin-top:18px;transition:background .15s,border .15s}.drop:hover,.drop.active{filter:brightness(1.02);border-style:solid}.drop strong{display:block;margin-bottom:5px;overflow-wrap:anywhere}.drop span{font-size:.84rem}.drop input{display:none}.field-label{display:block;font-weight:650;margin:20px 0 9px;font-size:.91rem}textarea{width:100%;font:inherit;font-size:.93rem;min-height:104px;padding:13px 14px;border-radius:10px;resize:vertical;border:1px solid var(--border);background:var(--field);color:var(--text)}textarea:focus,select:focus,button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}button{font:inherit;border:0;background:var(--accent);color:var(--button-text);padding:11px 16px;border-radius:10px;cursor:pointer;font-size:.9rem;font-weight:650}button:hover{filter:brightness(1.09)}button:disabled{opacity:.5;cursor:not-allowed}.button-secondary{background:var(--surface2);color:var(--text);border:1px solid var(--border);padding:8px 12px;font-size:.82rem}.button-active{background:var(--accent-soft);color:var(--accent);border-color:var(--accent)}#feedback{min-height:1.3em;margin-top:10px;color:var(--muted)}
-.item{padding:19px 0;border-top:1px solid var(--border)}.item:first-child{border-top:0;padding-top:0}.name{font-weight:650;overflow-wrap:anywhere}.meta{color:var(--muted);font-size:.84rem;margin-top:6px}.pill{font-size:.75rem;border-radius:20px;padding:4px 10px;background:var(--surface2);color:var(--muted);white-space:nowrap}.pill.done{background:var(--positive-bg);color:var(--positive)}.pill.failed{background:var(--negative-bg);color:var(--negative)}.pill.running{background:var(--ongoing-bg);color:var(--ongoing)}.error{color:var(--negative);white-space:pre-wrap;overflow-wrap:anywhere;font-size:.85rem;margin-top:8px}.track{height:8px;background:var(--track);border-radius:20px;overflow:hidden;margin:10px 0 4px}.fill{height:100%;background:var(--accent);transition:width .3s}.actions{display:flex;gap:9px;align-items:center;flex-wrap:wrap;margin-top:12px}
-.live{border:1px solid var(--border);border-radius:13px;background:var(--surface2);padding:14px;margin-top:14px}.live-head{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap}.tabs{display:flex;gap:6px;flex-wrap:wrap}.tabs button{padding:7px 12px}.live-output{margin:12px 0 0;padding:14px;background:var(--field);border:1px solid var(--border);border-radius:9px;max-height:340px;min-height:92px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font: .83rem/1.6 ui-monospace,SFMono-Regular,Consolas,"Liberation Mono",monospace;color:var(--text)}.live-note{margin:9px 0 0;color:var(--muted);font-size:.78rem}footer{font-size:.8rem;color:var(--muted);margin:24px 0 4px}@media(max-width:590px){.panel{padding:17px}body{padding:15px 10px 24px}.hero{gap:16px}.theme-box{margin-left:55px}.drop{padding:25px 11px}}
-</style>
-<script>
-// Apply the remembered theme before rendering to avoid a color flash.
-(function(){const preferred=localStorage.getItem('document-processor-theme')||'system';document.documentElement.dataset.theme=preferred==='system'?(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'):preferred;})();
-</script>
-</head>
-<body><main>
-<header class="hero top">
-  <div><div class="brand"><div class="brand-icon" aria-hidden="true">◫</div><h1>Document Processor</h1></div><p class="muted">Analyze large PDFs locally with your llama.cpp model. Jobs continue on your server even if you close the browser.</p></div>
-  <div class="theme-box"><label for="theme" class="small muted">Theme</label><select id="theme" aria-label="Color theme"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></div>
-</header>
-<section class="panel"><div class="top"><h2>New analysis</h2><span class="pill">Local · sequential processing</span></div>
-<form id="uploadForm">
-<label class="drop" id="drop" for="file"><strong id="fileLabel">📄 Drop a PDF or click to browse</strong><span class="muted">Text or scanned PDF · max {{ limit }} MiB · French/English OCR</span><input id="file" name="file" type="file" accept=".pdf,application/pdf" required></label>
-<label class="field-label" for="question">Analysis instructions</label><textarea id="question" name="question" maxlength="1500">Analyze this entire document: objectives, methods, results, key figures, assumptions, limitations, and conclusions. Cite relevant pages and flag anything that cannot be verified.</textarea>
-<div class="top" style="margin-top:14px"><span class="muted small">One job at a time. Progress is saved to disk.</span><button type="submit" id="send">Start analysis</button></div><div id="feedback" role="status" aria-live="polite"></div>
-</form></section>
-<section class="panel"><div class="top" style="margin-bottom:18px"><h2>Analysis jobs</h2><button class="button-secondary" id="refresh" type="button">Refresh</button></div><div id="jobsError" class="error" role="status" hidden></div><div id="jobs" class="muted">Loading…</div></section>
-<footer>Lightweight local processing · No external AI service · Optional live generation preview · Reports persist on disk.</footer>
-</main><script>
-// Find an element by its HTML ID, or return null when it is absent.
-const $=id=>document.getElementById(id);
-const file=$('file'),drop=$('drop'),feedback=$('feedback');
-let expandedId=null, liveTab='content';
-const activeStatuses=new Set(['queued','running']);
-let jobs=[],renderedJobs=null,hasActiveJobs=false,jobsTimer=null,jobsRequest=null,refreshPending=false,liveBusy=false;
-const theme=$('theme');
-const selectedTheme=localStorage.getItem('document-processor-theme')||'system';theme.value=['system','light','dark'].includes(selectedTheme)?selectedTheme:'system';
-// Resolve the system mode, apply its color, and remember choice v.
-function applyTheme(v){document.documentElement.dataset.theme=v==='system'?(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'):v;localStorage.setItem('document-processor-theme',v)}
-theme.addEventListener('change',()=>applyTheme(theme.value));
-matchMedia('(prefers-color-scheme: dark)').addEventListener('change',()=>{if(theme.value==='system')applyTheme('system')});
-file.addEventListener('change',()=>{$('fileLabel').textContent=file.files[0]?.name||'📄 Drop a PDF or click to browse'});
-for(const type of ['dragenter','dragover'])drop.addEventListener(type,e=>{e.preventDefault();drop.classList.add('active')});
-for(const type of ['dragleave','drop'])drop.addEventListener(type,e=>{e.preventDefault();drop.classList.remove('active')});
-drop.addEventListener('drop',e=>{if(e.dataTransfer.files.length){file.files=e.dataTransfer.files;$('fileLabel').textContent=file.files[0].name}});
-// Send the PDF and instructions, then display the new job immediately.
-// Keep the button disabled until upload and refresh are complete.
-$('uploadForm').addEventListener('submit',async e=>{
- e.preventDefault();if(!file.files.length){feedback.textContent='Select a PDF.';return}
- $('send').disabled=true;feedback.textContent='Uploading file…';
- try{const r=await fetch('/api/jobs',{method:'POST',body:new FormData(e.target)});const data=await r.json();if(!r.ok)throw Error(data.error||`HTTP ${r.status}`);
- feedback.textContent='Analysis added to queue.';e.target.reset();$('fileLabel').textContent='📄 Drop a PDF or click to browse';expandedId=data.id;liveTab='content';await refresh(true);
- }catch(err){feedback.textContent='Failed: '+err.message}finally{$('send').disabled=false}
-});
-$('refresh').addEventListener('click',refresh);
-const codes={queued:'Queued',running:'Running',done:'Completed',failed:'Failed'};
-// Create an element with optional text and an optional CSS class.
-// textContent displays plain text without interpreting it as HTML.
-function el(tag,content,cls){const node=document.createElement(tag);if(content!==undefined)node.textContent=content;if(cls)node.className=cls;return node}
-// Requeue job id through the API and force a fresh jobs read.
-// Show an alert if the API or network rejects the retry.
-async function retry(id){try{const r=await fetch(`/api/jobs/${id}/retry`,{method:'POST'});const d=await r.json();if(!r.ok)throw Error(d.error||'Retry failed');await refresh(true)}catch(err){alert(err.message)}}
-// Open or close the Live panel for job id without reloading the jobs list.
-function toggleLive(id){expandedId=expandedId===id?null:id;liveTab='content';renderJobs()}
-// Build and return the Live panel for job id without starting a request.
-// Buttons switch the displayed channel; loadLive supplies the text afterward.
-function createLive(id){
- const root=el('div',undefined,'live');root.id='live-'+id;
- const header=el('div',undefined,'live-head'),tabs=el('div',undefined,'tabs');
- for(const tab of ['content','reasoning']){const b=el('button',tab==='content'?'Generated text':'Reasoning (if available)', 'button-secondary'+(liveTab===tab?' button-active':''));b.type='button';b.dataset.tab=tab;b.addEventListener('click',()=>{liveTab=tab;root.querySelectorAll('[data-tab]').forEach(button=>button.classList.toggle('button-active',button.dataset.tab===tab));loadLive()});tabs.append(b)}
- header.append(tabs);header.append(el('span','Latest model pass','micro muted'));root.append(header);
- const output=el('div','Waiting for streamed output…','live-output');output.id='live-content';output.setAttribute('role','log');root.append(output);
- const note=el('p','The panel displays the current or most recent model pass. Model reasoning is shown only if emitted by the model.','live-note');note.id='live-note';root.append(note);
- return root
-}
-// Read the open panel preview without overlapping Live requests.
-// Ignore hidden tabs and responses for a panel replaced in the meantime.
-// Preserve manual scrolling; follow output when the user is at the bottom.
-async function loadLive(){
- if(document.hidden||liveBusy)return;
- const id=expandedId,output=$('live-content'),note=$('live-note');if(!id||!output||!note)return;
- liveBusy=true;
- try{const res=await fetch(`/api/jobs/${id}/live`,{cache:'no-store'});if(!res.ok)throw Error(`HTTP ${res.status}`);const d=await res.json();if(id!==expandedId||output!==$('live-content'))return;
- const content=liveTab==='reasoning'?d.reasoning:d.content;
- const truncated=(liveTab==='reasoning'?d.reasoning_chars:d.content_chars)>(content||'').length;
- const label=liveTab==='reasoning'?'No reasoning text was emitted for this pass. The model may not support it, or the server may not expose it.':'No generated text yet for this pass.';
- const nearBottom=output.scrollHeight-output.scrollTop-output.clientHeight<45;
- if(output.textContent!==(content||label))output.textContent=content||label;
- if(nearBottom)output.scrollTop=output.scrollHeight;
- note.textContent=(d.phase||'Waiting')+' · '+(d.active?'Generating…':'Last available output')+(truncated?' · Showing recent text only':'');
- }catch(err){if(id===expandedId&&output===$('live-content'))note.textContent='Cannot load live output: '+err.message}
- finally{
-  liveBusy=false;
-  // Load a replacement panel immediately after the previous request settles.
-  if($('live-content')&&output!==$('live-content'))loadLive();
- }
-}
-// Cancel the jobs polling deadline and release its reference when present.
-function stopJobsPolling(){if(jobsTimer!==null)clearTimeout(jobsTimer);jobsTimer=null}
-// Schedule one read in six seconds when a job is active.
-// Do not schedule automatic reads in a hidden tab.
-function scheduleJobsPolling(){
- stopJobsPolling();
- if(hasActiveJobs&&!document.hidden)jobsTimer=setTimeout(refresh,6000);
-}
-// Return the jobs-refresh promise shared by callers.
-// afterChange=true marks a create/retry: read again after any older response.
-// A manual click passes an event, not true. Keep cards visible on errors and
-// adapt polling after the request settles.
-function refresh(afterChange=false){
- // A response requested before creation cannot confirm the new job's state.
- if(afterChange===true){hasActiveJobs=true;refreshPending=true}
- if(jobsRequest)return jobsRequest;
- stopJobsPolling();
- jobsRequest=(async()=>{
-  do{
-   refreshPending=false;
-   try{
-    const res=await fetch('/api/jobs',{cache:'no-store'});if(!res.ok)throw Error('Unable to load jobs');const data=await res.json();
-    if(refreshPending)continue;
-    jobs=data.jobs;hasActiveJobs=data.has_active_jobs??jobs.some(j=>activeStatuses.has(j.status));
-    $('jobsError').hidden=true;renderJobs();
-   }catch(err){
-    const error=$('jobsError'),message='Cannot refresh analyses: '+err.message;
-    if(error.textContent!==message)error.textContent=message;error.hidden=false;
-   }
-  }while(refreshPending);
- })().finally(()=>{
-  jobsRequest=null;
-  // A creation can complete between the loop end and this cleanup.
-  if(refreshPending)return refresh(true);
-  scheduleJobsPolling();
- });
- return jobsRequest;
-}
-// Rebuild cards only when data or the open panel changes.
-// Reuse the Live node to preserve its text, channel, and scroll position.
-function renderJobs(){
- const signature=JSON.stringify([jobs,expandedId]);if(signature===renderedJobs)return;
- const live=expandedId?$('live-'+expandedId):null,host=$('jobs');host.replaceChildren();
- renderedJobs=signature;
- if(!jobs.length){host.append(el('p','No analysis jobs yet.'));return}
- for(const j of jobs){
-  const item=el('article',undefined,'item'),top=el('div',undefined,'top');top.append(el('div',j.filename,'name'));top.append(el('span',codes[j.status]||j.status,`pill ${j.status}`));item.append(top);
-  item.append(el('div',j.stage||'','meta'));
-  item.append(el('div',`${j.pages||'?'} pages · ${j.done_chunks||0}/${j.total_chunks||'?'} sections · created ${new Date(j.created_at).toLocaleString()}`,'meta'));
-  const pct=j.status==='done'?100:Math.max(0,Math.min(99,Number(j.progress_percent||0)));
-  const track=el('div',undefined,'track'),fill=el('div',undefined,'fill');fill.style.width=pct+'%';track.setAttribute('role','progressbar');track.setAttribute('aria-valuenow',pct);track.setAttribute('aria-valuemin','0');track.setAttribute('aria-valuemax','100');track.append(fill);item.append(track);
-  item.append(el('div',pct+'% of workflow completed','micro muted'));
-  if(j.error)item.append(el('div',j.error,'error'));
-  const actions=el('div',undefined,'actions');
-  if(j.status==='done'){const link=el('a','Download Markdown report');link.href=`/api/jobs/${j.id}/report`;link.download=`analysis_${j.id.slice(0,8)}.md`;actions.append(link)}
-  if(j.status==='failed'){const b=el('button','Retry','button-secondary');b.type='button';b.addEventListener('click',()=>retry(j.id));actions.append(b)}
-  const liveButton=el('button',expandedId===j.id?'Hide live output':'Show live output','button-secondary');liveButton.type='button';liveButton.setAttribute('aria-expanded',String(expandedId===j.id));liveButton.addEventListener('click',()=>toggleLive(j.id));actions.append(liveButton);
-  item.append(actions);if(expandedId===j.id)item.append(live||createLive(j.id));host.append(item);
- }
- loadLive();
-}
-// When the tab becomes visible, request one jobs and Live refresh.
-document.addEventListener('visibilitychange',()=>{
- if(document.hidden)stopJobsPolling();else{refresh();loadLive()}
-});
-// Load the list once; the Live timer is separate from the jobs timer.
-refresh();setInterval(loadLive,1700);
-</script></body></html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Document Processor · Local PDF analysis</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}" />
+    <script>
+      // Apply the remembered theme before rendering to avoid a color flash.
+      (function () {
+        const preferred =
+          localStorage.getItem("document-processor-theme") || "system";
+        document.documentElement.dataset.theme =
+          preferred === "system"
+            ? matchMedia("(prefers-color-scheme: dark)").matches
+              ? "dark"
+              : "light"
+            : preferred;
+      })();
+    </script>
+  </head>
+  <body>
+    <main>
+      <header class="hero top">
+        <div>
+          <div class="brand">
+            <div class="brand-icon" aria-hidden="true">◫</div>
+            <h1>Document Processor</h1>
+          </div>
+          <p
+            class="muted"
+            data-i18n="Analyze large PDFs locally with your llama.cpp model. Jobs continue on your server even if you close the browser."
+          >
+            Analyze large PDFs locally with your llama.cpp model. Jobs continue
+            on your server even if you close the browser.
+          </p>
+        </div>
+        <div class="theme-controls">
+          <div class="theme-box">
+            <img
+              id="languageFlag"
+              src="{{ url_for('static', filename='en.svg') }}"
+              width="24"
+              height="16"
+              alt=""
+            /><label for="uiLanguage" data-i18n="Language">Language</label
+            ><select id="uiLanguage">
+              <option value="en">English</option>
+              <option value="fr">Français</option>
+            </select>
+          </div>
+          <div class="theme-box">
+            <label for="theme" class="small muted" data-i18n="Theme"
+              >Theme</label
+            ><select id="theme" aria-label="Theme">
+              <option value="system" data-i18n="System">System</option>
+              <option value="light" data-i18n="Light">Light</option>
+              <option value="dark" data-i18n="Dark">Dark</option>
+            </select>
+          </div>
+        </div>
+      </header>
+      <section class="panel">
+        <div class="top">
+          <h2 data-i18n="New analysis">New analysis</h2>
+          <span class="pill" data-i18n="Local · sequential processing"
+            >Local · sequential processing</span
+          >
+        </div>
+        <form id="uploadForm">
+          <label class="drop" id="drop" for="file"
+            ><strong id="fileLabel">📄 Drop a PDF or click to browse</strong
+            ><span class="muted"
+              ><span data-i18n="Text or scanned PDF">Text or scanned PDF</span>
+              · {{ limit }} MiB · OCR FR/EN</span
+            ><input
+              id="file"
+              name="file"
+              type="file"
+              accept=".pdf,application/pdf"
+              required
+          /></label>
+          <label
+            class="field-label"
+            for="question"
+            data-i18n="Analysis instructions"
+            >Analysis instructions</label
+          ><textarea id="question" name="question" maxlength="1500">
+Analyze this entire document: objectives, methods, results, key figures, assumptions, limitations, and conclusions. Cite relevant pages and flag anything that cannot be verified.</textarea
+          >
+          <div class="settings-grid">
+            <div>
+              <label
+                class="field-label"
+                for="profile"
+                data-i18n="Performance profile"
+                >Performance profile</label
+              ><select id="profile" name="profile">
+                <option value="low" data-i18n="Limited resources">
+                  Limited resources
+                </option>
+                <option value="medium" data-i18n="Moderate resources">
+                  Moderate resources
+                </option>
+                <option value="high" data-i18n="High performance">
+                  High performance
+                </option>
+                <option value="ultra" data-i18n="AI workstation">
+                  AI workstation
+                </option>
+              </select>
+            </div>
+            <div>
+              <label
+                class="field-label"
+                for="reportLanguage"
+                data-i18n="Report language"
+                >Report language</label
+              ><select id="reportLanguage">
+                <option value="auto" data-i18n="Follow the request">
+                  Follow the request
+                </option>
+                <option value="fr">Français</option>
+                <option value="en">English</option>
+              </select>
+            </div>
+            <div>
+              <label
+                class="field-label"
+                for="detailLevel"
+                data-i18n="Report detail"
+                >Report detail</label
+              ><select id="detailLevel">
+                <option value="concise" data-i18n="Concise">Concise</option>
+                <option value="standard" selected data-i18n="Standard">
+                  Standard
+                </option>
+                <option value="detailed" data-i18n="Detailed">Detailed</option>
+              </select>
+            </div>
+          </div>
+          <p id="profileHelp" class="small muted"></p>
+          <details id="advanced">
+            <summary data-i18n="Advanced settings">Advanced settings</summary>
+            <p
+              class="small muted"
+              data-i18n="Leave fields empty to use the profile. Overrides create a customized configuration."
+            >
+              Leave fields empty to use the profile. Overrides create a
+              customized configuration.
+            </p>
+            <div class="settings-grid">
+              <div>
+                <label for="chunk_tokens" data-i18n="Section tokens"
+                  >Section tokens</label
+                ><input
+                  id="chunk_tokens"
+                  type="number"
+                  min="128"
+                  max="131072"
+                  step="1"
+                />
+              </div>
+              <div>
+                <label for="analysis_tokens" data-i18n="Analysis output tokens"
+                  >Analysis output tokens</label
+                ><input
+                  id="analysis_tokens"
+                  type="number"
+                  min="64"
+                  max="65536"
+                  step="1"
+                />
+              </div>
+              <div>
+                <label for="merge_tokens" data-i18n="Merge output tokens"
+                  >Merge output tokens</label
+                ><input
+                  id="merge_tokens"
+                  type="number"
+                  min="64"
+                  max="65536"
+                  step="1"
+                />
+              </div>
+              <div>
+                <label for="final_tokens" data-i18n="Final output tokens"
+                  >Final output tokens</label
+                ><input
+                  id="final_tokens"
+                  type="number"
+                  min="64"
+                  max="65536"
+                  step="1"
+                />
+              </div>
+              <div>
+                <label for="temperature" data-i18n="Temperature"
+                  >Temperature</label
+                ><input
+                  id="temperature"
+                  type="number"
+                  min="0"
+                  max="2"
+                  step="0.05"
+                />
+              </div>
+              <div>
+                <label for="top_p" data-i18n="Top P">Top P</label
+                ><input id="top_p" type="number" min="0" max="1" step="0.05" />
+              </div>
+              <div>
+                <label for="top_k" data-i18n="Top K">Top K</label
+                ><input id="top_k" type="number" min="0" max="1000" step="1" />
+              </div>
+              <div>
+                <label for="min_p" data-i18n="Min P">Min P</label
+                ><input id="min_p" type="number" min="0" max="1" step="0.05" />
+              </div>
+              <div>
+                <label
+                  for="step_timeout_seconds"
+                  data-i18n="Generation time limit (seconds)"
+                  >Generation time limit (seconds)</label
+                ><input
+                  id="step_timeout_seconds"
+                  type="number"
+                  min="1"
+                  max="86400"
+                  step="1"
+                />
+              </div>
+              <div>
+                <label for="max_calls" data-i18n="Maximum model calls"
+                  >Maximum model calls</label
+                ><input
+                  id="max_calls"
+                  type="number"
+                  min="1"
+                  max="2000"
+                  step="1"
+                />
+              </div>
+              <div>
+                <label for="thinking_section" data-i18n="Section reasoning"
+                  >Section reasoning</label
+                ><select id="thinking_section" disabled>
+                  <option value="inherit" data-i18n="Engine default">
+                    Engine default
+                  </option>
+                  <option value="off" data-i18n="Off">Off</option>
+                  <option value="on" data-i18n="On">On</option>
+                </select>
+              </div>
+              <div>
+                <label for="thinking_merge" data-i18n="Merge reasoning"
+                  >Merge reasoning</label
+                ><select id="thinking_merge" disabled>
+                  <option value="inherit" data-i18n="Engine default">
+                    Engine default
+                  </option>
+                  <option value="off" data-i18n="Off">Off</option>
+                  <option value="on" data-i18n="On">On</option>
+                </select>
+              </div>
+              <div>
+                <label for="thinking_final" data-i18n="Final reasoning"
+                  >Final reasoning</label
+                ><select id="thinking_final" disabled>
+                  <option value="inherit" data-i18n="Engine default">
+                    Engine default
+                  </option>
+                  <option value="off" data-i18n="Off">Off</option>
+                  <option value="on" data-i18n="On">On</option>
+                </select>
+              </div>
+            </div>
+            <p
+              class="small muted"
+              data-i18n="Reasoning controls require an administrator-verified model and template. Hiding reasoning does not disable it."
+            >
+              Reasoning controls require an administrator-verified model and
+              template. Hiding reasoning does not disable it.
+            </p>
+          </details>
+          <div class="preview" aria-live="polite">
+            <strong data-i18n="Applied settings">Applied settings</strong>
+            <div id="configPreview"></div>
+            <div id="configWarnings" class="small muted"></div>
+            <p
+              class="micro muted"
+              data-i18n="Each complete prompt is validated again before generation."
+            >
+              Each complete prompt is validated again before generation.
+            </p>
+          </div>
+          <div class="top" style="margin-top: 14px">
+            <span
+              class="muted small"
+              data-i18n="One job at a time. Progress is saved to disk."
+              >One job at a time. Progress is saved to disk.</span
+            ><button type="submit" id="send" data-i18n="Start analysis">
+              Start analysis
+            </button>
+          </div>
+          <div id="feedback" role="status" aria-live="polite"></div>
+        </form>
+      </section>
+      <section class="panel">
+        <div class="top" style="margin-bottom: 18px">
+          <h2 data-i18n="Analysis jobs">Analysis jobs</h2>
+          <button
+            class="button-secondary"
+            id="refresh"
+            type="button"
+            data-i18n="Refresh"
+          >
+            Refresh
+          </button>
+        </div>
+        <div id="jobsError" class="error" role="status" hidden></div>
+        <div id="jobs">Loading…</div>
+      </section>
+      <section class="panel">
+        <details>
+          <summary data-i18n="Engine diagnostics">Engine diagnostics</summary>
+          <p
+            class="small muted"
+            data-i18n="Read-only information. Profiles never change model, threads, GPU, slots or KV cache."
+          >
+            Read-only information. Profiles never change model, threads, GPU,
+            slots or KV cache.
+          </p>
+          <button
+            type="button"
+            id="diagnostics"
+            class="button-secondary"
+            data-i18n="Check backend"
+          >
+            Check backend
+          </button>
+          <div id="diagnosticOutput" role="status"></div>
+        </details>
+      </section>
+      <footer
+        data-i18n="Lightweight local processing · No external AI service · Optional live generation preview · Reports persist on disk."
+      >
+        Lightweight local processing · No external AI service · Optional live
+        generation preview · Reports persist on disk.
+      </footer>
+    </main>
+    <script id="translations" type="application/json">
+      {{ translations|tojson }}
+    </script>
+    <script src="{{ url_for('static', filename='app.js') }}" defer></script>
+  </body>
+</html>
