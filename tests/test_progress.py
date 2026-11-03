@@ -1,4 +1,5 @@
 """Test persisted progress and the jobs APIs."""
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,7 +8,7 @@ from unittest.mock import patch
 import app
 from document_processor import extraction, jobs
 from document_processor.jobs import JobStore
-from document_processor.worker import Worker
+from document_processor.worker import IDLE_SECONDS, Worker
 
 
 class StopWorker(BaseException):
@@ -124,6 +125,60 @@ class ProgressTests(unittest.TestCase):
         stored = self.stored_job(job_id)
         self.assertEqual((stored["status"], stored["progress_percent"], stored["error"]),
                          ("queued", 52, ""))
+
+    def test_retry_limit_and_unknown_jobs_are_refused(self):
+        """Refuse a retry once every attempt is used, and any action on an unknown job."""
+        job_id = "c" * 32
+        self.insert_job(job_id, "failed", 52)
+        app.store.start_attempt(job_id, jobs.utcnow()).finish("failed")
+        # A job saved without a configuration snapshot is limited by MAX_JOB_ATTEMPTS.
+        with patch.object(app, "MAX_JOB_ATTEMPTS", 1), patch.object(app.worker, "wake") as wakeup:
+            response = self.client.post(f"/api/jobs/{job_id}/retry")
+        self.assertEqual((response.status_code, response.get_json()["error_code"]), (409, "retry_limit"))
+        wakeup.assert_not_called()
+        self.assertEqual(self.stored_job(job_id)["status"], "failed")
+        unknown = "d" * 32
+        for method, action in (("post", "cancel"), ("post", "retry"), ("get", "live"),
+                               ("get", "metrics"), ("get", "report")):
+            with self.subTest(action=action):
+                response = getattr(self.client, method)(f"/api/jobs/{unknown}/{action}")
+                self.assertEqual(response.status_code, 404)
+
+    def test_restart_requeues_interrupted_jobs_and_applies_pending_cancellations(self):
+        """Recover the jobs and attempts that a crash or a restart left running."""
+        interrupted, cancelling, cancelled, waiting = (f"{number:032x}" for number in range(1, 5))
+        self.insert_job(interrupted, "running", 52)
+        self.insert_job(cancelling, "running", 52)
+        self.insert_job(cancelled, "queued", 0)
+        self.insert_job(waiting, "queued", 0)
+        app.store.update_job(cancelling, cancel_requested=1)
+        app.store.update_job(cancelled, cancel_requested=1)
+        app.store.start_attempt(interrupted, jobs.utcnow()).start("section", "section-1")
+        untouched = self.stored_job(waiting)
+
+        app.store.initialize()
+
+        stored = self.stored_job(interrupted)
+        self.assertEqual((stored["status"], stored["stage"], stored["progress_percent"]),
+                         ("queued", "Resuming after restart", 52))
+        for job_id in (cancelling, cancelled):
+            self.assertEqual(self.stored_job(job_id)["status"], "cancelled")
+        self.assertEqual(self.stored_job(waiting), untouched)
+        # The cut-short attempt stays in the history instead of looking active forever.
+        history = app.store.metrics(interrupted)
+        self.assertEqual([run["status"] for run in history["runs"]], ["interrupted"])
+        self.assertEqual([step["status"] for step in history["steps"]], ["interrupted"])
+
+    def test_database_errors_neither_stop_nor_spin_the_worker(self):
+        """Log a failed queue read, then wait IDLE_SECONDS before trying again."""
+        runner = Worker(app.store, app.analyze_job)
+        with patch.object(app.store, "claim_next_job", side_effect=sqlite3.OperationalError("database is locked")), \
+             patch.object(runner._wakeup, "wait", side_effect=[False, StopWorker]) as wait, \
+             self.assertLogs(app.log, level="ERROR") as logs, self.assertRaises(StopWorker):
+            runner.run_forever()
+        self.assertEqual(wait.call_count, 2)
+        wait.assert_called_with(timeout=IDLE_SECONDS)
+        self.assertEqual(sum("worker_database_error" in line for line in logs.output), 2)
 
     def test_workflow_progress_through_success_and_failure(self):
         """Test the complete workflow with and without failure.
