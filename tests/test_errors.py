@@ -15,6 +15,7 @@ from document_processor import extraction, jobs
 from document_processor.config import ConfigurationError
 from document_processor.errors import ModelError, ProcessingError
 from document_processor.jobs import JobStore
+from document_processor.worker import record_failure
 
 ROOT = Path(app.__file__).parent
 
@@ -84,13 +85,13 @@ class FailedJobTests(unittest.TestCase):
                     ConfigurationError("context_insufficient", "Too large.")):
             with self.subTest(code=exc.code):
                 identifier = self.job()
-                app.fail_job(identifier, exc)
+                record_failure(app.store, identifier, exc)
                 job = app.store.get_job(identifier)
                 self.assertEqual((job["status"], job["error_code"], job["error"]), ("failed", exc.code, str(exc)))
 
     def test_unexpected_failures_never_expose_private_text(self):
         identifier = self.job()
-        app.fail_job(identifier, OSError("/private/path/secret.pdf"))
+        record_failure(app.store, identifier, OSError("/private/path/secret.pdf"))
         job = app.store.get_job(identifier)
         self.assertEqual(job["error_code"], "analysis_failed")
         self.assertNotIn("secret", job["error"])

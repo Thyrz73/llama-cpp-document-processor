@@ -8,10 +8,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 import app
-from document_processor import config, extraction, pipeline
+from document_processor import config, extraction, pipeline, worker
 from document_processor.errors import Cancelled, ModelError, ProcessingError
 from document_processor.files import atomic_json
 from document_processor.jobs import JobStore
+from document_processor.worker import Worker
 
 
 class FakeModel(app.ModelClient):
@@ -265,38 +266,38 @@ class V2Tests(unittest.TestCase):
         app.store.update_job(identifier, status="running")
         observed = []
 
-        def analyze(job_id):
+        def analyze(job_id, cancellation_requested):
             with patch.object(app.store, "read_cancellation", wraps=app.store.read_cancellation) as reads:
-                checks = [app.cancellation_requested(job_id) for _ in range(500)]
+                checks = [cancellation_requested(job_id) for _ in range(500)]
                 observed.append((checks[-1], reads.call_count))
                 self.assertEqual(self.client.post(f"/api/jobs/{job_id}/cancel").status_code, 202)
-                observed.append((app.cancellation_requested(job_id), reads.call_count))
+                observed.append((cancellation_requested(job_id), reads.call_count))
             raise Cancelled()
 
+        runner = Worker(app.store, analyze)
         # A long interval keeps the read counts independent of machine speed.
-        with patch.object(app, "analyze_job", side_effect=analyze), \
-             patch.object(app, "CANCEL_RECHECK_SECONDS", 3600):
-            app.run_claimed_job(identifier)
+        with patch.object(app, "worker", runner), patch.object(worker, "CANCEL_RECHECK_SECONDS", 3600):
+            runner.run_claimed(identifier)
         # 500 checks open SQLite once; the API request is then seen without a new read.
         self.assertEqual(observed, [(False, 1), (True, 1)])
         self.assertEqual(app.store.get_job(identifier)["status"], "cancelled")
-        self.assertNotIn(identifier, app._cancel_signals)
+        self.assertEqual(runner._signals, {})
 
     def test_running_job_still_honors_cancellation_recorded_only_in_sqlite(self):
         identifier = self.create()
         app.store.update_job(identifier, status="running")
 
-        def analyze(job_id):
-            self.assertFalse(app.cancellation_requested(job_id))
+        def analyze(job_id, cancellation_requested):
+            self.assertFalse(cancellation_requested(job_id))
             app.store.update_job(job_id, cancel_requested=1)
-            self.assertFalse(app.cancellation_requested(job_id))
-            app._cancel_signals[job_id].checked_at -= app.CANCEL_RECHECK_SECONDS
-            self.assertTrue(app.cancellation_requested(job_id))
+            self.assertFalse(cancellation_requested(job_id))
+            runner._signals[job_id].checked_at -= worker.CANCEL_RECHECK_SECONDS
+            self.assertTrue(cancellation_requested(job_id))
             raise Cancelled()
 
-        with patch.object(app, "analyze_job", side_effect=analyze), \
-             patch.object(app, "CANCEL_RECHECK_SECONDS", 3600):
-            app.run_claimed_job(identifier)
+        runner = Worker(app.store, analyze)
+        with patch.object(worker, "CANCEL_RECHECK_SECONDS", 3600):
+            runner.run_claimed(identifier)
         self.assertEqual(app.store.get_job(identifier)["status"], "cancelled")
 
     def test_cancel_and_retry_are_idempotent_and_configuration_cannot_be_replaced(self):

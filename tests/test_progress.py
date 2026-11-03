@@ -7,6 +7,7 @@ from unittest.mock import patch
 import app
 from document_processor import extraction, jobs
 from document_processor.jobs import JobStore
+from document_processor.worker import Worker
 
 
 class StopWorker(BaseException):
@@ -116,7 +117,7 @@ class ProgressTests(unittest.TestCase):
         self.insert_job(job_id, "running", 52)
         app.store.update_job(job_id, status="failed", stage="Error", error="Model unavailable")
         self.assertEqual(self.client.get(f"/api/jobs/{job_id}").get_json()["progress_percent"], 52)
-        with patch.object(app.worker_wakeup, "set") as wakeup:
+        with patch.object(app.worker, "wake") as wakeup:
             response = self.client.post(f"/api/jobs/{job_id}/retry")
         self.assertEqual(response.status_code, 200)
         wakeup.assert_called_once_with()
@@ -152,6 +153,7 @@ class ProgressTests(unittest.TestCase):
                     progress("Extracting text: page 1/1")
                     return [{"page": 1, "text": "Example text"}], 1, [], []
 
+                runner = Worker(app.store, app.analyze_job)
                 with patch.object(app, "read_system_prompt", return_value="Test instructions"), \
                      patch.object(app.store, "job_dir", return_value=directory), \
                      patch.object(app, "ModelClient") as model_class, \
@@ -159,7 +161,7 @@ class ProgressTests(unittest.TestCase):
                      patch.object(extraction, "make_chunks", return_value=[
                          {"pages": [1], "text": "Example section"} for _ in range(5)]), \
                      patch.object(app.store, "update_job", side_effect=record_update), \
-                     patch.object(app.worker_wakeup, "wait", side_effect=StopWorker):
+                     patch.object(runner._wakeup, "wait", side_effect=StopWorker):
                     model = model_class.return_value
                     model.tokenize.return_value = 10
                     model.inspect.return_value = {"context_tokens": 8192, "model": "test"}
@@ -174,10 +176,10 @@ class ProgressTests(unittest.TestCase):
                         RuntimeError("Model unavailable") if fail else "Final report [Page 1]"]
                     if fail:
                         with self.assertLogs(app.log, level="ERROR"), self.assertRaises(StopWorker):
-                            app.worker_loop()
+                            runner.run_forever()
                     else:
                         with self.assertRaises(StopWorker):
-                            app.worker_loop()
+                            runner.run_forever()
                     self.assertEqual(model.complete.call_count, 7)
 
                 self.assertEqual(progress, sorted(progress))

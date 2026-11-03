@@ -1,16 +1,16 @@
-"""Analyze PDFs with llama.cpp, a queue, and local OCR.
+"""Web entry point: deployment settings, HTTP routes and startup.
 
-The Flask routes expose the interface, jobs, and reports. The worker
-processes one document at a time; ModelClient communicates with llama.cpp,
-and ThinkingSplitter separates final text from reasoning tags. SQLite stores
-job states, while DATA contains job files.
+This module only wires things together and speaks HTTP; the work happens in
+the document_processor package:
 
-No embeddings, Redis, GPU, or additional language models are used.
+- jobs.JobStore keeps jobs in SQLite and their files under DATA_DIR;
+- worker.Worker runs queued jobs one at a time in a background thread;
+- pipeline.run() analyzes one PDF (text extraction, section notes, merges,
+  final report) with the llama.cpp server through model_client.
 
-Options are read from the environment when this module is imported.
-Running ``python app.py`` initializes the database, starts the worker, and
-serves the API with Waitress. Importing the module alone starts neither the
-server nor the worker.
+Settings are read from the environment when this module is imported.
+Running ``python app.py`` prepares the database, starts the worker and serves
+the API with Waitress; importing the module starts neither.
 """
 from __future__ import annotations
 
@@ -33,11 +33,11 @@ from werkzeug.exceptions import Conflict, NotFound, RequestEntityTooLarge
 
 from document_processor import config as job_config
 from document_processor import environment, pipeline, profiles, prompts, reports
-from document_processor.errors import Cancelled, ProcessingError
 from document_processor.files import file_hash
 from document_processor.jobs import PREVIEW_FILE, REPORT_FILE, SOURCE_FILE, InvalidJobPath, JobStore, is_job_id
 from document_processor.model_client import ModelClient as BackendClient
-from document_processor.observability import configure_logging, event, failure, job_context
+from document_processor.observability import configure_logging, event, failure
+from document_processor.worker import Worker
 
 # Read the configuration once when the process starts.
 # Docker Compose passes variables from its .env file to the container.
@@ -90,7 +90,6 @@ class ProcessorFlask(Flask):
 
 app = ProcessorFlask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_MB * 1024 * 1024 + 65536
-worker_wakeup = threading.Event()
 TRANSLATIONS = json.loads((Path(__file__).parent / "static" / "translations.json").read_text(encoding="utf-8"))
 DEFAULT_QUESTIONS = {TRANSLATIONS[language]["default_question"] for language in ("en", "fr")} | {"Analyze the entire document"}
 
@@ -162,97 +161,20 @@ def output_language_instruction():
     return f"Write in {OUTPUT_LANGUAGE}."
 
 
-def analyze_job(job_id):
-    """Run the analysis pipeline for job_id with this deployment's services."""
+def analyze_job(job_id, cancellation_requested=None):
+    """Run the analysis pipeline for job_id with this deployment's services.
+
+    The worker passes its own cancellation check; without one, every check
+    reads SQLite.
+    """
     pipeline.run(job_id, pipeline.Runtime(
         store=store, new_snapshot=new_snapshot, model_client=ModelClient,
-        cancellation_requested=cancellation_requested,
+        cancellation_requested=cancellation_requested or store.read_cancellation,
         live_output=LIVE_OUTPUT_ENABLED, preview_chars=LIVE_PREVIEW_CHARS))
 
 
-CANCEL_RECHECK_SECONDS = 1.0
-
-
-class _CancelSignal:
-    """In-process cancellation flag for the running job; SQLite stays authoritative."""
-
-    def __init__(self):
-        self.event = threading.Event()
-        self.checked_at = float("-inf")
-
-
-# Registered by the worker for its running job only; cancel_job sets the event.
-_cancel_signals: dict[str, _CancelSignal] = {}
-
-
-def cancellation_requested(job_id):
-    """Answer frequent cooperative checks without opening SQLite each time.
-
-    The model client checks once per streamed token. A request through
-    cancel_job sets the running job's event immediately; SQLite is reread at
-    most once per CANCEL_RECHECK_SECONDS so any other recorded request is
-    still honored. Jobs not run by the worker always read SQLite.
-    """
-    signal = _cancel_signals.get(job_id)
-    if signal is None:
-        return store.read_cancellation(job_id)
-    if not signal.event.is_set():
-        now = time.monotonic()
-        if now - signal.checked_at >= CANCEL_RECHECK_SECONDS:
-            signal.checked_at = now
-            if store.read_cancellation(job_id):
-                signal.event.set()
-    return signal.event.is_set()
-
-
-def fail_job(job_id, exc):
-    """Record a failed job with a translatable code and a message safe to display.
-
-    Only ProcessingError and ConfigurationError carry public text; any other
-    exception is logged without its message and shown as a generic failure.
-    """
-    failure("job_failed", exc, job_id=job_id)
-    if isinstance(exc, (ProcessingError, job_config.ConfigurationError)):
-        code, message = exc.code, str(exc)
-    else:
-        code, message = "analysis_failed", "Analysis failed. Check the PDF, configuration and local diagnostics."
-    store.update_job(job_id, status="failed", stage="Error", phase_code="failed", error_code=code, error=message)
-
-
-def run_claimed_job(job_id):
-    """Run a job already marked ``running`` and record how it ended."""
-    _cancel_signals[job_id] = _CancelSignal()
-    event("job_state", job_id=job_id, status="running", stage="starting")
-    with job_context(job_id):
-        try:
-            analyze_job(job_id)
-        except Cancelled:
-            store.update_job(job_id, status="cancelled", stage="Cancelled", phase_code="cancelled", error="", error_code="cancelled")
-        except Exception as exc:
-            # Keep the last preview to help diagnose the error.
-            fail_job(job_id, exc)
-        finally:
-            _cancel_signals.pop(job_id, None)
-
-
-def worker_loop():
-    """Process jobs forever in creation order.
-
-    Claim the next job by changing it from ``queued`` to ``running``, then
-    run it through run_claimed_job, keeping produced files. When idle, wait
-    for a worker_wakeup signal or a six-second timeout. This loop belongs to
-    the application's only worker thread.
-    """
-    while True:
-        try:
-            job_id = store.claim_next_job()
-            if job_id:
-                run_claimed_job(job_id)
-                continue
-        except Exception as exc:
-            failure("worker_database_error", exc)
-        worker_wakeup.wait(timeout=6)
-        worker_wakeup.clear()
+# The single background worker; routes wake it when the queue changes.
+worker = Worker(store, analyze_job)
 
 
 def job_directory(job_id):
@@ -386,7 +308,7 @@ def create_job():
         source.unlink(missing_ok=True)
         directory.rmdir()
         raise
-    worker_wakeup.set()
+    worker.wake()
     event("job_created", job_id=job_id, filename=filename, bytes=source.stat().st_size,
           profile=config["profile"], custom_prompt=question.strip() not in DEFAULT_QUESTIONS,
           chunk_tokens=config["chunk_tokens"], analysis_tokens=config["analysis_tokens"],
@@ -447,7 +369,7 @@ def retry_job(job_id):
         return jsonify(error="The retry limit was reached. Create a new analysis.", error_code="retry_limit"), 409
     if outcome == "conflict":
         return jsonify(error="Only failed or cancelled jobs can be retried", error_code="retry_conflict"), 409
-    worker_wakeup.set()
+    worker.wake()
     legacy = store.load_config(job_id) is None
     event("job_retry", job_id=job_id, attempt=attempts + 1, status="queued", legacy=legacy)
     return jsonify(status="queued", warnings=["legacy_recomputed"] if legacy else [])
@@ -669,10 +591,7 @@ def cancel_job(job_id):
     if outcome == "already_requested":
         return jsonify(status=status, cancel_requested=True), 202
     # The request is committed; let the running job see it without waiting for its next SQLite read.
-    signal = _cancel_signals.get(job_id)
-    if signal is not None:
-        signal.event.set()
-    worker_wakeup.set()
+    worker.notify_cancelled(job_id)
     event("job_cancel_requested", job_id=job_id, status="cancelled" if outcome == "cancelled" else "cancelling")
     return jsonify(status=status, cancel_requested=True), 202
 
@@ -684,6 +603,6 @@ if __name__ == "__main__":
     except job_config.ConfigurationError as exc:
         raise SystemExit(f"Configuration error: {exc}") from None
     store.initialize()
-    threading.Thread(target=worker_loop, name="pdf-worker", daemon=True).start()
+    worker.start()
     log.info("processor_started port=%s", APP_PORT)
     serve(app, host="0.0.0.0", port=APP_PORT, threads=4)
