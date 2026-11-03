@@ -113,6 +113,9 @@ def public_job(job):
     return job
 
 
+# Job configuration and the llama.cpp client -----------------------------------
+
+
 def read_system_prompt():
     """Read the system prompt file and strip surrounding whitespace.
 
@@ -153,6 +156,25 @@ def new_snapshot(options, capabilities=None):
     return config
 
 
+_capability_cache: dict[str, Any] = {"value": None, "expires": 0}
+_capability_lock = threading.Lock()
+CAPABILITY_CACHE_SECONDS = 30
+
+
+def cached_capabilities():
+    """Read an advisory cache without initiating network traffic during form submission."""
+    if time.monotonic() < _capability_cache["expires"]:
+        return _capability_cache["value"]
+    return None
+
+
+def remember_capabilities(value):
+    """Publish a sanitized inspection from diagnostics or a job start for a short period."""
+    # Readers check the expiry first, so publish the value before extending it.
+    _capability_cache["value"] = value
+    _capability_cache["expires"] = time.monotonic() + CAPABILITY_CACHE_SECONDS
+
+
 class ModelClient(BackendClient):
     """Bind the reusable backend adapter to this application's deployment settings."""
 
@@ -180,6 +202,9 @@ def output_language_instruction():
     return f"Write in {OUTPUT_LANGUAGE}."
 
 
+# Background analysis ----------------------------------------------------------
+
+
 def analyze_job(job_id, cancellation_requested=None):
     """Run the analysis pipeline for job_id with this deployment's services.
 
@@ -196,22 +221,15 @@ def analyze_job(job_id, cancellation_requested=None):
 worker = Worker(store, analyze_job)
 
 
+# HTTP routes ------------------------------------------------------------------
+
+
 def job_directory(job_id):
     """Return the job directory, or answer HTTP 404 for an invalid ID or path."""
     try:
         return store.job_dir(job_id)
     except InvalidJobPath:
         abort(404)
-
-
-@app.errorhandler(RequestEntityTooLarge)
-def too_large(_):
-    """Return JSON with HTTP 413 for an oversized request body.
-
-    The _ parameter is Flask's exception and is unused here.
-    """
-    event("upload_rejected", logging.WARNING, error_code="upload_limit")
-    return jsonify(error=f"PDF too large (limit: {MAX_UPLOAD_MB} MiB)", error_code="upload_limit"), 413
 
 
 @app.get("/")
@@ -224,6 +242,54 @@ def index():
 def health():
     """Return HTTP 200 without checking the model or worker."""
     return jsonify(status="ok")
+
+
+@app.get("/api/profiles")
+def profile_info():
+    """Describe profiles without running a model or altering server settings."""
+    return jsonify(profiles=profiles.catalog(),
+                   defaults=job_config.public_config(job_config.resolve(runtime_defaults())),
+                   capabilities=cached_capabilities(),
+                   thinking_supported=runtime_defaults()["thinking_adapter"] != "unsupported")
+
+
+@app.post("/api/config/preview")
+def config_preview():
+    """Resolve a small JSON request; the server repeats validation on job creation."""
+    if request.content_length and request.content_length > 8192:
+        raise job_config.ConfigurationError("invalid_options", "Options are too large.")
+    options = request.get_json()
+    if not isinstance(options, dict):
+        raise job_config.ConfigurationError("invalid_options", "Options must be a JSON object.")
+    config = job_config.resolve(runtime_defaults(), options, cached_capabilities())
+    return jsonify(configuration=job_config.public_config(config),
+                   capabilities=cached_capabilities(), validation="preliminary")
+
+
+@app.get("/api/diagnostics")
+def diagnostics():
+    """Expose only read-only, sanitized properties and this process's own resources."""
+    with _capability_lock:
+        value = cached_capabilities()
+        if value is None:
+            # Inspection needs no private system prompt and launches no completion.
+            client = BackendClient(LLAMA_BASE, KEY, runtime_defaults(), "")
+            try:
+                value = client.inspect()
+                event("backend_checked", status=value.get("status", "unknown"), source="diagnostics")
+            finally:
+                client.session.close()
+            remember_capabilities(value)
+    process_rss_kib = None
+    try:
+        matched = re.search(r"^VmRSS:\s+(\d+)", Path("/proc/self/status").read_text(encoding="utf-8"), re.M)
+        if matched:
+            process_rss_kib = int(matched[1])
+    except OSError:
+        pass
+    return jsonify(backend=value, application={"context_limit": CONTEXT_TOKENS, "concurrency": 1,
+                   "process_rss_kib": process_rss_kib, "resource_scope": "processor_only"},
+                   engine_settings="read_only", engine_memory=None, engine_swap_rate=None)
 
 
 @app.get("/api/jobs")
@@ -371,6 +437,21 @@ def job_live(job_id):
     return jsonify(payload)
 
 
+@app.get("/api/jobs/<job_id>/metrics")
+def job_metrics(job_id):
+    """Serve bounded measurements; no prompts, documents or reasoning are included."""
+    if not store.get_job(job_id):
+        abort(404)
+    try:
+        limit = int(request.args.get("limit", "200"))
+        before = int(request.args["before"]) if "before" in request.args else None
+        if not 1 <= limit <= 500 or (before is not None and not 0 < before < 2**63):
+            raise ValueError()
+    except ValueError:
+        abort(400)
+    return jsonify(store.metrics(job_id, limit, before))
+
+
 @app.post("/api/jobs/<job_id>/retry")
 def retry_job(job_id):
     """Requeue a failed job and wake the worker.
@@ -392,6 +473,24 @@ def retry_job(job_id):
     legacy = store.load_config(job_id) is None
     event("job_retry", job_id=job_id, attempt=attempts + 1, status="queued", legacy=legacy)
     return jsonify(status="queued", warnings=["legacy_recomputed"] if legacy else [])
+
+
+@app.post("/api/jobs/<job_id>/cancel")
+def cancel_job(job_id):
+    """Request cancellation idempotently; active OCR stops at its next safe boundary."""
+    outcome, status = store.request_cancel(job_id)
+    if outcome == "missing":
+        abort(404)
+    if outcome == "already_cancelled":
+        return jsonify(status="cancelled"), 200
+    if outcome == "not_active":
+        return jsonify(error="This job cannot be cancelled.", error_code="cancel_conflict"), 409
+    if outcome == "already_requested":
+        return jsonify(status=status, cancel_requested=True), 202
+    # The request is committed; let the running job see it without waiting for its next SQLite read.
+    worker.notify_cancelled(job_id)
+    event("job_cancel_requested", job_id=job_id, status="cancelled" if outcome == "cancelled" else "cancelling")
+    return jsonify(status=status, cancel_requested=True), 202
 
 
 @app.get("/api/jobs/<job_id>/report")
@@ -472,23 +571,7 @@ def view_report(job_id):
     return response
 
 
-_capability_cache: dict[str, Any] = {"value": None, "expires": 0}
-_capability_lock = threading.Lock()
-CAPABILITY_CACHE_SECONDS = 30
-
-
-def cached_capabilities():
-    """Read an advisory cache without initiating network traffic during form submission."""
-    if time.monotonic() < _capability_cache["expires"]:
-        return _capability_cache["value"]
-    return None
-
-
-def remember_capabilities(value):
-    """Publish a sanitized inspection from diagnostics or a job start for a short period."""
-    # Readers check the expiry first, so publish the value before extending it.
-    _capability_cache["value"] = value
-    _capability_cache["expires"] = time.monotonic() + CAPABILITY_CACHE_SECONDS
+# Request hooks and error handlers ---------------------------------------------
 
 
 @app.before_request
@@ -515,6 +598,16 @@ def finish_request(response):
     return response
 
 
+@app.errorhandler(RequestEntityTooLarge)
+def too_large(_):
+    """Return JSON with HTTP 413 for an oversized request body.
+
+    The _ parameter is Flask's exception and is unused here.
+    """
+    event("upload_rejected", logging.WARNING, error_code="upload_limit")
+    return jsonify(error=f"PDF too large (limit: {MAX_UPLOAD_MB} MiB)", error_code="upload_limit"), 413
+
+
 @app.errorhandler(job_config.ConfigurationError)
 def invalid_configuration(exc):
     """Return stable validation codes for translated browser errors."""
@@ -532,87 +625,6 @@ def api_error(exc):
     messages = {400: "Invalid request.", 404: "Job or file not found.",
                 409: "The result is not ready.", 500: "An internal error occurred."}
     return jsonify(error=messages.get(code, "Request failed."), error_code=f"http_{code}"), code
-
-
-@app.get("/api/profiles")
-def profile_info():
-    """Describe profiles without running a model or altering server settings."""
-    return jsonify(profiles=profiles.catalog(),
-                   defaults=job_config.public_config(job_config.resolve(runtime_defaults())),
-                   capabilities=cached_capabilities(),
-                   thinking_supported=runtime_defaults()["thinking_adapter"] != "unsupported")
-
-
-@app.post("/api/config/preview")
-def config_preview():
-    """Resolve a small JSON request; the server repeats validation on job creation."""
-    if request.content_length and request.content_length > 8192:
-        raise job_config.ConfigurationError("invalid_options", "Options are too large.")
-    options = request.get_json()
-    if not isinstance(options, dict):
-        raise job_config.ConfigurationError("invalid_options", "Options must be a JSON object.")
-    config = job_config.resolve(runtime_defaults(), options, cached_capabilities())
-    return jsonify(configuration=job_config.public_config(config),
-                   capabilities=cached_capabilities(), validation="preliminary")
-
-
-@app.get("/api/diagnostics")
-def diagnostics():
-    """Expose only read-only, sanitized properties and this process's own resources."""
-    with _capability_lock:
-        value = cached_capabilities()
-        if value is None:
-            # Inspection needs no private system prompt and launches no completion.
-            client = BackendClient(LLAMA_BASE, KEY, runtime_defaults(), "")
-            try:
-                value = client.inspect()
-                event("backend_checked", status=value.get("status", "unknown"), source="diagnostics")
-            finally:
-                client.session.close()
-            remember_capabilities(value)
-    process_rss_kib = None
-    try:
-        matched = re.search(r"^VmRSS:\s+(\d+)", Path("/proc/self/status").read_text(encoding="utf-8"), re.M)
-        if matched:
-            process_rss_kib = int(matched[1])
-    except OSError:
-        pass
-    return jsonify(backend=value, application={"context_limit": CONTEXT_TOKENS, "concurrency": 1,
-                   "process_rss_kib": process_rss_kib, "resource_scope": "processor_only"},
-                   engine_settings="read_only", engine_memory=None, engine_swap_rate=None)
-
-
-@app.get("/api/jobs/<job_id>/metrics")
-def job_metrics(job_id):
-    """Serve bounded measurements; no prompts, documents or reasoning are included."""
-    if not store.get_job(job_id):
-        abort(404)
-    try:
-        limit = int(request.args.get("limit", "200"))
-        before = int(request.args["before"]) if "before" in request.args else None
-        if not 1 <= limit <= 500 or (before is not None and not 0 < before < 2**63):
-            raise ValueError()
-    except ValueError:
-        abort(400)
-    return jsonify(store.metrics(job_id, limit, before))
-
-
-@app.post("/api/jobs/<job_id>/cancel")
-def cancel_job(job_id):
-    """Request cancellation idempotently; active OCR stops at its next safe boundary."""
-    outcome, status = store.request_cancel(job_id)
-    if outcome == "missing":
-        abort(404)
-    if outcome == "already_cancelled":
-        return jsonify(status="cancelled"), 200
-    if outcome == "not_active":
-        return jsonify(error="This job cannot be cancelled.", error_code="cancel_conflict"), 409
-    if outcome == "already_requested":
-        return jsonify(status=status, cancel_requested=True), 202
-    # The request is committed; let the running job see it without waiting for its next SQLite read.
-    worker.notify_cancelled(job_id)
-    event("job_cancel_requested", job_id=job_id, status="cancelled" if outcome == "cancelled" else "cancelling")
-    return jsonify(status=status, cancel_requested=True), 202
 
 
 if __name__ == "__main__":

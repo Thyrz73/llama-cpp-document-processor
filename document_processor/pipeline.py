@@ -158,7 +158,7 @@ class JobRun:
             self.recorder.finish(status)
             model.session.close()
 
-    # Steps -------------------------------------------------------------------
+    # Steps --------------------------------------------------------------------
 
     def _load_config(self):
         """Return the job's snapshot, creating one with current settings for older jobs."""
@@ -352,7 +352,7 @@ class JobRun:
             self.recorder.end(handle, "failed", {"error_code": "report_save_failed"})
             raise
 
-    # Helpers -----------------------------------------------------------------
+    # Helpers ------------------------------------------------------------------
 
     def _phase(self, code, label, percent=None, **args):
         """Persist stable phase identifiers alongside the historical English label."""

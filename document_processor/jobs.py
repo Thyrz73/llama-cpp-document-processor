@@ -85,7 +85,7 @@ class JobStore:
             event("job_recovered", job_id=row["id"], status="cancelled" if row["cancel_requested"] else "queued")
         event("sqlite_ready", status="initialized")
 
-    # Job files -----------------------------------------------------------
+    # Job files ----------------------------------------------------------------
 
     def job_dir(self, job_id):
         """Return the job directory path without creating it.
@@ -160,7 +160,7 @@ class JobStore:
             return "delete_files_failed"
         return None
 
-    # Job records ---------------------------------------------------------
+    # Job records --------------------------------------------------------------
 
     def serialize(self, row):
         """Convert a SQLite row into a consistent API dictionary.
@@ -266,7 +266,7 @@ class JobStore:
             con.execute("DELETE FROM jobs WHERE id=?", (job_id,))
         return None
 
-    # Queue ---------------------------------------------------------------
+    # Queue --------------------------------------------------------------------
 
     def claim_next_job(self):
         """Mark the oldest queued job as running and return its ID, or None."""
@@ -329,7 +329,7 @@ class JobStore:
                 WHERE id=? AND status IN ('failed','cancelled')""", (utcnow(), utcnow(), job_id)).rowcount
         return ("queued" if changed else "conflict"), attempts
 
-    # Configuration snapshots and attempts ---------------------------------
+    # Configuration snapshots and attempts -------------------------------------
 
     def save_config(self, con, job_id, config):
         """Insert a snapshot once, inside the caller's transaction; never replace it."""
