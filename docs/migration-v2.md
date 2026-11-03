@@ -57,6 +57,6 @@ Updating the code provides these templates to new jobs. The private `config/syst
 
 ## Rollback
 
-Stop the processor and save post-update data separately. Restore the old application **and its matching pre-update data/configuration backup together**. Do not merge SQLite databases or let old code resume newer execution state.
+Stop the processor and save post-update data separately. Restore the old application **and its matching pre-update data/configuration backup together**. Do not merge SQLite databases or let old code resume newer execution state. Versions with numbered schema migrations refuse to start on a database upgraded by a newer version (`Database error: …`).
 
 Recent Markdown reports can be retained separately. Keep both backups until the chosen version and downloads are verified. llama.cpp needs no restart.

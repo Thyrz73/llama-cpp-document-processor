@@ -33,6 +33,7 @@ from werkzeug.exceptions import Conflict, NotFound, RequestEntityTooLarge
 
 from document_processor import config as job_config
 from document_processor import environment, pipeline, profiles, prompts, reports
+from document_processor.database import SchemaVersionError
 from document_processor.files import file_hash
 from document_processor.jobs import PREVIEW_FILE, REPORT_FILE, SOURCE_FILE, InvalidJobPath, JobStore, is_job_id
 from document_processor.model_client import ModelClient as BackendClient
@@ -602,7 +603,10 @@ if __name__ == "__main__":
         job_config.resolve(runtime_defaults())
     except job_config.ConfigurationError as exc:
         raise SystemExit(f"Configuration error: {exc}") from None
-    store.initialize()
+    try:
+        store.initialize()
+    except SchemaVersionError as exc:
+        raise SystemExit(f"Database error: {exc}") from None
     worker.start()
     log.info("processor_started port=%s", APP_PORT)
     serve(app, host="0.0.0.0", port=APP_PORT, threads=4)

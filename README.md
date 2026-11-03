@@ -165,7 +165,7 @@ data/jobs/<id>/
 
 On restart, interrupted running jobs return to the queue unless cancellation was requested. Compatible completed steps are reused after dependency and file-hash checks. Failed/cancelled jobs wait for Retry. Old jobs without saved settings are recomputed with a warning. Files and metrics have no automatic cleanup, and there is no delete action.
 
-Startup applies an additive, idempotent SQLite migration for the descriptive report name and custom-instructions indicator. Existing request text is reused; no private prompt is copied into the public configuration. New names are saved at finalization; old report names are calculated and cached only on first view/download. Listing history does not read Markdown contents.
+Startup applies numbered SQLite migrations ([database.py](document_processor/database.py)): each runs once, in its own transaction, and only adds tables, columns or indexes. A database already upgraded by a newer version stops startup with a `Database error: …` message instead of running with an unknown schema; restore a matching backup before downgrading. Report names of older jobs are computed and saved on first view or download; listing history does not read Markdown contents.
 
 Preserve `.env`, `config/system_prompt.txt` and `data/` across updates. Stop the processor before copying SQLite and its WAL/SHM files. Back up the old source/image too if you need rollback. Follow [migration and rollback](docs/migration-v2.md).
 
