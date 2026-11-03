@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import app
-from document_processor import config, jobs, pipeline, prompts
+from document_processor import config, jobs, pipeline
 from document_processor.errors import ProcessingError
 from document_processor.model_client import ModelError, Cancelled
 

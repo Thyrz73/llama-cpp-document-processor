@@ -10,7 +10,8 @@ from unittest.mock import patch
 os.environ.setdefault("DATA_DIR", tempfile.mkdtemp(prefix="pdf-live-test-"))
 os.environ.setdefault("SYSTEM_PROMPT_FILE", str(Path(__file__).resolve().parents[1] / "config/system_prompt.example.txt"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from app import ModelClient, ThinkingSplitter, init_db, db_conn
+from app import ModelClient, init_db, db_conn
+from document_processor.model_client import ThinkingSplitter
 
 
 class FakeStream:

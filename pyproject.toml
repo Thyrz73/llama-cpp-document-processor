@@ -1,0 +1,8 @@
+# Tool configuration only: the application is deployed from requirements.txt.
+
+[tool.ruff]
+target-version = "py312"
+
+[tool.ruff.lint]
+# List rules explicitly so results do not change with ruff's default set.
+select = ["E4", "E7", "E9", "F"]

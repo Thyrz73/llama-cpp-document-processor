@@ -33,7 +33,7 @@ from document_processor import config as job_config, jobs as job_store, profiles
 from document_processor import reports
 from document_processor.observability import configure_logging, event, failure
 from document_processor.errors import ProcessingError
-from document_processor.model_client import ModelClient as BackendClient, ThinkingSplitter, Cancelled
+from document_processor.model_client import ModelClient as BackendClient, Cancelled
 from flask import Flask, abort, jsonify, render_template, request, send_file, g, make_response
 from urllib.parse import urlsplit
 from pypdf import PdfReader
@@ -273,7 +273,10 @@ def runtime_defaults():
     adapter = os.getenv("LLAMA_THINKING_ADAPTER", "unsupported")
     if adapter not in ("unsupported", "chat_template", "prompt"):
         raise job_config.ConfigurationError("invalid_adapter", "Invalid LLAMA_THINKING_ADAPTER.")
-    enabled = lambda name: os.getenv(name, "false").lower() in ("1", "true", "yes", "on")
+
+    def enabled(name):
+        return os.getenv(name, "false").lower() in ("1", "true", "yes", "on")
+
     return {
         "chunk_tokens": CHUNK_TOKENS, "context_tokens": CONTEXT_TOKENS,
         "analysis_tokens": ANALYSIS_TOKENS, "merge_tokens": MERGE_TOKENS,
@@ -533,7 +536,7 @@ def extract_pdf(pdf_path, progress=None, settings=None):
             page = doc[number - 1]
             try:
                 text = normalize_extracted_text(page.get_text("text", sort=True))
-            except Exception as exc:
+            except Exception:
                 event("extraction_fallback", logging.WARNING, page=number, reader="pymupdf",
                       job_id=getattr(threading.current_thread(), "job_id", None))
                 text = ""
@@ -545,7 +548,7 @@ def extract_pdf(pdf_path, progress=None, settings=None):
                     alternate = normalize_extracted_text(alt_reader.pages[number - 1].extract_text())
                     if text_is_usable(alternate) or len(alternate) > len(text):
                         text = alternate
-                except Exception as exc:
+                except Exception:
                     event("extraction_fallback", logging.WARNING, page=number, reader="pypdf",
                           job_id=getattr(threading.current_thread(), "job_id", None))
             if not text_is_usable(text) and settings["enabled"]:
@@ -902,7 +905,10 @@ def view_report(job_id):
     language = request.args.get("lang", "en")
     if language not in ("en", "fr"):
         language = "en"
-    translate = lambda key: TRANSLATIONS[language].get(key, key)
+
+    def translate(key):
+        return TRANSLATIONS[language].get(key, key)
+
     try:
         job, path = resolve_report(job_id)
         name = ensure_report_name(job, path)

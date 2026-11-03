@@ -10,7 +10,7 @@ from unittest.mock import patch
 import pymupdf
 
 import app
-from document_processor import config, jobs, pipeline, profiles, prompts, reliability as r
+from document_processor import profiles, prompts, reliability as r
 from document_processor.model_client import ModelError
 
 
