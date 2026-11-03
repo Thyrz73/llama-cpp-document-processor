@@ -10,7 +10,8 @@ from unittest.mock import patch
 os.environ.setdefault("DATA_DIR", tempfile.mkdtemp(prefix="pdf-live-test-"))
 os.environ.setdefault("SYSTEM_PROMPT_FILE", str(Path(__file__).resolve().parents[1] / "config/system_prompt.example.txt"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from app import ModelClient, init_db, db_conn
+from app import ModelClient
+from document_processor.jobs import JobStore
 from document_processor.model_client import ThinkingSplitter
 
 
@@ -105,9 +106,8 @@ class LiveTests(unittest.TestCase):
         """
         import app
         with tempfile.TemporaryDirectory() as tmp:
-            new_path = Path(tmp) / 'jobs.sqlite3'
-            with patch.object(app, 'DB_PATH', new_path), patch.object(app, 'DATA', Path(tmp)):
-                with db_conn() as con:
+            with patch.object(app, 'store', JobStore(Path(tmp))):
+                with app.store.connect() as con:
                     con.execute("""CREATE TABLE jobs (
                         id TEXT PRIMARY KEY, filename TEXT NOT NULL, question TEXT NOT NULL,
                         status TEXT NOT NULL, stage TEXT NOT NULL DEFAULT '',
@@ -118,14 +118,14 @@ class LiveTests(unittest.TestCase):
                         (id, filename, question, status, stage, created_at, updated_at)
                         VALUES (?, 'example.pdf', 'Analyze', 'done', 'Analysis completed', ?, ?)""",
                         ('a' * 32, '2025-01-01', '2025-01-01'))
-                init_db()
-                with db_conn() as con:
+                app.store.initialize()
+                with app.store.connect() as con:
                     fields = {r['name'] for r in con.execute('PRAGMA table_info(jobs)')}
                     stored = dict(con.execute('SELECT * FROM jobs').fetchone())
                 self.assertIn('progress_percent', fields)
                 self.assertEqual(stored['progress_percent'], 0)
                 self.assertEqual(stored['updated_at'], '2025-01-01')
-                self.assertEqual(app.get_job('a' * 32)['progress_percent'], 100)
+                self.assertEqual(app.store.get_job('a' * 32)['progress_percent'], 100)
                 client = app.app.test_client()
                 self.assertEqual(client.get('/api/jobs').get_json()['jobs'][0]['progress_percent'], 100)
                 self.assertEqual(client.get('/api/jobs/' + 'a' * 32).get_json()['progress_percent'], 100)

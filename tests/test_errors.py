@@ -11,9 +11,10 @@ from unittest.mock import patch
 import pymupdf
 
 import app
-from document_processor import extraction
+from document_processor import extraction, jobs
 from document_processor.config import ConfigurationError
 from document_processor.errors import ModelError, ProcessingError
+from document_processor.jobs import JobStore
 
 ROOT = Path(app.__file__).parent
 
@@ -66,17 +67,16 @@ class FailedJobTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
-        for name, value in (("DATA", root), ("DB_PATH", root / "jobs.sqlite3")):
-            patcher = patch.object(app, name, value)
-            patcher.start()
-            self.addCleanup(patcher.stop)
-        app.init_db()
+        patcher = patch.object(app, "store", JobStore(root))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        app.store.initialize()
 
     def job(self):
         identifier = uuid.uuid4().hex
-        with app.db_conn() as con:
+        with app.store.connect() as con:
             con.execute("""INSERT INTO jobs (id, filename, question, status, stage, created_at, updated_at)
-                VALUES (?, 'doc.pdf', 'Summarize', 'running', 'Running', ?, ?)""", (identifier, app.utcnow(), app.utcnow()))
+                VALUES (?, 'doc.pdf', 'Summarize', 'running', 'Running', ?, ?)""", (identifier, jobs.utcnow(), jobs.utcnow()))
         return identifier
 
     def test_public_failures_keep_their_code_and_message(self):
@@ -85,13 +85,13 @@ class FailedJobTests(unittest.TestCase):
             with self.subTest(code=exc.code):
                 identifier = self.job()
                 app.fail_job(identifier, exc)
-                job = app.get_job(identifier)
+                job = app.store.get_job(identifier)
                 self.assertEqual((job["status"], job["error_code"], job["error"]), ("failed", exc.code, str(exc)))
 
     def test_unexpected_failures_never_expose_private_text(self):
         identifier = self.job()
         app.fail_job(identifier, OSError("/private/path/secret.pdf"))
-        job = app.get_job(identifier)
+        job = app.store.get_job(identifier)
         self.assertEqual(job["error_code"], "analysis_failed")
         self.assertNotIn("secret", job["error"])
 

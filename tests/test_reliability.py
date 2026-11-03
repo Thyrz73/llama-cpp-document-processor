@@ -11,6 +11,7 @@ import pymupdf
 
 import app
 from document_processor import extraction, profiles, prompts, reliability as r
+from document_processor.jobs import JobStore
 from document_processor.errors import ModelError
 
 
@@ -308,14 +309,13 @@ class PipelineReliabilityTests(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.root = Path(tmp.name)
-        for name, value in (('DATA', self.root), ('DB_PATH', self.root / 'jobs.sqlite3')):
-            p = patch.object(app, name, value)
-            p.start()
-            self.addCleanup(p.stop)
+        p = patch.object(app, "store", JobStore(self.root))
+        p.start()
+        self.addCleanup(p.stop)
         p = patch.object(app, 'read_system_prompt', return_value='Compact test system prompt.')
         p.start()
         self.addCleanup(p.stop)
-        app.init_db()
+        app.store.initialize()
         self.client = app.app.test_client()
         WordModel.calls, WordModel.fail_final = [], False
 
@@ -327,7 +327,7 @@ class PipelineReliabilityTests(unittest.TestCase):
         return response.json['id']
 
     def run_job(self, identifier, count=1, real_extraction=False):
-        app.update_job(identifier, status='running')
+        app.store.update_job(identifier, status='running')
         pages = [{'page': 1, 'text': 'Document fictif. Hypothèse H1 non vérifiée.'},
                  {'page': 2, 'text': TABLE}, {'page': 3, 'text': RESERVE + '\n\n' + MISSING}]
         with patch('requests.Session.request', side_effect=AssertionError('Network forbidden')), \
@@ -342,7 +342,7 @@ class PipelineReliabilityTests(unittest.TestCase):
                     app.analyze_job(identifier)
 
     def load_checks(self, identifier):
-        root = next(app.job_dir(identifier).glob('artifacts/*'))
+        root = next(app.store.job_dir(identifier).glob('artifacts/*'))
         return root, json.loads((root / 'quality_checks.json').read_text(encoding='utf-8'))
 
     def test_I_all_profiles_same_checks_same_generation_budgets_and_download(self):
@@ -383,7 +383,7 @@ class PipelineReliabilityTests(unittest.TestCase):
         self.assertIn('H1', WordModel.calls[-1][2])
         self.assertIn('A · École', WordModel.calls[-1][2])
         self.assertIn('Physical PDF pages:', WordModel.calls[0][1])
-        app.update_job(identifier, status='failed')
+        app.store.update_job(identifier, status='failed')
         self.assertEqual(self.client.post(f'/api/jobs/{identifier}/retry').status_code, 200)
         WordModel.fail_final = False
         self.run_job(identifier, 20)

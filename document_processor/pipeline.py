@@ -40,31 +40,30 @@ def plan_groups(notes, fits, max_group=4):
 def run(job_id, runtime):
     """Execute through injected application services, allowing isolated regression tests."""
     r = runtime
-    directory = r.job_dir(job_id)
-    job = r.get_job(job_id)
+    store = r.store
+    directory = store.job_dir(job_id)
+    job = store.get_job(job_id)
     question = job["question"].strip()
-    config = jobs.load_config(r.db_conn, job_id)
+    config = store.load_config(job_id)
     if config is None:
         # Historic artifacts remain untouched. Their original settings are unknowable.
         config = r.new_snapshot({})
         config["warnings"].append("legacy_recomputed")
-        config["source_hash"] = file_hash(directory / "source.pdf")
-        with r.db_conn() as con:
-            jobs.save_config(con, job_id, config)
+        config["source_hash"] = file_hash(directory / jobs.SOURCE_FILE)
+        with store.connect() as con:
+            store.save_config(con, job_id, config)
     if config.get("pipeline_version") != 2:
         raise ProcessingError("pipeline_incompatible", "This job requires a different pipeline version. Start a new analysis.")
-    if file_hash(directory / "source.pdf") != config["source_hash"]:
+    if file_hash(directory / jobs.SOURCE_FILE) != config["source_hash"]:
         raise ProcessingError("source_changed", "The source PDF changed. Start a new analysis.")
-    with r.db_conn() as con:
-        attempts = con.execute("SELECT COUNT(*) FROM job_runs WHERE job_id=?", (job_id,)).fetchone()[0]
-    if attempts >= config["max_attempts"]:
+    if store.attempt_count(job_id) >= config["max_attempts"]:
         raise ProcessingError("retry_limit", "The retry limit was reached. Start a new analysis.")
     artifacts = Artifacts(directory, config)
-    recorder = jobs.Recorder(r.db_conn, job_id, job.get("queued_at") or job["created_at"])
+    recorder = store.start_attempt(job_id, job.get("queued_at") or job["created_at"])
     model = r.ModelClient(config)
     model.cancel_check = lambda: r.cancellation_requested(job_id)
     calls = 0
-    preview_path = directory / "live_preview.json"
+    preview_path = directory / jobs.PREVIEW_FILE
     phase_args = {}
     # Last stage label written by phase(); previews reuse it without a database read.
     phase_label = job["stage"]
@@ -80,7 +79,7 @@ def run(job_id, runtime):
         if percent is not None and percent != last_percent:
             values["progress_percent"] = percent
             last_percent = percent
-        r.update_job(job_id, **values)
+        store.update_job(job_id, **values)
         # Page extraction can be frequent: phase changes belong in INFO, page detail in DEBUG.
         event("job_phase", logging.DEBUG if code in ("extraction", "ocr") else logging.INFO,
               job_id=job_id, stage=code, progress_percent=percent, **args)
@@ -201,7 +200,7 @@ def run(job_id, runtime):
                 args = {"index": int(matched[1]), "total": int(matched[2])} if matched else {}
                 phase("ocr" if label.startswith("OCR") else "extraction", label,
                       2 + round(5 * args.get("index", 0) / max(1, args.get("total", 1))), **args)
-            pages, count, missing, ocr = extraction.extract_pdf(directory / "source.pdf", config["extraction"],
+            pages, count, missing, ocr = extraction.extract_pdf(directory / jobs.SOURCE_FILE, config["extraction"],
                                                                progress=progress)
             return json.dumps({"pages": pages, "page_count": count, "missing": missing, "ocr_pages": ocr}, ensure_ascii=False)
 
@@ -215,7 +214,7 @@ def run(job_id, runtime):
             evidence_json = json.dumps(reliability.build_evidence(pages, page_count, missing, ocr_pages), ensure_ascii=False)
             artifacts.write("source_evidence.json", evidence_json, evidence_dependencies)
         evidence = json.loads(evidence_json)
-        r.update_job(job_id, pages=page_count)
+        store.update_job(job_id, pages=page_count)
         phase("chunking", "Splitting document", 7)
         chunks = json.loads(saved_step("chunks.json", "chunking",
                             {"extracted": fingerprint(extracted), "budget": config["chunk_tokens"], "identity": identity,
@@ -223,7 +222,7 @@ def run(job_id, runtime):
                             lambda: json.dumps(extraction.make_chunks(pages, model, config["chunk_tokens"]), ensure_ascii=False)))
         if not chunks:
             raise ProcessingError("empty_document", "Document contains no analyzable text.")
-        r.update_job(job_id, total_chunks=len(chunks), progress_percent=10)
+        store.update_job(job_id, total_chunks=len(chunks), progress_percent=10)
         event("sections_ready", job_id=job_id, total_chunks=len(chunks))
         notes = []
         for i, chunk in enumerate(chunks):
@@ -240,7 +239,7 @@ def run(job_id, runtime):
             check = check_step(name, answer, chunk["pages"], [i])
             notes.append(reliability.note(answer, chunk["pages"], [i],
                                           (issue["code"] for issue in check["issues"])))
-            r.update_job(job_id, done_chunks=i + 1, progress_percent=10 + round(70 * (i + 1) / len(chunks)))
+            store.update_job(job_id, done_chunks=i + 1, progress_percent=10 + round(70 * (i + 1) / len(chunks)))
 
         warnings = f"Pages with insufficient extracted/OCR text: {missing}. OCR pages: {ocr_pages}."
         final_instruction = prompts.instruction(config, "final", question, warnings)
@@ -296,19 +295,19 @@ def run(job_id, runtime):
         handle = recorder.start("saving", "report")
         try:
             header = prompts.report_header(config, job["filename"], page_count, len(chunks), missing, ocr_pages)
-            previous_report = directory / "rapport_final.md"
-            if previous_report.is_file():
+            report_path = directory / jobs.REPORT_FILE
+            if report_path.is_file():
                 archive = directory / "previous_reports"
                 archive.mkdir(exist_ok=True)
-                atomic_text(archive / (file_hash(previous_report) + ".md"), previous_report.read_text(encoding="utf-8"))
+                atomic_text(archive / (file_hash(report_path) + ".md"), report_path.read_text(encoding="utf-8"))
             report_text = header + final + "\n" + reliability.report_warnings(quality, config["report_language"])
-            atomic_text(directory / "rapport_final.md", report_text)
+            atomic_text(report_path, report_text)
             name = report_filename(final, job["filename"])
             model.check_cancelled()
-            r.update_job(job_id, status="done", stage="Analysis completed", phase_code="done", error="", error_code="",
-                         report_name=name)
+            store.update_job(job_id, status="done", stage="Analysis completed", phase_code="done", error="",
+                             error_code="", report_name=name)
             event("report_saved", job_id=job_id, stage="saving", filename=name,
-                  bytes=(directory / "rapport_final.md").stat().st_size)
+                  bytes=report_path.stat().st_size)
             recorder.end(handle, "done")
         except Exception:
             recorder.end(handle, "failed", {"error_code": "report_save_failed"})

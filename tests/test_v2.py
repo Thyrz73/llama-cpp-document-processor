@@ -8,9 +8,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 import app
-from document_processor import config, extraction, jobs, pipeline
+from document_processor import config, extraction, pipeline
 from document_processor.errors import Cancelled, ModelError, ProcessingError
 from document_processor.files import atomic_json
+from document_processor.jobs import JobStore
 
 
 class FakeModel(app.ModelClient):
@@ -51,17 +52,16 @@ class V2Tests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
-        for name, value in (("DATA", self.root), ("DB_PATH", self.root / "jobs.sqlite3")):
-            patcher = patch.object(app, name, value)
-            patcher.start()
-            self.addCleanup(patcher.stop)
+        patcher = patch.object(app, "store", JobStore(self.root))
+        patcher.start()
+        self.addCleanup(patcher.stop)
         patcher = patch.object(app, "read_system_prompt", return_value="Private instructions: KEEP_PRIVATE")
         self.prompt = patcher.start()
         self.addCleanup(patcher.stop)
         patcher = patch.object(app, "_capability_cache", {"value": None, "expires": 0})
         patcher.start()
         self.addCleanup(patcher.stop)
-        app.init_db()
+        app.store.initialize()
         self.client = app.app.test_client()
         FakeModel.calls, FakeModel.identity, FakeModel.fail_stage = [], "test-model", None
 
@@ -76,7 +76,7 @@ class V2Tests(unittest.TestCase):
 
     def run_job(self, identifier, count=5):
         """Drive real orchestration with extraction/model substitutes and real persistence."""
-        app.update_job(identifier, status="running")
+        app.store.update_job(identifier, status="running")
         chunks = [{"text": "Sample measurements [Page 1]", "pages": [1]} for _ in range(count)]
         with patch.object(app, "ModelClient", FakeModel), \
              patch.object(extraction, "extract_pdf", return_value=([{"page": 1, "text": "Measurements"}], 1, [], [])), \
@@ -122,7 +122,7 @@ class V2Tests(unittest.TestCase):
     def test_legacy_options_keep_environment_defaults(self):
         with patch.object(app, "ANALYSIS_TOKENS", 1500):
             identifier = self.create()
-        saved = jobs.load_config(app.db_conn, identifier)
+        saved = app.store.load_config(identifier)
         self.assertEqual((saved["profile"], saved["analysis_tokens"]), ("legacy", 1500))
 
     def test_profile_and_overrides_are_validated_without_network(self):
@@ -160,16 +160,16 @@ class V2Tests(unittest.TestCase):
 
     def test_snapshot_stays_private_and_survives_environment_and_prompt_changes(self):
         identifier = self.create({"profile": "low", "report_language": "fr"})
-        saved = jobs.load_config(app.db_conn, identifier)
+        saved = app.store.load_config(identifier)
         self.prompt.return_value = "CHANGED PROMPT"
         with patch.object(app, "ANALYSIS_TOKENS", 99), patch.object(app, "OUTPUT_LANGUAGE", "English"):
             self.run_job(identifier)
-        self.assertEqual(jobs.load_config(app.db_conn, identifier), saved)
+        self.assertEqual(app.store.load_config(identifier), saved)
         self.assertTrue(all(call[1]["system_prompt"] == "Private instructions: KEEP_PRIVATE" for call in FakeModel.calls))
         for route in ("/api/jobs", f"/api/jobs/{identifier}", f"/api/jobs/{identifier}/metrics"):
             response = self.client.get(route)
             self.assertNotIn("KEEP_PRIVATE", response.get_data(as_text=True))
-        report = (app.job_dir(identifier) / "rapport_final.md").read_text()
+        report = (app.store.job_dir(identifier) / "rapport_final.md").read_text()
         self.assertIn("# Analyse de", report)
         self.assertIn("25 °C ± 0.5 °C [Page 1]", report)
         live = self.client.get(f"/api/jobs/{identifier}/live").json
@@ -182,7 +182,7 @@ class V2Tests(unittest.TestCase):
         with self.assertRaises(ModelError):
             self.run_job(identifier)
         self.assertEqual(len(FakeModel.calls), 7)
-        app.update_job(identifier, status="failed")
+        app.store.update_job(identifier, status="failed")
         FakeModel.fail_stage = None
         self.assertEqual(self.client.post(f"/api/jobs/{identifier}/retry").status_code, 200)
         self.run_job(identifier)
@@ -198,7 +198,7 @@ class V2Tests(unittest.TestCase):
         identifier = self.create()
         self.run_job(identifier, 1)
         first_calls = len(FakeModel.calls)
-        note = next(app.job_dir(identifier).glob("artifacts/*/analysis_0000.md"))
+        note = next(app.store.job_dir(identifier).glob("artifacts/*/analysis_0000.md"))
         note.write_text("Tampered note", encoding="utf-8")
         self.run_job(identifier, 1)
         self.assertEqual(len(FakeModel.calls), first_calls + 1)
@@ -207,7 +207,7 @@ class V2Tests(unittest.TestCase):
     def test_unpublished_or_incomplete_manifest_entry_is_not_reused(self):
         identifier = self.create()
         self.run_job(identifier, 1)
-        manifest_path = next(app.job_dir(identifier).glob("artifacts/*/manifest.json"))
+        manifest_path = next(app.store.job_dir(identifier).glob("artifacts/*/manifest.json"))
         manifest = json.loads(manifest_path.read_text())
         manifest["artifacts"]["analysis_0000.md"]["complete"] = False
         manifest_path.write_text(json.dumps(manifest))
@@ -233,40 +233,40 @@ class V2Tests(unittest.TestCase):
             self.run_job(identifier, 1)
         self.assertEqual(raised.exception.code, "identity_changed")
         FakeModel.identity = "test-model"
-        (app.job_dir(identifier) / "source.pdf").write_bytes(b"changed")
+        (app.store.job_dir(identifier) / "source.pdf").write_bytes(b"changed")
         with self.assertRaisesRegex(ProcessingError, "source PDF changed") as raised:
             self.run_job(identifier, 1)
         self.assertEqual(raised.exception.code, "source_changed")
 
     def test_legacy_files_remain_intact_and_old_report_is_archived(self):
         identifier = self.create()
-        with app.db_conn() as con:
+        with app.store.connect() as con:
             con.execute("DELETE FROM job_configs WHERE job_id=?", (identifier,))
-        directory = app.job_dir(identifier)
+        directory = app.store.job_dir(identifier)
         (directory / "analysis_0000.md").write_text("Historical notes")
         (directory / "rapport_final.md").write_text("Historical report")
         self.run_job(identifier, 1)
         self.assertEqual((directory / "analysis_0000.md").read_text(), "Historical notes")
         self.assertEqual(next(directory.glob("previous_reports/*.md")).read_text(), "Historical report")
-        self.assertIn("legacy_recomputed", jobs.load_config(app.db_conn, identifier)["warnings"])
+        self.assertIn("legacy_recomputed", app.store.load_config(identifier)["warnings"])
 
     def test_migration_is_idempotent_and_preserves_finished_jobs(self):
         identifier = self.create()
-        app.update_job(identifier, status="done")
-        before = app.get_job(identifier)
-        app.init_db()
-        app.init_db()
-        self.assertEqual(app.get_job(identifier), before)
-        with app.db_conn() as con:
+        app.store.update_job(identifier, status="done")
+        before = app.store.get_job(identifier)
+        app.store.initialize()
+        app.store.initialize()
+        self.assertEqual(app.store.get_job(identifier), before)
+        with app.store.connect() as con:
             self.assertEqual([row[0] for row in con.execute("SELECT version FROM schema_migrations ORDER BY version")], [2, 3])
 
     def test_running_job_cancellation_is_signalled_without_polling_sqlite(self):
         identifier = self.create()
-        app.update_job(identifier, status="running")
+        app.store.update_job(identifier, status="running")
         observed = []
 
         def analyze(job_id):
-            with patch.object(app, "read_cancellation", wraps=app.read_cancellation) as reads:
+            with patch.object(app.store, "read_cancellation", wraps=app.store.read_cancellation) as reads:
                 checks = [app.cancellation_requested(job_id) for _ in range(500)]
                 observed.append((checks[-1], reads.call_count))
                 self.assertEqual(self.client.post(f"/api/jobs/{job_id}/cancel").status_code, 202)
@@ -279,16 +279,16 @@ class V2Tests(unittest.TestCase):
             app.run_claimed_job(identifier)
         # 500 checks open SQLite once; the API request is then seen without a new read.
         self.assertEqual(observed, [(False, 1), (True, 1)])
-        self.assertEqual(app.get_job(identifier)["status"], "cancelled")
+        self.assertEqual(app.store.get_job(identifier)["status"], "cancelled")
         self.assertNotIn(identifier, app._cancel_signals)
 
     def test_running_job_still_honors_cancellation_recorded_only_in_sqlite(self):
         identifier = self.create()
-        app.update_job(identifier, status="running")
+        app.store.update_job(identifier, status="running")
 
         def analyze(job_id):
             self.assertFalse(app.cancellation_requested(job_id))
-            app.update_job(job_id, cancel_requested=1)
+            app.store.update_job(job_id, cancel_requested=1)
             self.assertFalse(app.cancellation_requested(job_id))
             app._cancel_signals[job_id].checked_at -= app.CANCEL_RECHECK_SECONDS
             self.assertTrue(app.cancellation_requested(job_id))
@@ -297,51 +297,51 @@ class V2Tests(unittest.TestCase):
         with patch.object(app, "analyze_job", side_effect=analyze), \
              patch.object(app, "CANCEL_RECHECK_SECONDS", 3600):
             app.run_claimed_job(identifier)
-        self.assertEqual(app.get_job(identifier)["status"], "cancelled")
+        self.assertEqual(app.store.get_job(identifier)["status"], "cancelled")
 
     def test_cancel_and_retry_are_idempotent_and_configuration_cannot_be_replaced(self):
         identifier = self.create()
         self.assertEqual(self.client.post(f"/api/jobs/{identifier}/cancel").status_code, 202)
         self.assertEqual(self.client.post(f"/api/jobs/{identifier}/cancel").status_code, 200)
-        self.assertEqual(app.get_job(identifier)["status"], "cancelled")
+        self.assertEqual(app.store.get_job(identifier)["status"], "cancelled")
         self.assertEqual(self.client.post(f"/api/jobs/{identifier}/retry", json={"profile": "ultra"}).status_code, 400)
         self.assertEqual(self.client.post(f"/api/jobs/{identifier}/retry").status_code, 200)
         self.assertEqual(self.client.post(f"/api/jobs/{identifier}/retry").status_code, 409)
-        app.update_job(identifier, status="running", cancel_requested=1)
+        app.store.update_job(identifier, status="running", cancel_requested=1)
         with self.assertRaises(Cancelled):
-            app.update_job(identifier, status="done")
+            app.store.update_job(identifier, status="done")
 
     def test_polling_neither_loads_snapshots_nor_rehashes_them(self):
         identifier = self.create({"profile": "low"})
-        with app.db_conn() as con:
+        with app.store.connect() as con:
             stored = con.execute("SELECT fingerprint FROM job_configs WHERE job_id=?", (identifier,)).fetchone()[0]
-        with patch.object(jobs, "load_config", side_effect=AssertionError("snapshot loaded")), \
+        with patch.object(app.store, "load_config", side_effect=AssertionError("snapshot loaded")), \
              patch.object(config, "fingerprint", side_effect=AssertionError("snapshot rehashed")):
             listed = self.client.get("/api/jobs").json["jobs"][0]
             self.assertEqual(self.client.get(f"/api/jobs/{identifier}/live").status_code, 200)
-            self.assertNotIn("configuration", app.get_job(identifier))
+            self.assertNotIn("configuration", app.store.get_job(identifier))
         self.assertEqual(listed["configuration"]["fingerprint"], stored)
         # The single-job route still verifies the snapshot before exposing it.
         self.assertEqual(self.client.get(f"/api/jobs/{identifier}").json["configuration"], listed["configuration"])
 
     def test_pipeline_previews_do_not_reread_the_job(self):
         identifier = self.create()
-        with patch.object(app, "get_job", wraps=app.get_job) as reads:
+        with patch.object(app.store, "get_job", wraps=app.store.get_job) as reads:
             self.run_job(identifier, 3)
         self.assertEqual(reads.call_count, 1)
-        preview = json.loads((app.job_dir(identifier) / "live_preview.json").read_text())
+        preview = json.loads((app.store.job_dir(identifier) / "live_preview.json").read_text())
         self.assertEqual(preview["phase"], "Writing final report")
 
     def test_live_and_download_do_not_generate_and_reasoning_is_opt_in(self):
         identifier = self.create()
-        directory = app.job_dir(identifier)
+        directory = app.store.job_dir(identifier)
         atomic_json(directory / "live_preview.json", {"content": "Answer", "reasoning": "PRIVATE_REASONING",
                                                          "reasoning_chars": 17, "active": True})
         with patch.object(app.ModelClient, "complete", side_effect=AssertionError("No generation")):
             self.assertNotIn("PRIVATE_REASONING", self.client.get(f"/api/jobs/{identifier}/live").get_data(as_text=True))
             self.assertEqual(self.client.get(f"/api/jobs/{identifier}/live?include_reasoning=true").json["reasoning"], "PRIVATE_REASONING")
             self.assertEqual(self.client.get(f"/api/jobs/{identifier}/report").status_code, 409)
-            app.update_job(identifier, status="done")
+            app.store.update_job(identifier, status="done")
             (directory / "rapport_final.md").write_text("# Report")
             with self.client.get(f"/api/jobs/{identifier}/report") as response:
                 self.assertEqual(response.data, b"# Report")
@@ -368,10 +368,10 @@ class V2Tests(unittest.TestCase):
     def test_cross_origin_posts_and_external_report_symlinks_are_rejected(self):
         self.assertEqual(self.client.post("/api/jobs", headers={"Origin": "https://foreign.invalid"}).status_code, 403)
         identifier = self.create()
-        app.update_job(identifier, status="done")
+        app.store.update_job(identifier, status="done")
         outside = self.root / "private.txt"
         outside.write_text("private")
-        (app.job_dir(identifier) / "rapport_final.md").symlink_to(outside)
+        (app.store.job_dir(identifier) / "rapport_final.md").symlink_to(outside)
         self.assertEqual(self.client.get(f"/api/jobs/{identifier}/report").status_code, 404)
 
 

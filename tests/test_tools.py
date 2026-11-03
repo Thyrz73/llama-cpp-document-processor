@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 import app
 from document_processor import files
+from document_processor.jobs import JobStore
 from scripts import benchmark, check_jobs
 
 
@@ -40,9 +41,9 @@ class ToolTests(unittest.TestCase):
     def test_read_only_job_inspector_preserves_files_and_flags_corruption(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            with patch.object(app, "DATA", root), patch.object(app, "DB_PATH", root / "jobs.sqlite3"), \
+            with patch.object(app, "store", JobStore(root)), \
                  patch.object(app, "read_system_prompt", return_value="PRIVATE"):
-                app.init_db()
+                app.store.initialize()
                 response = app.app.test_client().post("/api/jobs", data={
                     "file": (io.BytesIO(b"%PDF-test"), "example.pdf")})
                 identifier = response.json["id"]
@@ -51,7 +52,7 @@ class ToolTests(unittest.TestCase):
                 self.assertEqual((result["snapshots_valid"], result["integrity_errors"]), (1, 0))
                 for path, digest in before.items():
                     self.assertEqual(files.file_hash(path), digest)
-                (app.job_dir(identifier) / "source.pdf").write_bytes(b"changed")
+                (app.store.job_dir(identifier) / "source.pdf").write_bytes(b"changed")
                 self.assertEqual(check_jobs.inspect(root)["integrity_errors"], 1)
 
 

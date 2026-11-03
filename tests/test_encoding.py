@@ -18,8 +18,9 @@ os.environ.setdefault("DATA_DIR", tempfile.mkdtemp(prefix="pdf-encoding-test-"))
 os.environ.setdefault("SYSTEM_PROMPT_FILE", str(Path(__file__).resolve().parents[1] / "config/system_prompt.example.txt"))
 
 import app
-from document_processor import config, extraction, jobs, prompts
+from document_processor import config, extraction, prompts
 from document_processor.errors import ModelError, ProcessingError
+from document_processor.jobs import JobStore
 
 SETTINGS = app.runtime_defaults()["extraction"]
 
@@ -201,13 +202,13 @@ class EncodingPipelineTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
-        for name, value in (("DATA", self.root), ("DB_PATH", self.root / "jobs.sqlite3"),
+        for name, value in (("store", JobStore(self.root)),
                             ("LIVE_OUTPUT_ENABLED", True),
                             ("_capability_cache", {"value": None, "expires": 0})):
             patcher = patch.object(app, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
-        app.init_db()
+        app.store.initialize()
         self.http = app.app.test_client()
 
     def create(self, text, language):
@@ -229,7 +230,7 @@ class EncodingPipelineTests(unittest.TestCase):
 
         # Real chunking, tokenizer HTTP, prompts, generation, files and SQLite.
         pages = [{"page": i + 1, "text": text + "\n\n" + "padding " * 70} for i in range(5)]
-        app.update_job(identifier, status="running")
+        app.store.update_job(identifier, status="running")
         with patch.object(extraction, "extract_pdf", return_value=(pages, 5, [], [])), \
              patch.object(app, "ModelClient", side_effect=model):
             app.analyze_job(identifier)
@@ -242,8 +243,8 @@ class EncodingPipelineTests(unittest.TestCase):
                 adapter.fail_final = True
                 with self.assertRaises(ModelError):
                     self.run_job(identifier, text, adapter)
-                app.update_job(identifier, status="failed")
-                directory = app.job_dir(identifier)
+                app.store.update_job(identifier, status="failed")
+                directory = app.store.job_dir(identifier)
                 root = next(directory.glob("artifacts/*"))
                 extracted = json.loads((root / "extracted.json").read_text(encoding="utf-8"))
                 self.assertEqual(extracted["pages"][0]["text"].split("\n\n")[0], text, "extraction JSON")
@@ -264,7 +265,7 @@ class EncodingPipelineTests(unittest.TestCase):
                 self.assertEqual(len(adapter.completions), count + 1, "retry must reuse Unicode notes and merges")
                 final_input = adapter.completions[-1]["messages"][-1]["content"]
                 self.assertEqual(final_input.count(text), 3, "merged note + singleton + question")
-                saved = jobs.load_config(app.db_conn, identifier)
+                saved = app.store.load_config(identifier)
                 self.assertEqual(saved["system_prompt"], text, "SQLite snapshot")
                 expected = prompts.report_header(saved, "Élèves — étude.pdf", 5, 5, [], []) + text + "\n"
                 self.assertEqual((root / "rapport_final.md").read_text(encoding="utf-8"), text, "final artifact")
@@ -294,10 +295,10 @@ class EncodingPipelineTests(unittest.TestCase):
         with patch("document_processor.pipeline.fingerprint", side_effect=old_fingerprint), \
              patch("document_processor.artifacts.fingerprint", side_effect=old_fingerprint):
             self.run_job(identifier, FRENCH, adapter)
-        report = app.job_dir(identifier) / "rapport_final.md"
+        report = app.store.job_dir(identifier) / "rapport_final.md"
         original = report.read_bytes()
         count = len(adapter.completions)
-        app.update_job(identifier, status="failed")
+        app.store.update_job(identifier, status="failed")
         self.assertEqual(self.http.post(f"/api/jobs/{identifier}/retry").status_code, 200)
         self.assertEqual(report.read_bytes(), original, "queuing a retry must leave the old report untouched")
         adapter.text = FRENCH

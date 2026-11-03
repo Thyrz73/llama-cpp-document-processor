@@ -15,30 +15,30 @@ server nor the worker.
 from __future__ import annotations
 
 import json
-import sys
-from contextlib import contextmanager
 import logging
 import os
 import re
 import sqlite3
-import stat
+import sys
 import threading
 import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-
-from document_processor import config as job_config, jobs as job_store, profiles, prompts, pipeline
-from document_processor import environment, reports
-from document_processor.observability import configure_logging, event, failure, job_context
-from document_processor.errors import Cancelled, ProcessingError
-from document_processor.files import file_hash
-from document_processor.model_client import ModelClient as BackendClient
-from flask import Flask, abort, jsonify, render_template, request, send_file, g, make_response
 from urllib.parse import urlsplit
+
+from flask import Flask, abort, g, jsonify, make_response, render_template, request, send_file
 from waitress import serve
 from werkzeug.exceptions import Conflict, NotFound, RequestEntityTooLarge
+
+from document_processor import config as job_config
+from document_processor import environment, pipeline, profiles, prompts, reports
+from document_processor.errors import Cancelled, ProcessingError
+from document_processor.files import file_hash
+from document_processor.jobs import PREVIEW_FILE, REPORT_FILE, SOURCE_FILE, InvalidJobPath, JobStore, is_job_id
+from document_processor.model_client import ModelClient as BackendClient
+from document_processor.observability import configure_logging, event, failure, job_context
 
 # Read the configuration once when the process starts.
 # Docker Compose passes variables from its .env file to the container.
@@ -76,10 +76,11 @@ try:
 except environment.SettingsError as exc:
     raise SystemExit(f"Configuration error: {exc}") from None
 MAX_QUESTION_CHARS = 1500
-DB_PATH = DATA / "jobs.sqlite3"
 
 configure_logging()
 log = logging.getLogger("document-processor")
+# All job records and files live under DATA; see document_processor/jobs.py.
+store = JobStore(DATA)
 
 
 class ProcessorFlask(Flask):
@@ -93,161 +94,6 @@ app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_MB * 1024 * 1024 + 65536
 worker_wakeup = threading.Event()
 TRANSLATIONS = json.loads((Path(__file__).parent / "static" / "translations.json").read_text(encoding="utf-8"))
 DEFAULT_QUESTIONS = {TRANSLATIONS[language]["default_question"] for language in ("en", "fr")} | {"Analyze the entire document"}
-
-
-def utcnow():
-    """Return the current UTC time as ISO 8601 text, to the nearest second."""
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-
-@contextmanager
-def db_conn():
-    """Open and return a SQLite connection to the jobs database.
-
-    Rows are accessible by column name through sqlite3.Row. Wait up to
-    20 seconds if the database is locked. The context commits or rolls back
-    the transaction and always closes the connection afterward.
-    """
-    con = sqlite3.connect(DB_PATH, timeout=20)
-    con.row_factory = sqlite3.Row
-    con.execute("PRAGMA busy_timeout=20000")
-    con.execute("PRAGMA foreign_keys=ON")
-    try:
-        with con:
-            yield con
-    finally:
-        con.close()
-
-
-def init_db():
-    """Prepare the database and requeue interrupted jobs.
-
-    Create DATA and the jobs table when needed, enable WAL journaling, and
-    add the progress column to older databases. ``running`` rows become
-    ``queued`` so the worker can resume them. Call this at startup before
-    starting the worker.
-    """
-    DATA.mkdir(parents=True, exist_ok=True)
-    event("workspace_ready", status="available")
-    with db_conn() as con:
-        event("sqlite_initializing", status="connected")
-        con.execute("PRAGMA journal_mode=WAL")
-        con.execute("""CREATE TABLE IF NOT EXISTS jobs (
-          id TEXT PRIMARY KEY, filename TEXT NOT NULL, question TEXT NOT NULL,
-          status TEXT NOT NULL, stage TEXT NOT NULL DEFAULT '',
-          pages INTEGER DEFAULT 0, total_chunks INTEGER DEFAULT 0, done_chunks INTEGER DEFAULT 0,
-          error TEXT DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-          progress_percent INTEGER NOT NULL DEFAULT 0
-        )""")
-        columns = {r["name"] for r in con.execute("PRAGMA table_info(jobs)")}
-        if "progress_percent" not in columns:
-            con.execute("ALTER TABLE jobs ADD COLUMN progress_percent INTEGER NOT NULL DEFAULT 0")
-            event("sqlite_migration", column="progress_percent", status="applied")
-        job_store.migrate(con)
-        interrupted = con.execute("SELECT id,cancel_requested FROM jobs WHERE status='running' OR (status='queued' AND cancel_requested=1)").fetchall()
-        con.execute("UPDATE jobs SET status='cancelled', stage='Cancelled', phase_code='cancelled' WHERE cancel_requested=1 AND status IN ('queued','running')")
-        con.execute("UPDATE jobs SET status='queued', stage='Resuming after restart', queued_at=? WHERE status='running'", (utcnow(),))
-        for row in interrupted:
-            event("job_recovered", job_id=row["id"], status="cancelled" if row["cancel_requested"] else "queued")
-    event("sqlite_ready", status="initialized")
-
-
-def update_job(job_id, **values):
-    """Store values and the timestamp for job_id.
-
-    values maps column names selected by the caller to their new values.
-    Update updated_at and force 100 percent when the status becomes
-    ``done``. Do nothing when no values are supplied. An unknown ID creates
-    no row. Return no value.
-    """
-    if not values:
-        return
-    if values.get("status") == "done":
-        values["progress_percent"] = 100
-    allowed = {"status", "stage", "pages", "total_chunks", "done_chunks", "error", "progress_percent",
-               "phase_code", "phase_args", "error_code", "cancel_requested", "queued_at", "report_name"}
-    if set(values) - allowed:
-        raise ValueError("Unsupported job update field")
-    values["updated_at"] = utcnow()
-    parts = ", ".join(f"{k}=?" for k in values)
-    with db_conn() as con:
-        if values.get("status") == "done":
-            con.execute("BEGIN IMMEDIATE")
-            row = con.execute("SELECT cancel_requested FROM jobs WHERE id=?", (job_id,)).fetchone()
-            if row and row["cancel_requested"]:
-                raise Cancelled()
-        con.execute(f"UPDATE jobs SET {parts} WHERE id=?", [*values.values(), job_id])
-    if "status" in values:
-        event("job_state", job_id=job_id, status=values["status"], stage=values.get("phase_code"))
-    elif "progress_percent" in values:
-        event("job_progress", job_id=job_id, stage=values.get("phase_code"),
-              progress_percent=values["progress_percent"])
-
-
-def report_available(job_id):
-    """Cheaply tell the list whether a final report can be offered.
-
-    Use lstat only: the jobs root and job directory must be real directories
-    and the report a regular file, never a symlink. resolve_report() repeats
-    the full path checks before serving it.
-    """
-    if not job_store.is_job_id(job_id):
-        return False
-    root = DATA / "jobs"
-    try:
-        return (stat.S_ISDIR(os.lstat(root).st_mode) and stat.S_ISDIR(os.lstat(root / job_id).st_mode)
-                and stat.S_ISREG(os.lstat(root / job_id / "rapport_final.md").st_mode))
-    except OSError:
-        return False
-
-
-def serialize_job(row):
-    """Convert a SQLite row into a consistent API dictionary.
-
-    row must contain at least the status and progress_percent fields.
-    Present every ``done`` job at 100 percent, even if an older database
-    still stores zero. This normalization does not rewrite the SQLite row.
-    """
-    public = {"id", "filename", "question", "status", "stage", "pages", "total_chunks", "done_chunks",
-              "error", "created_at", "updated_at", "progress_percent", "phase_code", "phase_args",
-              "error_code", "cancel_requested", "queued_at", "has_active_jobs", "report_name", "question_custom"}
-    job = {key: row[key] for key in row.keys() if key in public}
-    job["phase_args"] = json.loads(job.get("phase_args") or "{}")
-    # The migration also initialized older completed jobs to 0 percent.
-    if job["status"] == "done":
-        job["progress_percent"] = 100
-        job["report_available"] = report_available(job["id"])
-    return job
-
-
-def get_job(job_id):
-    """Return the normalized job matching job_id, or None.
-
-    The private configuration snapshot is not loaded: polling routes and the
-    pipeline only need the job row. job_info adds the public configuration.
-    """
-    with db_conn() as con:
-        row = con.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
-    return None if row is None else serialize_job(row)
-
-
-def job_dir(job_id):
-    """Build a job directory path without creating the directory.
-
-    job_id must contain 32 lowercase hexadecimal characters. Otherwise,
-    abort the request with HTTP 404. This validation prevents using an ID as
-    an arbitrary path. It does not check whether the job or directory exists.
-    """
-    # IDs are generated by the application, never from the PDF filename.
-    if not job_store.is_job_id(job_id):
-        event("invalid_job_id", logging.WARNING, status="rejected")
-        abort(404)
-    directory = DATA / "jobs" / job_id
-    # Also reject symlinked job roots, not only traversal in the ID.
-    if directory.resolve() != DATA.resolve() / "jobs" / job_id:
-        event("invalid_job_path", logging.WARNING, job_id=job_id, status="rejected")
-        abort(404)
-    return directory
 
 
 def read_system_prompt():
@@ -337,13 +183,6 @@ class _CancelSignal:
 _cancel_signals: dict[str, _CancelSignal] = {}
 
 
-def read_cancellation(job_id):
-    """Read the persisted cancellation request; a deleted job counts as cancelled."""
-    with db_conn() as con:
-        row = con.execute("SELECT cancel_requested FROM jobs WHERE id=?", (job_id,)).fetchone()
-    return not row or bool(row["cancel_requested"])
-
-
 def cancellation_requested(job_id):
     """Answer frequent cooperative checks without opening SQLite each time.
 
@@ -354,12 +193,12 @@ def cancellation_requested(job_id):
     """
     signal = _cancel_signals.get(job_id)
     if signal is None:
-        return read_cancellation(job_id)
+        return store.read_cancellation(job_id)
     if not signal.event.is_set():
         now = time.monotonic()
         if now - signal.checked_at >= CANCEL_RECHECK_SECONDS:
             signal.checked_at = now
-            if read_cancellation(job_id):
+            if store.read_cancellation(job_id):
                 signal.event.set()
     return signal.event.is_set()
 
@@ -375,7 +214,7 @@ def fail_job(job_id, exc):
         code, message = exc.code, str(exc)
     else:
         code, message = "analysis_failed", "Analysis failed. Check the PDF, configuration and local diagnostics."
-    update_job(job_id, status="failed", stage="Error", phase_code="failed", error_code=code, error=message)
+    store.update_job(job_id, status="failed", stage="Error", phase_code="failed", error_code=code, error=message)
 
 
 def run_claimed_job(job_id):
@@ -386,7 +225,7 @@ def run_claimed_job(job_id):
         try:
             analyze_job(job_id)
         except Cancelled:
-            update_job(job_id, status="cancelled", stage="Cancelled", phase_code="cancelled", error="", error_code="cancelled")
+            store.update_job(job_id, status="cancelled", stage="Cancelled", phase_code="cancelled", error="", error_code="cancelled")
         except Exception as exc:
             # Keep the last preview to help diagnose the error.
             fail_job(job_id, exc)
@@ -404,18 +243,22 @@ def worker_loop():
     """
     while True:
         try:
-            with db_conn() as con:
-                con.execute("BEGIN IMMEDIATE")
-                row = con.execute("SELECT id FROM jobs WHERE status='queued' ORDER BY created_at, id LIMIT 1").fetchone()
-                if row:
-                    con.execute("UPDATE jobs SET status='running', stage='Starting', updated_at=? WHERE id=?", (utcnow(), row["id"]))
-            if row:
-                run_claimed_job(row["id"])
+            job_id = store.claim_next_job()
+            if job_id:
+                run_claimed_job(job_id)
                 continue
         except Exception as exc:
             failure("worker_database_error", exc)
         worker_wakeup.wait(timeout=6)
         worker_wakeup.clear()
+
+
+def job_directory(job_id):
+    """Return the job directory, or answer HTTP 404 for an invalid ID or path."""
+    try:
+        return store.job_dir(job_id)
+    except InvalidJobPath:
+        abort(404)
 
 
 @app.errorhandler(RequestEntityTooLarge)
@@ -447,31 +290,17 @@ def list_jobs():
     has_active_jobs includes older jobs outside the visible list so the
     browser keeps polling while any job is queued or running.
     """
-    with db_conn() as con:
-        rows = con.execute("""SELECT *,
-            EXISTS(SELECT 1 FROM jobs WHERE status IN ('queued', 'running'))
-                AS has_active_jobs
-            FROM jobs ORDER BY created_at DESC, id DESC LIMIT 100""").fetchall()
-        # Reuse the fingerprint stored with each snapshot instead of rehashing it on every poll.
-        configs = {row["job_id"]: (json.loads(row["snapshot"]), row["fingerprint"]) for row in con.execute(
-            "SELECT job_id, snapshot, fingerprint FROM job_configs WHERE job_id IN "
-            "(SELECT id FROM jobs ORDER BY created_at DESC, id DESC LIMIT 100)")}
-    has_active_jobs = bool(rows and rows[0]["has_active_jobs"])
-    jobs = [serialize_job(row) for row in rows]
-    for job in jobs:
-        job.pop("has_active_jobs")
-        if job["id"] in configs:
-            job["configuration"] = job_config.public_config(*configs[job["id"]])
+    jobs, has_active_jobs = store.list_jobs(100)
     return jsonify(jobs=jobs, has_active_jobs=has_active_jobs)
 
 
 @app.get("/api/jobs/<job_id>")
 def job_info(job_id):
     """Return job_id and its verified public configuration, or HTTP 404."""
-    job = get_job(job_id)
+    job = store.get_job(job_id)
     if not job:
         abort(404)
-    config = job_store.load_config(db_conn, job_id)
+    config = store.load_config(job_id)
     if config:
         job["configuration"] = job_config.public_config(config)
     return jsonify(job)
@@ -479,25 +308,16 @@ def job_info(job_id):
 
 def delete_history_job(job_id):
     """Commit history removal before touching files; serialize against retry/claim."""
-    if not job_store.is_job_id(job_id):
+    if not is_job_id(job_id):
         return {"id": job_id, "deleted": False, "error_code": "invalid_job_id"}, 400
     try:
-        with db_conn() as con:
-            con.execute("BEGIN IMMEDIATE")
-            row = con.execute("SELECT status FROM jobs WHERE id=?", (job_id,)).fetchone()
-            if row is None:
-                return {"id": job_id, "deleted": False, "error_code": "job_not_found"}, 404
-            # A completed status can precede the worker's final metrics writes.
-            finishing = con.execute(
-                "SELECT 1 FROM job_runs WHERE job_id=? AND status='running' LIMIT 1", (job_id,)
-            ).fetchone()
-            if row["status"] not in ("done", "failed", "cancelled") or finishing:
-                return {"id": job_id, "deleted": False, "error_code": "delete_active"}, 409
-            con.execute("DELETE FROM jobs WHERE id=?", (job_id,))
+        error_code = store.delete_job(job_id)
     except sqlite3.Error as exc:
         failure("history_delete_failed", exc, job_id=job_id)
         return {"id": job_id, "deleted": False, "error_code": "delete_database"}, 500
-    warning = job_store.remove_private_files(DATA, job_id)
+    if error_code:
+        return {"id": job_id, "deleted": False, "error_code": error_code}, 404 if error_code == "job_not_found" else 409
+    warning = store.remove_files(job_id)
     event("history_deleted", job_id=job_id, status="files_retained" if warning else "deleted")
     return {"id": job_id, "deleted": True, "warning_code": warning}, 200
 
@@ -517,7 +337,7 @@ def delete_jobs():
     payload = request.get_json(silent=True)
     ids = payload.get("ids") if isinstance(payload, dict) else None
     if (not isinstance(ids, list) or not 1 <= len(ids) <= 100
-            or not all(job_store.is_job_id(value) for value in ids)):
+            or not all(is_job_id(value) for value in ids)):
         return jsonify(error_code="invalid_job_ids"), 400
     results = [delete_history_job(job_id)[0] for job_id in dict.fromkeys(ids)]
     return jsonify(results=results), 200 if all(item["deleted"] for item in results) else 207
@@ -532,7 +352,7 @@ def create_job():
     extension, and the PDF header. The worker performs actual analysis and
     page-limit validation.
 
-    Save source.pdf, insert the job, and wake the worker. Return HTTP 201
+    Save the PDF, insert the job, and wake the worker. Return HTTP 201
     with the ID and status, or HTTP 400 for an invalid form. Remove the file
     if insertion fails.
     """
@@ -551,25 +371,21 @@ def create_job():
         return jsonify(error="The file does not appear to be a valid PDF", error_code="invalid_pdf"), 400
     uploaded.stream.seek(0)
     job_id = uuid.uuid4().hex
-    directory = job_dir(job_id)
+    directory = job_directory(job_id)
     directory.mkdir(parents=True, mode=0o700)
+    source = directory / SOURCE_FILE
     try:
-        uploaded.save(directory / "source.pdf")
-        if (directory / "source.pdf").stat().st_size > MAX_UPLOAD_MB * 1024 * 1024:
+        uploaded.save(source)
+        if source.stat().st_size > MAX_UPLOAD_MB * 1024 * 1024:
             raise RequestEntityTooLarge()
-        config["source_hash"] = file_hash(directory / "source.pdf")
-        with db_conn() as con:
-            con.execute("""INSERT INTO jobs (id, filename, question, status, stage, created_at, updated_at, question_custom)
-              VALUES (?, ?, ?, 'queued', 'Queued', ?, ?, ?)""",
-                        (job_id, filename, question, utcnow(), utcnow(), int(question.strip() not in DEFAULT_QUESTIONS)))
-            con.execute("UPDATE jobs SET queued_at=? WHERE id=?", (utcnow(), job_id))
-            job_store.save_config(con, job_id, config)
+        config["source_hash"] = file_hash(source)
+        store.create_job(job_id, filename, question, int(question.strip() not in DEFAULT_QUESTIONS), config)
     except Exception:
-        (directory / "source.pdf").unlink(missing_ok=True)
+        source.unlink(missing_ok=True)
         directory.rmdir()
         raise
     worker_wakeup.set()
-    event("job_created", job_id=job_id, filename=filename, bytes=(directory / "source.pdf").stat().st_size,
+    event("job_created", job_id=job_id, filename=filename, bytes=source.stat().st_size,
           profile=config["profile"], custom_prompt=question.strip() not in DEFAULT_QUESTIONS,
           chunk_tokens=config["chunk_tokens"], analysis_tokens=config["analysis_tokens"],
           merge_tokens=config["merge_tokens"], final_tokens=config["final_tokens"],
@@ -585,10 +401,10 @@ def job_live(job_id):
     when live output is disabled, missing, or unreadable. A completed or
     failed job is never reported as still generating.
     """
-    job = get_job(job_id)
+    job = store.get_job(job_id)
     if not job:
         abort(404)
-    path = job_dir(job_id) / "live_preview.json"
+    path = job_directory(job_id) / PREVIEW_FILE
     if not LIVE_OUTPUT_ENABLED or not path.exists():
         return jsonify(phase=job["stage"], content="", reasoning="",
                        active=False, enabled=LIVE_OUTPUT_ENABLED)
@@ -620,28 +436,19 @@ def retry_job(job_id):
     HTTP 200; return 404 when the job is absent or 409 when its status is not
     ``failed``.
     """
-    job = get_job(job_id)
-    if not job:
+    if not store.get_job(job_id):
         abort(404)
     if request.data or request.form:
         return jsonify(error="Retry uses the original snapshot. Create a new job to change options.", error_code="immutable_config"), 400
-    with db_conn() as con:
-        con.execute("BEGIN IMMEDIATE")
-        attempts = con.execute("SELECT COUNT(*) FROM job_runs WHERE job_id=?", (job_id,)).fetchone()[0]
-        config_row = con.execute("SELECT snapshot FROM job_configs WHERE job_id=?", (job_id,)).fetchone()
-        maximum = json.loads(config_row["snapshot"])["max_attempts"] if config_row else runtime_defaults()["max_attempts"]
-        if attempts >= maximum:
-            return jsonify(error="The retry limit was reached. Create a new analysis.", error_code="retry_limit"), 409
-        changed = con.execute("""UPDATE jobs SET status='queued', error='', error_code='', stage='Retrying',
-            phase_code='queued', cancel_requested=0, queued_at=?, updated_at=?
-            WHERE id=? AND status IN ('failed','cancelled')""", (utcnow(), utcnow(), job_id)).rowcount
-    if not changed:
+    outcome, attempts = store.requeue(job_id, MAX_JOB_ATTEMPTS)
+    if outcome == "limit":
+        return jsonify(error="The retry limit was reached. Create a new analysis.", error_code="retry_limit"), 409
+    if outcome == "conflict":
         return jsonify(error="Only failed or cancelled jobs can be retried", error_code="retry_conflict"), 409
     worker_wakeup.set()
-    legacy = job_store.load_config(db_conn, job_id) is None
+    legacy = store.load_config(job_id) is None
     event("job_retry", job_id=job_id, attempt=attempts + 1, status="queued", legacy=legacy)
     return jsonify(status="queued", warnings=["legacy_recomputed"] if legacy else [])
-
 
 
 @app.get("/api/jobs/<job_id>/report")
@@ -663,13 +470,13 @@ def report(job_id):
 
 def resolve_report(job_id):
     """Authorize the only publicly available artifact; never accept a filename."""
-    directory = job_dir(job_id)
-    job = get_job(job_id)
+    directory = job_directory(job_id)
+    job = store.get_job(job_id)
     if not job:
         abort(404)
     if job["status"] != "done":
         abort(409)
-    path = directory / "rapport_final.md"
+    path = directory / REPORT_FILE
     if path.is_symlink() or not path.is_file() or path.resolve().parent != directory.resolve():
         event("report_missing", logging.WARNING, job_id=job_id, status="unavailable")
         abort(404)
@@ -682,8 +489,7 @@ def ensure_report_name(job, path):
         return job["report_name"]
     with path.open(encoding="utf-8", errors="replace") as stream:
         name = reports.report_filename(stream.read(reports.TITLE_SCAN_CHARS), job["filename"])
-    with db_conn() as con:
-        con.execute("UPDATE jobs SET report_name=? WHERE id=? AND report_name IS NULL", (name, job["id"]))
+    store.set_report_name(job["id"], name)
     return name
 
 
@@ -836,7 +642,7 @@ def diagnostics():
 @app.get("/api/jobs/<job_id>/metrics")
 def job_metrics(job_id):
     """Serve bounded measurements; no prompts, documents or reasoning are included."""
-    if not get_job(job_id):
+    if not store.get_job(job_id):
         abort(404)
     try:
         limit = int(request.args.get("limit", "200"))
@@ -845,34 +651,28 @@ def job_metrics(job_id):
             raise ValueError()
     except ValueError:
         abort(400)
-    return jsonify(job_store.metrics(db_conn, job_id, limit, before))
+    return jsonify(store.metrics(job_id, limit, before))
 
 
 @app.post("/api/jobs/<job_id>/cancel")
 def cancel_job(job_id):
     """Request cancellation idempotently; active OCR stops at its next safe boundary."""
-    with db_conn() as con:
-        con.execute("BEGIN IMMEDIATE")
-        row = con.execute("SELECT status,cancel_requested FROM jobs WHERE id=?", (job_id,)).fetchone()
-        if row is None:
-            abort(404)
-        if row["status"] == "cancelled":
-            return jsonify(status="cancelled"), 200
-        if row["status"] not in ("queued", "running"):
-            return jsonify(error="This job cannot be cancelled.", error_code="cancel_conflict"), 409
-        if row["cancel_requested"]:
-            return jsonify(status=row["status"], cancel_requested=True), 202
-        queued = row["status"] == "queued"
-        con.execute("UPDATE jobs SET cancel_requested=1, status=?, phase_code=?, stage=?, updated_at=? WHERE id=?",
-                    ("cancelled" if queued else "running", "cancelled" if queued else "cancelling",
-                     "Cancelled" if queued else "Cancellation requested", utcnow(), job_id))
+    outcome, status = store.request_cancel(job_id)
+    if outcome == "missing":
+        abort(404)
+    if outcome == "already_cancelled":
+        return jsonify(status="cancelled"), 200
+    if outcome == "not_active":
+        return jsonify(error="This job cannot be cancelled.", error_code="cancel_conflict"), 409
+    if outcome == "already_requested":
+        return jsonify(status=status, cancel_requested=True), 202
     # The request is committed; let the running job see it without waiting for its next SQLite read.
     signal = _cancel_signals.get(job_id)
     if signal is not None:
         signal.event.set()
     worker_wakeup.set()
-    event("job_cancel_requested", job_id=job_id, status="cancelled" if queued else "cancelling")
-    return jsonify(status="cancelled" if queued else "running", cancel_requested=True), 202
+    event("job_cancel_requested", job_id=job_id, status="cancelled" if outcome == "cancelled" else "cancelling")
+    return jsonify(status=status, cancel_requested=True), 202
 
 
 if __name__ == "__main__":
@@ -881,7 +681,7 @@ if __name__ == "__main__":
         job_config.resolve(runtime_defaults())
     except job_config.ConfigurationError as exc:
         raise SystemExit(f"Configuration error: {exc}") from None
-    init_db()
+    store.initialize()
     threading.Thread(target=worker_loop, name="pdf-worker", daemon=True).start()
     log.info("processor_started port=%s", APP_PORT)
     serve(app, host="0.0.0.0", port=APP_PORT, threads=4)

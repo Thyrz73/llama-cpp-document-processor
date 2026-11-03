@@ -11,7 +11,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 import app
-from document_processor import observability
+from document_processor import jobs, observability
+from document_processor.jobs import JobStore
 
 
 class PromptLogTests(unittest.TestCase):
@@ -19,12 +20,12 @@ class PromptLogTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
-        for name, value in (("DATA", root), ("DB_PATH", root / "jobs.sqlite3"),
+        for name, value in (("store", JobStore(root)),
                             ("read_system_prompt", lambda: "PRIVATE_SERVER_PROMPT")):
             patcher = patch.object(app, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
-        app.init_db()
+        app.store.initialize()
         self.client = app.app.test_client()
 
     def create(self, question):
@@ -37,7 +38,7 @@ class PromptLogTests(unittest.TestCase):
         prompt = "  Instructions privées : électricité.\n\n<script>alert('test')</script>\nSuite.  "
         identifier = self.create(prompt)
         for status in ("queued", "running", "done"):
-            app.update_job(identifier, status=status)
+            app.store.update_job(identifier, status=status)
             with patch.object(app, "read_system_prompt", return_value="CHANGED_SYSTEM_PROMPT"):
                 detail = self.client.get(f"/api/jobs/{identifier}").json
                 listed = self.client.get("/api/jobs").json["jobs"][0]
@@ -50,21 +51,22 @@ class PromptLogTests(unittest.TestCase):
     def test_default_prompts_are_distinguished_from_custom_instructions(self):
         for prompt in app.DEFAULT_QUESTIONS:
             identifier = self.create(prompt)
-            self.assertEqual(app.get_job(identifier)["question_custom"], 0)
+            self.assertEqual(app.store.get_job(identifier)["question_custom"], 0)
 
     def test_old_schema_migrates_idempotently_without_inventing_prompt_origin(self):
-        legacy_path = app.DATA / "legacy.sqlite3"
-        with sqlite3.connect(legacy_path) as con:
+        legacy = JobStore(app.store.data_dir / "legacy")
+        legacy.data_dir.mkdir()
+        with sqlite3.connect(legacy.db_path) as con:
             con.execute("""CREATE TABLE jobs (
                 id TEXT PRIMARY KEY, filename TEXT NOT NULL, question TEXT NOT NULL,
                 status TEXT NOT NULL, stage TEXT NOT NULL DEFAULT '', pages INTEGER DEFAULT 0,
                 total_chunks INTEGER DEFAULT 0, done_chunks INTEGER DEFAULT 0,
                 error TEXT DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""")
             con.execute("INSERT INTO jobs (id,filename,question,status,created_at,updated_at) VALUES (?,?,?,?,?,?)",
-                        ("f" * 32, "old.pdf", "Saved legacy request", "done", app.utcnow(), app.utcnow()))
-        with patch.object(app, "DB_PATH", legacy_path):
-            app.init_db()
-            app.init_db()
+                        ("f" * 32, "old.pdf", "Saved legacy request", "done", jobs.utcnow(), jobs.utcnow()))
+        with patch.object(app, "store", legacy):
+            legacy.initialize()
+            legacy.initialize()
             job = self.client.get("/api/jobs/" + "f" * 32).json
         self.assertEqual(job["question"], "Saved legacy request")
         self.assertIsNone(job["question_custom"])
@@ -75,10 +77,10 @@ class PromptLogTests(unittest.TestCase):
         with self.assertLogs(app.log, "INFO") as captured:
             identifier = self.create(secret)
             self.client.post(f"/api/jobs/{identifier}/cancel")
-            with app.db_conn() as con:
+            with app.store.connect() as con:
                 con.execute("UPDATE jobs SET cancel_requested=0 WHERE id=?", (identifier,))
-            app.update_job(identifier, status="done")
-            (app.job_dir(identifier) / "rapport_final.md").write_text("# Sensitive\nPRIVATE_REPORT_CONTENT", encoding="utf-8")
+            app.store.update_job(identifier, status="done")
+            (app.store.job_dir(identifier) / "rapport_final.md").write_text("# Sensitive\nPRIVATE_REPORT_CONTENT", encoding="utf-8")
             self.client.get(f"/api/jobs/{identifier}/report/view")
             with self.client.get(f"/api/jobs/{identifier}/report") as response:
                 self.assertEqual(response.status_code, 200)
@@ -115,18 +117,18 @@ class PromptLogTests(unittest.TestCase):
 
     def test_cancel_is_idempotent_and_completed_jobs_reject_cancellation(self):
         identifier = self.create("Summarize")
-        app.update_job(identifier, status="running")
+        app.store.update_job(identifier, status="running")
         with self.assertLogs(app.log, "INFO") as captured:
             for _ in range(2):
                 response = self.client.post(f"/api/jobs/{identifier}/cancel")
                 self.assertEqual(response.status_code, 202)
                 self.assertEqual(response.json["status"], "running")
         self.assertEqual(sum("job_cancel_requested" in line for line in captured.output), 1)
-        app.update_job(identifier, status="cancelled")
+        app.store.update_job(identifier, status="cancelled")
         self.assertEqual(self.client.post(f"/api/jobs/{identifier}/cancel").json["status"], "cancelled")
-        with app.db_conn() as con:
+        with app.store.connect() as con:
             con.execute("UPDATE jobs SET cancel_requested=0 WHERE id=?", (identifier,))
-        app.update_job(identifier, status="done")
+        app.store.update_job(identifier, status="done")
         self.assertEqual(self.client.post(f"/api/jobs/{identifier}/cancel").status_code, 409)
 
 
