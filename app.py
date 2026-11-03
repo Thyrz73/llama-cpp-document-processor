@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from document_processor import config as job_config, jobs as job_store, profiles, prompts, pipeline
-from document_processor import reports
+from document_processor import environment, reports
 from document_processor.observability import configure_logging, event, failure
 from document_processor.errors import ProcessingError
 from document_processor.model_client import ModelClient as BackendClient, Cancelled
@@ -44,30 +44,42 @@ from werkzeug.exceptions import Conflict, NotFound, RequestEntityTooLarge
 
 # Read the configuration once when the process starts.
 # Docker Compose passes variables from its .env file to the container.
-APP_PORT = int(os.getenv("APP_PORT", "9932"))
-DATA = Path(os.getenv("DATA_DIR", "/app/data"))
-LLAMA_BASE = os.getenv("LLAMA_BASE_URL", "http://host.docker.internal:8080").rstrip("/")
-KEY = os.getenv("LLAMA_API_KEY", "")
-MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "20"))
-MAX_PAGES = int(os.getenv("MAX_PAGES", "120"))
-CHUNK_TOKENS = int(os.getenv("CHUNK_TOKENS", "3000"))
-CONTEXT_TOKENS = int(os.getenv("CONTEXT_TOKENS", "16384"))
-OUTPUT_LANGUAGE = os.getenv("OUTPUT_LANGUAGE", "auto").strip() or "auto"
-ANALYSIS_TOKENS = int(os.getenv("ANALYSIS_TOKENS", "1000"))
-MERGE_TOKENS = int(os.getenv("MERGE_TOKENS", "1200"))
-FINAL_TOKENS = int(os.getenv("FINAL_TOKENS", "1800"))
-REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "21600"))
-LIVE_OUTPUT_ENABLED = os.getenv("LIVE_OUTPUT_ENABLED", "true").lower() in ("1", "true", "yes", "on")
-LIVE_PREVIEW_CHARS = max(1000, min(int(os.getenv("LIVE_PREVIEW_CHARS", "12000")), 50000))
+# config.resolve() repeats the job-level range checks at startup.
+try:
+    APP_PORT = environment.integer("APP_PORT", 9932, maximum=65535)
+    DATA = Path(os.getenv("DATA_DIR") or "/app/data")
+    LLAMA_BASE = environment.http_url("LLAMA_BASE_URL", "http://host.docker.internal:8080")
+    KEY = os.getenv("LLAMA_API_KEY", "")
+    MAX_UPLOAD_MB = environment.integer("MAX_UPLOAD_MB", 20)
+    MAX_PAGES = environment.integer("MAX_PAGES", 120)
+    CHUNK_TOKENS = environment.integer("CHUNK_TOKENS", 3000)
+    CONTEXT_TOKENS = environment.integer("CONTEXT_TOKENS", 16384)
+    OUTPUT_LANGUAGE = os.getenv("OUTPUT_LANGUAGE", "auto").strip() or "auto"
+    ANALYSIS_TOKENS = environment.integer("ANALYSIS_TOKENS", 1000)
+    MERGE_TOKENS = environment.integer("MERGE_TOKENS", 1200)
+    FINAL_TOKENS = environment.integer("FINAL_TOKENS", 1800)
+    REQUEST_TIMEOUT = environment.integer("REQUEST_TIMEOUT_SECONDS", 21600)
+    STEP_TIMEOUT = environment.integer("STEP_TIMEOUT_SECONDS", REQUEST_TIMEOUT)
+    MAX_MODEL_CALLS = environment.integer("MAX_MODEL_CALLS", 500)
+    MAX_JOB_ATTEMPTS = environment.integer("MAX_JOB_ATTEMPTS", 10)
+    LIVE_OUTPUT_ENABLED = environment.flag("LIVE_OUTPUT_ENABLED", True)
+    LIVE_PREVIEW_CHARS = max(1000, min(environment.integer("LIVE_PREVIEW_CHARS", 12000), 50000))
+    OCR_ENABLED = environment.flag("OCR_ENABLED", True)
+    OCR_LANGUAGES = os.getenv("OCR_LANGUAGES", "").strip() or "eng+fra"
+    OCR_DPI = environment.integer("OCR_DPI", 150)
+    OCR_MAX_PIXELS = environment.integer("OCR_MAX_PIXELS", 5000000)
+    OCR_TIMEOUT = environment.integer("OCR_TIMEOUT_SECONDS", 180)
+    THINKING_ADAPTER = environment.choice("LLAMA_THINKING_ADAPTER", "unsupported",
+                                       ("unsupported", "chat_template", "prompt"))
+    INITIAL_THINKING = environment.flag("LLAMA_INITIAL_THINKING", False)
+    APPLY_TEMPLATE_SUPPORTED = environment.flag("LLAMA_APPLY_TEMPLATE_SUPPORTED", False)
+    USAGE_SUPPORTED = environment.flag("LLAMA_USAGE_SUPPORTED", False)
+    SYSTEM_FILE = Path(os.getenv("SYSTEM_PROMPT_FILE") or "/app/config/system_prompt.txt")
+except environment.SettingsError as exc:
+    raise SystemExit(f"Configuration error: {exc}") from None
 MAX_QUESTION_CHARS = 1500
-OCR_ENABLED = os.getenv("OCR_ENABLED", "true").lower() in ("1", "true", "yes", "on")
-OCR_LANGUAGES = os.getenv("OCR_LANGUAGES", "fra+eng")
-OCR_DPI = int(os.getenv("OCR_DPI", "150"))
-OCR_MAX_PIXELS = int(os.getenv("OCR_MAX_PIXELS", "5000000"))
-OCR_TIMEOUT = int(os.getenv("OCR_TIMEOUT_SECONDS", "180"))
 MIN_USABLE_CHARS = 35
 DB_PATH = DATA / "jobs.sqlite3"
-SYSTEM_FILE = Path(os.getenv("SYSTEM_PROMPT_FILE", "/app/config/system_prompt.txt"))
 
 configure_logging()
 log = logging.getLogger("document-processor")
@@ -277,27 +289,17 @@ def read_system_prompt():
 
 
 def runtime_defaults():
-    """Read administrative defaults; snapshots isolate existing jobs from changes."""
-    adapter = os.getenv("LLAMA_THINKING_ADAPTER", "unsupported")
-    if adapter not in ("unsupported", "chat_template", "prompt"):
-        raise job_config.ConfigurationError("invalid_adapter", "Invalid LLAMA_THINKING_ADAPTER.")
-
-    def enabled(name):
-        return os.getenv(name, "false").lower() in ("1", "true", "yes", "on")
-
+    """Return administrative defaults; snapshots isolate existing jobs from changes."""
     return {
         "chunk_tokens": CHUNK_TOKENS, "context_tokens": CONTEXT_TOKENS,
         "analysis_tokens": ANALYSIS_TOKENS, "merge_tokens": MERGE_TOKENS,
         "final_tokens": FINAL_TOKENS, "report_language": OUTPUT_LANGUAGE,
         "temperature": 0.2, "top_p": None, "top_k": None, "min_p": None,
         "thinking_section": "inherit", "thinking_merge": "inherit", "thinking_final": "inherit",
-        "thinking_adapter": adapter, "initial_thinking": enabled("LLAMA_INITIAL_THINKING"),
-        "apply_template": enabled("LLAMA_APPLY_TEMPLATE_SUPPORTED"),
-        "usage_supported": enabled("LLAMA_USAGE_SUPPORTED"),
-        "request_timeout": REQUEST_TIMEOUT,
-        "step_timeout_seconds": int(os.getenv("STEP_TIMEOUT_SECONDS", str(REQUEST_TIMEOUT))),
-        "max_calls": int(os.getenv("MAX_MODEL_CALLS", "500")),
-        "max_attempts": int(os.getenv("MAX_JOB_ATTEMPTS", "10")),
+        "thinking_adapter": THINKING_ADAPTER, "initial_thinking": INITIAL_THINKING,
+        "apply_template": APPLY_TEMPLATE_SUPPORTED, "usage_supported": USAGE_SUPPORTED,
+        "request_timeout": REQUEST_TIMEOUT, "step_timeout_seconds": STEP_TIMEOUT,
+        "max_calls": MAX_MODEL_CALLS, "max_attempts": MAX_JOB_ATTEMPTS,
         "extraction": {"version": 3, "enabled": OCR_ENABLED, "languages": OCR_LANGUAGES,
                        "dpi": OCR_DPI, "max_pixels": OCR_MAX_PIXELS, "timeout": OCR_TIMEOUT,
                        "max_pages": MAX_PAGES},
@@ -1093,7 +1095,10 @@ def cancel_job(job_id):
 
 if __name__ == "__main__":
     event("processor_initializing", status="starting")
-    job_config.resolve(runtime_defaults())
+    try:
+        job_config.resolve(runtime_defaults())
+    except job_config.ConfigurationError as exc:
+        raise SystemExit(f"Configuration error: {exc}") from None
     init_db()
     threading.Thread(target=worker_loop, name="pdf-worker", daemon=True).start()
     log.info("processor_started port=%s", APP_PORT)

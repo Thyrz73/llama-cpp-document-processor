@@ -145,7 +145,9 @@ Compose reads `.env`. These settings configure the installation; the token budge
 
 Compose fixes `DATA_DIR=/app/data`, `SYSTEM_PROMPT_FILE=/app/config/system_prompt.txt` and `OMP_THREAD_LIMIT=1`. `LLAMA_DOCKER_NETWORK` is only used by the optional network overlay. See [.env.example](.env.example) and [compose.yaml](compose.yaml).
 
-After environment changes, run `docker compose up -d`; `restart` keeps the old environment. Running `python app.py` directly does not load `.env`.
+After environment changes, run `docker compose up -d`; `restart` keeps the old environment. Running `python app.py` directly does not load `.env`; unset or empty variables then use the Compose defaults above.
+
+Settings are validated at startup. A non-integer or out-of-range number, a boolean other than `true/false/1/0/yes/no/on/off`, an unknown reasoning adapter, a non-`http(s)` `LLAMA_BASE_URL` or budgets that exceed `CONTEXT_TOKENS` stop the processor with a `Configuration error: …` message naming the problem; check `docker compose logs`.
 
 Reasoning controls require a verified model/template adapter. `chat_template` sends `enable_thinking`; `prompt` adds `/think` or `/no_think`. Hiding reasoning in the interface does not disable its generation. See [engine tuning](docs/engine-tuning.md).
 
