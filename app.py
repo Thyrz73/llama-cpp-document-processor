@@ -312,6 +312,12 @@ class ModelClient(BackendClient):
         super().__init__(LLAMA_BASE, KEY, settings,
                          read_system_prompt() if prompt is None else prompt, LIVE_PREVIEW_CHARS)
 
+    def inspect(self):
+        """Share each job's read-only inspection with form validation and diagnostics."""
+        value = super().inspect()
+        remember_capabilities(value)
+        return value
+
 
 def output_language_instruction():
     """Build the language instruction from OUTPUT_LANGUAGE.
@@ -925,6 +931,7 @@ def view_report(job_id):
 
 _capability_cache = {"value": None, "expires": 0}
 _capability_lock = threading.Lock()
+CAPABILITY_CACHE_SECONDS = 30
 
 
 def cached_capabilities():
@@ -932,6 +939,13 @@ def cached_capabilities():
     if time.monotonic() < _capability_cache["expires"]:
         return _capability_cache["value"]
     return None
+
+
+def remember_capabilities(value):
+    """Publish a sanitized inspection from diagnostics or a job start for a short period."""
+    # Readers check the expiry first, so publish the value before extending it.
+    _capability_cache["value"] = value
+    _capability_cache["expires"] = time.monotonic() + CAPABILITY_CACHE_SECONDS
 
 
 @app.before_request
@@ -1012,7 +1026,7 @@ def diagnostics():
                 event("backend_checked", status=value.get("status", "unknown"), source="diagnostics")
             finally:
                 client.session.close()
-            _capability_cache.update(value=value, expires=time.monotonic() + 30)
+            remember_capabilities(value)
     process_rss_kib = None
     try:
         matched = re.search(r"^VmRSS:\s+(\d+)", Path("/proc/self/status").read_text(encoding="utf-8"), re.M)

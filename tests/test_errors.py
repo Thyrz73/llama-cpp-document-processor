@@ -121,5 +121,32 @@ class ErrorCatalogTests(unittest.TestCase):
                 self.assertEqual(stale, set(), "translated error codes that are never emitted")
 
 
+class CapabilityCacheTests(unittest.TestCase):
+    """A job's backend inspection also informs the next form validation."""
+
+    def setUp(self):
+        for name, value in (("_capability_cache", {"value": None, "expires": 0}),
+                            ("read_system_prompt", lambda: "Private instructions")):
+            patcher = patch.object(app, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.client = app.app.test_client()
+
+    def warnings(self):
+        response = self.client.post("/api/config/preview", json={"profile": "low"})
+        self.assertEqual(response.status_code, 200, response.get_json())
+        return response.get_json()["configuration"]["warnings"]
+
+    def test_job_inspection_is_shared_with_configuration_preview(self):
+        self.assertIn("engine_context_unknown", self.warnings())
+        observed = {"status": "available", "context_tokens": 8192, "model": "test"}
+        with patch.object(app.BackendClient, "inspect", return_value=observed):
+            client = app.ModelClient()
+            self.addCleanup(client.session.close)
+            client.inspect()
+        self.assertEqual(app.cached_capabilities(), observed)
+        self.assertNotIn("engine_context_unknown", self.warnings())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -22,7 +22,7 @@ There is no authentication or per-user isolation. Browser POSTs from another ori
 | `GET /api/jobs/<id>/metrics` | Attempts, step records and summary counts |
 | `GET /api/profiles` | Profiles, environment defaults and cached backend capabilities |
 | `POST /api/config/preview` | JSON options; returns preliminary configuration without creating a job |
-| `GET /api/diagnostics` | Read-only backend inspection, cached for 30 seconds; no inference |
+| `GET /api/diagnostics` | Read-only backend inspection, cached for 30 seconds and shared with job start-up inspections; no inference |
 
 Missing jobs return 404. Report access returns 409 unless the job is done and 404 if the file is missing or outside its authorized directory. Empty reports download as empty Markdown and show a message in the reader. Downloads keep `text/markdown; charset=utf-8` and set attachment `filename` and UTF-8 `filename*` parameters. The internal filename remains `rapport_final.md`.
 
@@ -54,7 +54,7 @@ Options:
 
 Reasoning policies are `inherit`, `on` or `off`; on/off requires an administrator-configured adapter. Context ceilings, endpoints, credentials and concurrency cannot be set per job. Unsupported options and invalid values return 400.
 
-Preview accepts the options object directly as JSON. Both preview and creation use cached capabilities without probing the backend. The full prompt is checked against context limits before generation.
+Preview accepts the options object directly as JSON. Both preview and creation use cached capabilities without probing the backend; the cache is refreshed by diagnostics and by each job's start-up inspection. The full prompt is checked against context limits before generation.
 
 ## Progress, retries and cancellation
 

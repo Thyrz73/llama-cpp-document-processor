@@ -201,7 +201,8 @@ class EncodingPipelineTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         for name, value in (("DATA", self.root), ("DB_PATH", self.root / "jobs.sqlite3"),
-                            ("LIVE_OUTPUT_ENABLED", True)):
+                            ("LIVE_OUTPUT_ENABLED", True),
+                            ("_capability_cache", {"value": None, "expires": 0})):
             patcher = patch.object(app, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
