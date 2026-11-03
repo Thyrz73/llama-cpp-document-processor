@@ -208,7 +208,7 @@ class JobStore:
             con.execute("""INSERT INTO jobs (id, filename, question, status, stage, created_at, updated_at,
                            queued_at, question_custom) VALUES (?, ?, ?, 'queued', 'Queued', ?, ?, ?, ?)""",
                         (job_id, filename, question, created, created, created, question_custom))
-            self.save_config(con, job_id, config)
+            self._insert_config(con, job_id, config)
 
     def update_job(self, job_id, **values):
         """Store values and the update time for job_id.
@@ -331,7 +331,12 @@ class JobStore:
 
     # Configuration snapshots and attempts -------------------------------------
 
-    def save_config(self, con, job_id, config):
+    def save_config(self, job_id, config):
+        """Save the snapshot of a job created before snapshots existed."""
+        with self.connect() as con:
+            self._insert_config(con, job_id, config)
+
+    def _insert_config(self, con, job_id, config):
         """Insert a snapshot once, inside the caller's transaction; never replace it."""
         con.execute("INSERT INTO job_configs VALUES (?, ?, ?, ?)",
                     (job_id, json.dumps(config, ensure_ascii=False, allow_nan=False), fingerprint(config), now()))

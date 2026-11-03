@@ -168,8 +168,7 @@ class JobRun:
             config = self.runtime.new_snapshot({})
             config["warnings"].append("legacy_recomputed")
             config["source_hash"] = file_hash(self.directory / SOURCE_FILE)
-            with self.store.connect() as con:
-                self.store.save_config(con, self.job_id, config)
+            self.store.save_config(self.job_id, config)
         return config
 
     def _prepare(self):
