@@ -19,7 +19,6 @@ import logging
 import os
 import re
 import sqlite3
-import sys
 import threading
 import time
 import uuid
@@ -164,8 +163,11 @@ def output_language_instruction():
 
 
 def analyze_job(job_id):
-    """Run the versioned pipeline while preserving the public Python entry point."""
-    return pipeline.run(job_id, sys.modules[__name__])
+    """Run the analysis pipeline for job_id with this deployment's services."""
+    pipeline.run(job_id, pipeline.Runtime(
+        store=store, new_snapshot=new_snapshot, model_client=ModelClient,
+        cancellation_requested=cancellation_requested,
+        live_output=LIVE_OUTPUT_ENABLED, preview_chars=LIVE_PREVIEW_CHARS))
 
 
 CANCEL_RECHECK_SECONDS = 1.0

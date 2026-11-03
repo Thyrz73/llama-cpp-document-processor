@@ -4,15 +4,38 @@ import json
 import logging
 import re
 import time
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Callable
 
 from . import extraction, jobs, prompts, reliability
 from .artifacts import Artifacts
 from .config import fingerprint
 from .errors import Cancelled, ProcessingError
 from .files import atomic_json, atomic_text, file_hash
-from .observability import event
+from .jobs import JobStore
+from .model_client import ModelClient
+from .observability import event, log
 from .reports import report_filename
+
+
+@dataclass(frozen=True)
+class Runtime:
+    """Everything the pipeline needs from the application.
+
+    app.analyze_job() builds one for each run from the deployment settings;
+    tests can build their own to run the pipeline without the web app.
+    """
+
+    store: JobStore
+    # Creates a configuration snapshot for jobs saved before snapshots existed.
+    new_snapshot: Callable[[dict], dict]
+    # Returns a client for the deployment's llama.cpp server, bound to a job configuration.
+    model_client: Callable[[dict], ModelClient]
+    # Tells whether the job's cancellation was requested; called very often.
+    cancellation_requested: Callable[[str], bool]
+    # Whether to write live_preview.json, and how many characters each channel keeps.
+    live_output: bool
+    preview_chars: int
 
 
 def plan_groups(notes, fits, max_group=4):
@@ -38,16 +61,15 @@ def plan_groups(notes, fits, max_group=4):
 
 
 def run(job_id, runtime):
-    """Execute through injected application services, allowing isolated regression tests."""
-    r = runtime
-    store = r.store
+    """Analyze job_id with the services provided by runtime (see Runtime)."""
+    store = runtime.store
     directory = store.job_dir(job_id)
     job = store.get_job(job_id)
     question = job["question"].strip()
     config = store.load_config(job_id)
     if config is None:
         # Historic artifacts remain untouched. Their original settings are unknowable.
-        config = r.new_snapshot({})
+        config = runtime.new_snapshot({})
         config["warnings"].append("legacy_recomputed")
         config["source_hash"] = file_hash(directory / jobs.SOURCE_FILE)
         with store.connect() as con:
@@ -60,8 +82,8 @@ def run(job_id, runtime):
         raise ProcessingError("retry_limit", "The retry limit was reached. Start a new analysis.")
     artifacts = Artifacts(directory, config)
     recorder = store.start_attempt(job_id, job.get("queued_at") or job["created_at"])
-    model = r.ModelClient(config)
-    model.cancel_check = lambda: r.cancellation_requested(job_id)
+    model = runtime.model_client(config)
+    model.cancel_check = lambda: runtime.cancellation_requested(job_id)
     calls = 0
     preview_path = directory / jobs.PREVIEW_FILE
     phase_args = {}
@@ -83,7 +105,7 @@ def run(job_id, runtime):
         # Page extraction can be frequent: phase changes belong in INFO, page detail in DEBUG.
         event("job_phase", logging.DEBUG if code in ("extraction", "ocr") else logging.INFO,
               job_id=job_id, stage=code, progress_percent=percent, **args)
-        if r.LIVE_OUTPUT_ENABLED and code != "saving":
+        if runtime.live_output and code != "saving":
             atomic_json(preview_path, {"phase": label, "phase_code": code, "phase_args": args,
                                         "content": "", "reasoning": "", "active": False,
                                         "updated_at": jobs.now(), "metrics": {}})
@@ -105,9 +127,9 @@ def run(job_id, runtime):
             cached = artifacts.read(name, dependencies)
             if cached is not None:
                 recorder.end(handle, "reused", {"artifact_reused": True})
-                if r.LIVE_OUTPUT_ENABLED and stage in ("section", "merge", "final"):
+                if runtime.live_output and stage in ("section", "merge", "final"):
                     atomic_json(preview_path, {"phase": phase_label, "phase_code": stage,
-                        "phase_args": phase_args, "content": cached[-r.LIVE_PREVIEW_CHARS:],
+                        "phase_args": phase_args, "content": cached[-runtime.preview_chars:],
                         "content_chars": len(cached), "reasoning": "", "reasoning_chars": 0,
                         "active": False, "updated_at": jobs.now(), "metrics": {"artifact_reused": True}})
                 return cached
@@ -139,12 +161,12 @@ def run(job_id, runtime):
 
         def live(content, reasoning, completed):
             """Write a cheap public preview, keeping useful text and reasoning separate."""
-            if not r.LIVE_OUTPUT_ENABLED:
+            if not runtime.live_output:
                 return
             stats = dict(model.current_metrics)
             atomic_json(preview_path, {
                 "phase": phase_label, "phase_code": stage, "phase_args": phase_args,
-                "content": content[-r.LIVE_PREVIEW_CHARS:], "reasoning": reasoning[-r.LIVE_PREVIEW_CHARS:],
+                "content": content[-runtime.preview_chars:], "reasoning": reasoning[-runtime.preview_chars:],
                 "content_chars": stats.get("content_chars", len(content)),
                 "reasoning_chars": stats.get("reasoning_chars", len(reasoning)),
                 "active": not completed, "updated_at": jobs.now(),
@@ -313,7 +335,7 @@ def run(job_id, runtime):
             recorder.end(handle, "failed", {"error_code": "report_save_failed"})
             raise
         status = "done"
-        r.log.info("job_finished job_id=%s pages=%d chunks=%d calls=%d", job_id, page_count, len(chunks), calls)
+        log.info("job_finished job_id=%s pages=%d chunks=%d calls=%d", job_id, page_count, len(chunks), calls)
     except Cancelled:
         status = "cancelled"
         raise
