@@ -325,6 +325,16 @@ class V2Tests(unittest.TestCase):
         # The single-job route still verifies the snapshot before exposing it.
         self.assertEqual(self.client.get(f"/api/jobs/{identifier}").json["configuration"], listed["configuration"])
 
+    def test_client_creation_failure_records_no_attempt(self):
+        identifier = self.create()
+        failure = config.ConfigurationError("missing_prompt", "The system prompt is missing or unreadable.")
+        with patch.object(app, "ModelClient", side_effect=failure), self.assertRaises(config.ConfigurationError):
+            app.analyze_job(identifier)
+        self.assertEqual(app.store.attempt_count(identifier), 0)
+        # No attempt is left looking active, so the failed job can be deleted.
+        app.store.update_job(identifier, status="failed")
+        self.assertIsNone(app.store.delete_job(identifier))
+
     def test_pipeline_previews_do_not_reread_the_job(self):
         identifier = self.create()
         with patch.object(app.store, "get_job", wraps=app.store.get_job) as reads:
