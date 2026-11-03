@@ -15,6 +15,11 @@ from .errors import ProcessingError
 from .observability import event
 
 
+def is_job_id(value):
+    """Accept only server-generated job IDs (32 lowercase hex), never a path."""
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{32}", value) is not None
+
+
 def remove_private_files(data, job_id):
     """Remove only an application's private UUID directory after DB commit.
 
@@ -23,7 +28,7 @@ def remove_private_files(data, job_id):
     or artifact path. A cleanup error is a warning, not a database rollback:
     some files may already be gone and history removal is still durable.
     """
-    if not isinstance(job_id, str) or not re.fullmatch(r"[0-9a-f]{32}", job_id):
+    if not is_job_id(job_id):
         return "delete_files_unsafe"
     directory = Path(data) / "jobs" / job_id
     try:

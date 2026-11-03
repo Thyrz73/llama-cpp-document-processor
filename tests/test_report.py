@@ -155,6 +155,28 @@ class ReportTests(unittest.TestCase):
         self.directory.symlink_to(outside.parent, target_is_directory=True)
         self.assertEqual(self.client.get(f"/api/jobs/{self.job_id}/report").status_code, 404)
 
+    def test_listing_never_offers_symlinked_reports_or_job_roots(self):
+        outside = Path(self.tmp.name) / "outside"
+        outside.mkdir()
+        (outside / "rapport_final.md").write_text("SECRET", encoding="utf-8")
+
+        def listed():
+            response = self.client.get("/api/jobs")
+            self.assertEqual(response.status_code, 200)
+            return response.json["jobs"][0]["report_available"]
+
+        (self.directory / "rapport_final.md").symlink_to(outside / "rapport_final.md")
+        self.assertFalse(listed())
+        (self.directory / "rapport_final.md").unlink()
+        self.directory.rmdir()
+        # A symlinked job root holding a regular report used to make the whole list fail with 404.
+        self.directory.symlink_to(outside, target_is_directory=True)
+        self.assertFalse(listed())
+        self.directory.unlink()
+        self.directory.mkdir()
+        self.write_report("# Report")
+        self.assertTrue(listed())
+
     def test_listing_reads_no_report_content_and_legacy_name_is_cached(self):
         self.write_report("# Rapport final\n\n## Étude géotechnique du site A")
         with patch.object(Path, "read_text", side_effect=AssertionError("List read a report")), \
