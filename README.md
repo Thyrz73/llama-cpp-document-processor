@@ -210,6 +210,16 @@ node tests/test_polling.js
 
 Python tests use temporary data and simulated model responses; no llama.cpp is needed. Two tests require real Tesseract: they are skipped locally when it is missing, but never in CI (`CI` set), where a missing Tesseract fails the build. Node.js is needed only for frontend tests; CI uses Node.js 22. [CI](.github/workflows/tests.yml) also lints with ruff and type-checks with mypy (settings in [pyproject.toml](pyproject.toml)), checks syntax, an offline benchmark plan, Compose and Docker packaging.
 
+Dependencies are declared with version ranges in `requirements.in` (runtime) and `requirements-dev.in` (tools). The installed `requirements.txt` and `requirements-dev.txt` files are hash-locked for Linux and Python 3.12; never edit them by hand. After changing a `.in` file, regenerate both locks with pip-tools, runtime first:
+
+```bash
+.venv/bin/python -m pip install pip-tools
+.venv/bin/pip-compile --generate-hashes --strip-extras --allow-unsafe --no-emit-index-url -o requirements.txt requirements.in
+.venv/bin/pip-compile --generate-hashes --strip-extras --allow-unsafe --no-emit-index-url -o requirements-dev.txt requirements-dev.in
+```
+
+The Docker base image is pinned by digest. [Dependabot](.github/dependabot.yml) proposes weekly updates for Python packages, the base image and GitHub Actions on `develop`.
+
 Maintained by [Guillaume Luquet / Thyrz73](https://github.com/Thyrz73). Report bugs through [GitHub issues](https://github.com/Thyrz73/llama-cpp-document-processor/issues), with the revision and relevant logs, excluding secrets and document content.
 
 MIT license — see [LICENSE](LICENSE).

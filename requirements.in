@@ -1,0 +1,6 @@
+flask>=3.0,<4
+waitress>=3.0,<4
+requests>=2.32,<3
+pypdf>=6.0,<7
+pymupdf>=1.25,<2
+markdown-it-py>=3.0,<5
