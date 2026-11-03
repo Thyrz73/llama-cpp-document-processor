@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .config import fingerprint
+from .errors import ProcessingError
 from .observability import event
 
 
@@ -108,7 +109,7 @@ def load_config(connect, job_id):
         return None
     config = json.loads(row["snapshot"])
     if fingerprint(config) != row["fingerprint"]:
-        raise ValueError("Stored job configuration failed its integrity check.")
+        raise ProcessingError("config_integrity", "Stored job configuration failed its integrity check.")
     return config
 
 
@@ -139,14 +140,14 @@ class Artifacts:
         self.manifest = json.loads(self.path.read_text(encoding="utf-8")) if self.path.exists() else {
             "version": 1, "config_hash": self.config_hash, "artifacts": {}, "identity": None}
         if self.manifest.get("config_hash") != self.config_hash or self.manifest.get("version") != 1:
-            raise ValueError("Artifact manifest is incompatible with this job.")
+            raise ProcessingError("artifacts_incompatible", "Artifact manifest is incompatible with this job.")
 
     def bind_identity(self, identity):
         """Refuse known model/template changes before reusing generated notes."""
         previous = self.manifest.get("identity")
         if previous and any(previous.get(key) is not None and identity.get(key) != previous[key]
                             for key in previous):
-            raise ValueError("The model or template changed. Start a new analysis.")
+            raise ProcessingError("identity_changed", "The model or template changed. Start a new analysis.")
         self.manifest["identity"] = identity
         self.atomic_json(self.path, self.manifest)
 

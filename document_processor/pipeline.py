@@ -7,7 +7,8 @@ import time
 
 from . import jobs, prompts, reliability
 from .config import fingerprint
-from .model_client import Cancelled, ModelError
+from .errors import ProcessingError
+from .model_client import Cancelled
 from .observability import event
 from .reports import report_filename
 
@@ -29,7 +30,7 @@ def plan_groups(notes, fits, max_group=4):
     if current:
         groups.append(current)
     if not any(len(group) > 1 for group in groups):
-        raise ModelError("merge_impossible", "Notes cannot be merged within the context budget. Start a new job with adjusted budgets.")
+        raise ProcessingError("merge_impossible", "Notes cannot be merged within the context budget. Start a new job with adjusted budgets.")
     return groups
 
 
@@ -48,13 +49,13 @@ def run(job_id, runtime):
         with r.db_conn() as con:
             jobs.save_config(con, job_id, config)
     if config.get("pipeline_version") != 2:
-        raise ModelError("pipeline_incompatible", "This job requires a different pipeline version. Start a new analysis.")
+        raise ProcessingError("pipeline_incompatible", "This job requires a different pipeline version. Start a new analysis.")
     if jobs.file_hash(directory / "source.pdf") != config["source_hash"]:
-        raise ModelError("source_changed", "The source PDF changed. Start a new analysis.")
+        raise ProcessingError("source_changed", "The source PDF changed. Start a new analysis.")
     with r.db_conn() as con:
         attempts = con.execute("SELECT COUNT(*) FROM job_runs WHERE job_id=?", (job_id,)).fetchone()[0]
     if attempts >= config["max_attempts"]:
-        raise ModelError("retry_limit", "The retry limit was reached. Start a new analysis.")
+        raise ProcessingError("retry_limit", "The retry limit was reached. Start a new analysis.")
     artifacts = jobs.Artifacts(directory, config, r.atomic_json, r.atomic_text)
     recorder = jobs.Recorder(r.db_conn, job_id, job.get("queued_at") or job["created_at"])
     model = r.ModelClient(config)
@@ -125,7 +126,7 @@ def run(job_id, runtime):
         """Enforce the job call budget and publish only bounded preview channels."""
         nonlocal calls
         if calls >= config["max_calls"]:
-            raise ModelError("call_limit", "The job exceeded its generation-call limit.")
+            raise ProcessingError("call_limit", "The job exceeded its generation-call limit.")
         calls += 1
         model.current_stage = stage
         started = time.monotonic()
@@ -216,7 +217,7 @@ def run(job_id, runtime):
                              "chunk_format_version": 2},
                             lambda: json.dumps(r.make_chunks(pages, model, budget=config["chunk_tokens"]), ensure_ascii=False)))
         if not chunks:
-            raise ModelError("empty_document", "Document contains no analyzable text.")
+            raise ProcessingError("empty_document", "Document contains no analyzable text.")
         r.update_job(job_id, total_chunks=len(chunks), progress_percent=10)
         event("sections_ready", job_id=job_id, total_chunks=len(chunks))
         notes = []
@@ -247,7 +248,7 @@ def run(job_id, runtime):
             if len(notes) <= 4 and final_fits:
                 break
             if len(notes) < 2 or level >= 32:
-                raise ModelError("merge_impossible", "The final report cannot fit the configured context.")
+                raise ProcessingError("merge_impossible", "The final report cannot fit the configured context.")
             model.current_stage = "merge"
             merge_evidence_limits = {}
             def merge_fits(group):
@@ -276,7 +277,7 @@ def run(job_id, runtime):
                 merged["warning_codes"] = sorted(set(merged["warning_codes"]) | {issue["code"] for issue in check["issues"]})
                 reduced.append(merged)
             if len(reduced) >= len(notes):
-                raise ModelError("merge_impossible", "The merge plan did not reduce its input.")
+                raise ProcessingError("merge_impossible", "The merge plan did not reduce its input.")
             notes, level = reduced, level + 1
 
         phase("final", "Writing final report", 95)

@@ -32,7 +32,8 @@ from pathlib import Path
 from document_processor import config as job_config, jobs as job_store, profiles, prompts, pipeline
 from document_processor import reports
 from document_processor.observability import configure_logging, event, failure
-from document_processor.model_client import ModelClient as BackendClient, ThinkingSplitter, ModelError, Cancelled
+from document_processor.errors import ProcessingError
+from document_processor.model_client import ModelClient as BackendClient, ThinkingSplitter, Cancelled
 from flask import Flask, abort, jsonify, render_template, request, send_file, g, make_response
 from urllib.parse import urlsplit
 from pypdf import PdfReader
@@ -365,7 +366,7 @@ def make_chunks(pages, model, budget=None):
 
     Return ``text``/``pages``/``parts`` dictionaries; pages contains sorted unique
     physical page numbers, parts retains exact passage/page pairs independently
-    of markers embedded in source text. Raise RuntimeError if a passage exceeds the
+    of markers embedded in source text. Raise ProcessingError if a passage exceeds the
     budget. Propagate errors from the remote tokenizer.
     """
     budget = CHUNK_TOKENS if budget is None else budget
@@ -387,7 +388,7 @@ def make_chunks(pages, model, budget=None):
             solo = chunk_text([piece])
             if model.tokenize(solo) > budget:
                 if len(piece["text"]) < 50:
-                    raise RuntimeError("Unable to split a PDF passage into sufficiently small chunks")
+                    raise ProcessingError("chunking_failed", "Unable to split a PDF passage into sufficiently small chunks.")
                 half = len(piece["text"]) // 2
                 pivot = -1
                 for boundary in ("\n\n", "\n", " "):
@@ -444,8 +445,9 @@ def ocr_page(page, number, settings=None):
     resolution to the OCR_MAX_PIXELS budget before allocation, then
     run Tesseract with OCR_LANGUAGES.
 
-    Raise RuntimeError when Tesseract is missing, fails, or exceeds
-    OCR_TIMEOUT. Page rendering errors are propagated to the caller.
+    Raise ProcessingError when the page exceeds the pixel budget or Tesseract is
+    missing, fails, or exceeds OCR_TIMEOUT. Page rendering errors are
+    propagated to the caller.
     """
     settings = settings or runtime_defaults()["extraction"]
     if not settings["enabled"]:
@@ -458,7 +460,7 @@ def ocr_page(page, number, settings=None):
     scale = min(1.0, math.sqrt(settings["max_pixels"] / max(1.0, pixels_at_dpi)))
     dpi = max(1, math.floor(settings["dpi"] * scale))
     if (page.rect.width * dpi / 72) * (page.rect.height * dpi / 72) > settings["max_pixels"]:
-        raise ValueError("PDF page dimensions exceed the OCR pixel budget.")
+        raise ProcessingError("ocr_page_too_large", f"PDF page {number} exceeds the OCR pixel budget.")
     pix = page.get_pixmap(dpi=dpi, colorspace=pymupdf.csGRAY, alpha=False, annots=False)
     try:
         png = pix.tobytes("png")
@@ -472,20 +474,20 @@ def ocr_page(page, number, settings=None):
         )
     except FileNotFoundError as exc:
         event("ocr_failed", logging.ERROR, job_id=job_id, page=number, error_code="ocr_missing")
-        raise RuntimeError("Tesseract is missing from the container; rebuild the Docker image") from exc
-    except subprocess.TimeoutExpired as exc:
+        raise ProcessingError("ocr_missing", "Tesseract is missing from the container; rebuild the Docker image.") from exc
+    except subprocess.TimeoutExpired:
         event("ocr_failed", logging.ERROR, job_id=job_id, page=number, error_code="ocr_timeout")
-        raise ModelError("ocr_timeout", f"OCR timed out on page {number}.") from None
+        raise ProcessingError("ocr_timeout", f"OCR timed out on page {number}.") from None
     finally:
         del png
     if process.returncode:
         event("ocr_failed", logging.ERROR, job_id=job_id, page=number, error_code="ocr_failed")
-        raise ModelError("ocr_failed", f"OCR failed on page {number}. Check installed language packs.")
+        raise ProcessingError("ocr_failed", f"OCR failed on page {number}. Check installed language packs.")
     try:
         text = process.stdout.decode("utf-8")
     except UnicodeDecodeError:
         event("ocr_failed", logging.ERROR, job_id=job_id, page=number, error_code="invalid_ocr_encoding")
-        raise ModelError("invalid_ocr_encoding", "OCR returned text that is not valid UTF-8.") from None
+        raise ProcessingError("invalid_ocr_encoding", "OCR returned text that is not valid UTF-8.") from None
     event("ocr_finished", job_id=job_id, page=number,
           duration_ms=round((time.monotonic() - started) * 1000, 1), characters=len(text))
     return normalize_extracted_text(text)
@@ -502,21 +504,21 @@ def extract_pdf(pdf_path, progress=None, settings=None):
     insufficient page numbers, and OCR page numbers. Keep non-empty text from
     pages judged insufficient.
 
-    Raise ValueError when the PDF is unreadable, password-protected, exceeds
-    MAX_PAGES, or contains no usable text. Propagate OCR errors; the document
-    context closes it on exit.
+    Raise ProcessingError when the PDF is unreadable, password-protected,
+    exceeds MAX_PAGES, or contains no usable text. Propagate OCR errors; the
+    document context closes it on exit.
     """
     settings = settings or runtime_defaults()["extraction"]
     try:
         doc = pymupdf.open(str(pdf_path))
-    except Exception as exc:
-        raise ValueError("Unable to read PDF.") from None
+    except Exception:
+        raise ProcessingError("unreadable_pdf", "Unable to read PDF.") from None
     with doc:
         if doc.needs_pass:
-            raise ValueError("Encrypted PDF: remove the password before uploading")
+            raise ProcessingError("encrypted_pdf", "Encrypted PDF: remove the password before uploading.")
         count = len(doc)
         if count > settings["max_pages"]:
-            raise ValueError(f"PDF has {count} pages (configured maximum exceeded).")
+            raise ProcessingError("page_limit", f"PDF has {count} pages (configured maximum exceeded).")
         pages, missing, ocr_pages = [], [], []
         alt_reader = None
         for number in range(1, count + 1):
@@ -556,7 +558,7 @@ def extract_pdf(pdf_path, progress=None, settings=None):
         if not any(text_is_usable(p["text"]) for p in pages):
             event("extraction_empty", logging.WARNING, job_id=getattr(threading.current_thread(), "job_id", None), pages=count)
             detail = "even after OCR" if settings["enabled"] else "(OCR disabled)"
-            raise ValueError(f"No usable text found in this PDF {detail}. Check the source PDF.")
+            raise ProcessingError("no_usable_text", f"No usable text found in this PDF {detail}. Check the source PDF.")
         event("extraction_summary", job_id=getattr(threading.current_thread(), "job_id", None), pages=count,
               ocr_pages=len(ocr_pages), insufficient_pages=len(missing), characters=sum(len(p["text"]) for p in pages))
         return pages, count, missing, ocr_pages
@@ -574,14 +576,27 @@ def cancellation_requested(job_id):
     return not row or bool(row["cancel_requested"])
 
 
+def fail_job(job_id, exc):
+    """Record a failed job with a translatable code and a message safe to display.
+
+    Only ProcessingError and ConfigurationError carry public text; any other
+    exception is logged without its message and shown as a generic failure.
+    """
+    failure("job_failed", exc, job_id=job_id)
+    if isinstance(exc, (ProcessingError, job_config.ConfigurationError)):
+        code, message = exc.code, str(exc)
+    else:
+        code, message = "analysis_failed", "Analysis failed. Check the PDF, configuration and local diagnostics."
+    update_job(job_id, status="failed", stage="Error", phase_code="failed", error_code=code, error=message)
+
+
 def worker_loop():
     """Process jobs forever in creation order.
 
     Claim the next job by changing it from ``queued`` to ``running``, then
-    call analyze_job. On error, record ``failed`` and an error message limited
-    to 800 characters while keeping produced files. When idle, wait for a
-    worker_wakeup signal or a six-second timeout. This loop belongs to the
-    application's only worker thread.
+    call analyze_job and record failures through fail_job, keeping produced
+    files. When idle, wait for a worker_wakeup signal or a six-second
+    timeout. This loop belongs to the application's only worker thread.
     """
     while True:
         try:
@@ -599,11 +614,8 @@ def worker_loop():
                 except Cancelled:
                     update_job(job_id, status="cancelled", stage="Cancelled", phase_code="cancelled", error="", error_code="cancelled")
                 except Exception as exc:
-                    code = getattr(exc, "code", "analysis_failed")
-                    failure("job_failed", exc, job_id=job_id)
-                    message = str(exc) if isinstance(exc, (ModelError, job_config.ConfigurationError)) else "Analysis failed. Check the PDF, configuration and local diagnostics."
-                    update_job(job_id, status="failed", stage="Error", phase_code="failed", error_code=code, error=message)
                     # Keep the last preview to help diagnose the error.
+                    fail_job(job_id, exc)
                 finally:
                     threading.current_thread().job_id = None
                 continue

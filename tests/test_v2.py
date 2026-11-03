@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 import app
 from document_processor import config, jobs, pipeline, prompts
+from document_processor.errors import ProcessingError
 from document_processor.model_client import ModelError, Cancelled
 
 
@@ -228,12 +229,14 @@ class V2Tests(unittest.TestCase):
         identifier = self.create()
         self.run_job(identifier, 1)
         FakeModel.identity = "different-model"
-        with self.assertRaisesRegex(ValueError, "model or template changed"):
+        with self.assertRaisesRegex(ProcessingError, "model or template changed") as raised:
             self.run_job(identifier, 1)
+        self.assertEqual(raised.exception.code, "identity_changed")
         FakeModel.identity = "test-model"
         (app.job_dir(identifier) / "source.pdf").write_bytes(b"changed")
-        with self.assertRaisesRegex(ModelError, "source PDF changed"):
+        with self.assertRaisesRegex(ProcessingError, "source PDF changed") as raised:
             self.run_job(identifier, 1)
+        self.assertEqual(raised.exception.code, "source_changed")
 
     def test_legacy_files_remain_intact_and_old_report_is_archived(self):
         identifier = self.create()
@@ -325,7 +328,7 @@ class MergePlanTests(unittest.TestCase):
 
     def test_impossible_pairs_fail_instead_of_looping(self):
         for notes in ([1], [1, 2], [1, 2, 3, 4, 5]):
-            with self.assertRaises(ModelError):
+            with self.assertRaises(ProcessingError):
                 pipeline.plan_groups(notes, lambda group: len(group) <= 1)
 
 

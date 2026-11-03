@@ -60,6 +60,8 @@ Preview accepts the options object directly as JSON. Both preview and creation u
 
 Statuses are `queued`, `running`, `done`, `failed`, `cancelled`. `progress_percent` measures workflow progress, not remaining time; done is always shown as 100. `phase_code` and `phase_args` support interface translation.
 
+Failed jobs store a stable `error_code` and a displayable `error`, for example `encrypted_pdf`, `page_limit`, `no_usable_text`, `ocr_missing`, `deadline` or `identity_changed`. The interface translates known codes. Unexpected internal errors use `analysis_failed` with a generic message; their details are logged without private text.
+
 Retry returns 200 when queued, 409 for an incompatible status or an exhausted attempt limit, and 400 for a nonempty body. It preserves saved budgets and prompts. Jobs predating snapshots get `legacy_recomputed` and current settings when processed. Create a new job to use new settings.
 
 Cancel returns 202 when accepted, 200 if already cancelled and 409 for done/failed jobs. Queued jobs become cancelled immediately. Running jobs keep their status with `cancel_requested=true` until cancellation takes effect. OCR finishes or times out first; remote engine release depends on the backend.

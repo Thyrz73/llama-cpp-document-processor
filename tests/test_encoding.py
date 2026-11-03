@@ -19,6 +19,7 @@ os.environ.setdefault("SYSTEM_PROMPT_FILE", str(Path(__file__).resolve().parents
 
 import app
 from document_processor import config, jobs, prompts
+from document_processor.errors import ProcessingError
 from document_processor.model_client import ModelError
 
 
@@ -138,7 +139,7 @@ class EncodingBoundaryTests(unittest.TestCase):
                     returncode=0, stdout=text.encode("utf-8"))):
                 self.assertEqual(app.ocr_page(page, 1), text, "OCR byte boundary")
         with patch.object(app.subprocess, "run", return_value=SimpleNamespace(returncode=0, stdout=b"\xff")):
-            with self.assertRaises(ModelError) as error:
+            with self.assertRaises(ProcessingError) as error:
                 app.ocr_page(page, 1)
         self.assertEqual(error.exception.code, "invalid_ocr_encoding")
 

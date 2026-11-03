@@ -12,14 +12,11 @@ from dataclasses import dataclass
 import requests
 
 from .config import ConfigurationError
+from .errors import ProcessingError
 
 
-class ModelError(RuntimeError):
-    """Carry a public error code without including remote response bodies."""
-
-    def __init__(self, code, message):
-        super().__init__(message)
-        self.code = code
+class ModelError(ProcessingError):
+    """Report a model backend or generation failure without remote response bodies."""
 
 
 class Cancelled(ModelError):
