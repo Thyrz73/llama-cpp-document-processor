@@ -532,7 +532,7 @@ function renderJobs() {
     const item = el("article", undefined, "item"),
       top = el("div", undefined, "top");
     item.dataset.jobId = j.id;
-    const identity = el("div", undefined, "job-identity");
+    const identity = el(terminalStatuses.has(j.status) ? "label" : "div", undefined, "job-identity");
     if (terminalStatuses.has(j.status)) {
       const checkbox = el("input");
       checkbox.type = "checkbox";
@@ -545,7 +545,7 @@ function renderJobs() {
       });
       identity.append(checkbox);
     }
-    identity.append(el("div", j.filename, "name"));
+    identity.append(el("span", j.filename, "name"));
     top.append(identity);
     top.append(el("span", t(codes[j.status] || j.status), `pill ${j.status}`));
     if (terminalStatuses.has(j.status)) {
