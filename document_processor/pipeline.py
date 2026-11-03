@@ -65,14 +65,16 @@ def run(job_id, runtime):
     calls = 0
     preview_path = directory / "live_preview.json"
     phase_args = {}
+    # Last stage label written by phase(); previews reuse it without a database read.
+    phase_label = job["stage"]
     quality: dict[str, Any] = {"version": reliability.VERSION, "steps": {}}
     last_percent = None
 
     def phase(code, label, percent=None, **args):
         """Persist stable phase identifiers alongside the historical English label."""
-        nonlocal phase_args, last_percent
+        nonlocal phase_args, phase_label, last_percent
         model.check_cancelled()
-        phase_args = args
+        phase_args, phase_label = args, label
         values = {"stage": label, "phase_code": code, "phase_args": json.dumps(args)}
         if percent is not None and percent != last_percent:
             values["progress_percent"] = percent
@@ -104,7 +106,7 @@ def run(job_id, runtime):
             if cached is not None:
                 recorder.end(handle, "reused", {"artifact_reused": True})
                 if r.LIVE_OUTPUT_ENABLED and stage in ("section", "merge", "final"):
-                    r.atomic_json(preview_path, {"phase": r.get_job(job_id)["stage"], "phase_code": stage,
+                    r.atomic_json(preview_path, {"phase": phase_label, "phase_code": stage,
                         "phase_args": phase_args, "content": cached[-r.LIVE_PREVIEW_CHARS:],
                         "content_chars": len(cached), "reasoning": "", "reasoning_chars": 0,
                         "active": False, "updated_at": jobs.now(), "metrics": {"artifact_reused": True}})
@@ -141,7 +143,7 @@ def run(job_id, runtime):
                 return
             stats = dict(model.current_metrics)
             r.atomic_json(preview_path, {
-                "phase": r.get_job(job_id)["stage"], "phase_code": stage, "phase_args": phase_args,
+                "phase": phase_label, "phase_code": stage, "phase_args": phase_args,
                 "content": content[-r.LIVE_PREVIEW_CHARS:], "reasoning": reasoning[-r.LIVE_PREVIEW_CHARS:],
                 "content_chars": stats.get("content_chars", len(content)),
                 "reasoning_chars": stats.get("reasoning_chars", len(reasoning)),

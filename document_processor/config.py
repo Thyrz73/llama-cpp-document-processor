@@ -126,13 +126,17 @@ def resolve(defaults, options=None, capabilities=None):
     return config
 
 
-def public_config(config):
-    """Expose only job controls, never prompt text, credentials or local paths."""
+def public_config(config, stored_fingerprint=None):
+    """Expose only job controls, never prompt text, credentials or local paths.
+
+    stored_fingerprint is the value saved with the snapshot; passing it avoids
+    hashing the whole snapshot again.
+    """
     fields = {"profile", "profile_version", "customized", "chunk_tokens", "context_tokens",
               "analysis_tokens", "merge_tokens", "final_tokens", "report_language",
               "detail_level", "temperature", "top_p", "top_k", "min_p", "concurrency",
               "thinking_section", "thinking_merge", "thinking_final", "warnings",
               "max_calls", "step_timeout_seconds", "schema_version"}
     result = {key: config[key] for key in fields if key in config}
-    result["fingerprint"] = fingerprint(config)
+    result["fingerprint"] = stored_fingerprint or fingerprint(config)
     return result

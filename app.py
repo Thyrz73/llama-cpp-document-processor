@@ -216,16 +216,14 @@ def serialize_job(row):
 
 
 def get_job(job_id):
-    """Return the normalized job matching job_id, or None."""
+    """Return the normalized job matching job_id, or None.
+
+    The private configuration snapshot is not loaded: polling routes and the
+    pipeline only need the job row. job_info adds the public configuration.
+    """
     with db_conn() as con:
         row = con.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
-    if row is None:
-        return None
-    job = serialize_job(row)
-    config = job_store.load_config(db_conn, job_id)
-    if config:
-        job["configuration"] = job_config.public_config(config)
-    return job
+    return None if row is None else serialize_job(row)
 
 
 def job_dir(job_id):
@@ -678,24 +676,28 @@ def list_jobs():
             EXISTS(SELECT 1 FROM jobs WHERE status IN ('queued', 'running'))
                 AS has_active_jobs
             FROM jobs ORDER BY created_at DESC, id DESC LIMIT 100""").fetchall()
+        # Reuse the fingerprint stored with each snapshot instead of rehashing it on every poll.
+        configs = {row["job_id"]: (json.loads(row["snapshot"]), row["fingerprint"]) for row in con.execute(
+            "SELECT job_id, snapshot, fingerprint FROM job_configs WHERE job_id IN "
+            "(SELECT id FROM jobs ORDER BY created_at DESC, id DESC LIMIT 100)")}
     has_active_jobs = bool(rows and rows[0]["has_active_jobs"])
     jobs = [serialize_job(row) for row in rows]
-    with db_conn() as con:
-        configs = {row["job_id"]: json.loads(row["snapshot"]) for row in con.execute(
-            "SELECT job_id, snapshot FROM job_configs WHERE job_id IN (SELECT id FROM jobs ORDER BY created_at DESC, id DESC LIMIT 100)")}
     for job in jobs:
         job.pop("has_active_jobs")
         if job["id"] in configs:
-            job["configuration"] = job_config.public_config(configs[job["id"]])
+            job["configuration"] = job_config.public_config(*configs[job["id"]])
     return jsonify(jobs=jobs, has_active_jobs=has_active_jobs)
 
 
 @app.get("/api/jobs/<job_id>")
 def job_info(job_id):
-    """Return job_id as JSON, or HTTP 404 when it does not exist."""
+    """Return job_id and its verified public configuration, or HTTP 404."""
     job = get_job(job_id)
     if not job:
         abort(404)
+    config = job_store.load_config(db_conn, job_id)
+    if config:
+        job["configuration"] = job_config.public_config(config)
     return jsonify(job)
 
 

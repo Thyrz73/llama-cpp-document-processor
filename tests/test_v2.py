@@ -272,6 +272,27 @@ class V2Tests(unittest.TestCase):
         with self.assertRaises(Cancelled):
             app.update_job(identifier, status="done")
 
+    def test_polling_neither_loads_snapshots_nor_rehashes_them(self):
+        identifier = self.create({"profile": "low"})
+        with app.db_conn() as con:
+            stored = con.execute("SELECT fingerprint FROM job_configs WHERE job_id=?", (identifier,)).fetchone()[0]
+        with patch.object(jobs, "load_config", side_effect=AssertionError("snapshot loaded")), \
+             patch.object(config, "fingerprint", side_effect=AssertionError("snapshot rehashed")):
+            listed = self.client.get("/api/jobs").json["jobs"][0]
+            self.assertEqual(self.client.get(f"/api/jobs/{identifier}/live").status_code, 200)
+            self.assertNotIn("configuration", app.get_job(identifier))
+        self.assertEqual(listed["configuration"]["fingerprint"], stored)
+        # The single-job route still verifies the snapshot before exposing it.
+        self.assertEqual(self.client.get(f"/api/jobs/{identifier}").json["configuration"], listed["configuration"])
+
+    def test_pipeline_previews_do_not_reread_the_job(self):
+        identifier = self.create()
+        with patch.object(app, "get_job", wraps=app.get_job) as reads:
+            self.run_job(identifier, 3)
+        self.assertEqual(reads.call_count, 1)
+        preview = json.loads((app.job_dir(identifier) / "live_preview.json").read_text())
+        self.assertEqual(preview["phase"], "Writing final report")
+
     def test_live_and_download_do_not_generate_and_reasoning_is_opt_in(self):
         identifier = self.create()
         directory = app.job_dir(identifier)
