@@ -586,11 +586,46 @@ def analyze_job(job_id):
     return pipeline.run(job_id, sys.modules[__name__])
 
 
-def cancellation_requested(job_id):
-    """Read cooperative cancellation without exposing private configuration."""
+CANCEL_RECHECK_SECONDS = 1.0
+
+
+class _CancelSignal:
+    """In-process cancellation flag for the running job; SQLite stays authoritative."""
+
+    def __init__(self):
+        self.event = threading.Event()
+        self.checked_at = float("-inf")
+
+
+# Registered by the worker for its running job only; cancel_job sets the event.
+_cancel_signals: dict[str, _CancelSignal] = {}
+
+
+def read_cancellation(job_id):
+    """Read the persisted cancellation request; a deleted job counts as cancelled."""
     with db_conn() as con:
         row = con.execute("SELECT cancel_requested FROM jobs WHERE id=?", (job_id,)).fetchone()
     return not row or bool(row["cancel_requested"])
+
+
+def cancellation_requested(job_id):
+    """Answer frequent cooperative checks without opening SQLite each time.
+
+    The model client checks once per streamed token. A request through
+    cancel_job sets the running job's event immediately; SQLite is reread at
+    most once per CANCEL_RECHECK_SECONDS so any other recorded request is
+    still honored. Jobs not run by the worker always read SQLite.
+    """
+    signal = _cancel_signals.get(job_id)
+    if signal is None:
+        return read_cancellation(job_id)
+    if not signal.event.is_set():
+        now = time.monotonic()
+        if now - signal.checked_at >= CANCEL_RECHECK_SECONDS:
+            signal.checked_at = now
+            if read_cancellation(job_id):
+                signal.event.set()
+    return signal.event.is_set()
 
 
 def fail_job(job_id, exc):
@@ -607,13 +642,30 @@ def fail_job(job_id, exc):
     update_job(job_id, status="failed", stage="Error", phase_code="failed", error_code=code, error=message)
 
 
+def run_claimed_job(job_id):
+    """Run a job already marked ``running`` and record how it ended."""
+    _job_context.job_id = job_id
+    _cancel_signals[job_id] = _CancelSignal()
+    event("job_state", job_id=job_id, status="running", stage="starting")
+    try:
+        analyze_job(job_id)
+    except Cancelled:
+        update_job(job_id, status="cancelled", stage="Cancelled", phase_code="cancelled", error="", error_code="cancelled")
+    except Exception as exc:
+        # Keep the last preview to help diagnose the error.
+        fail_job(job_id, exc)
+    finally:
+        _cancel_signals.pop(job_id, None)
+        _job_context.job_id = None
+
+
 def worker_loop():
     """Process jobs forever in creation order.
 
     Claim the next job by changing it from ``queued`` to ``running``, then
-    call analyze_job and record failures through fail_job, keeping produced
-    files. When idle, wait for a worker_wakeup signal or a six-second
-    timeout. This loop belongs to the application's only worker thread.
+    run it through run_claimed_job, keeping produced files. When idle, wait
+    for a worker_wakeup signal or a six-second timeout. This loop belongs to
+    the application's only worker thread.
     """
     while True:
         try:
@@ -623,18 +675,7 @@ def worker_loop():
                 if row:
                     con.execute("UPDATE jobs SET status='running', stage='Starting', updated_at=? WHERE id=?", (utcnow(), row["id"]))
             if row:
-                job_id = row["id"]
-                _job_context.job_id = job_id
-                event("job_state", job_id=job_id, status="running", stage="starting")
-                try:
-                    analyze_job(job_id)
-                except Cancelled:
-                    update_job(job_id, status="cancelled", stage="Cancelled", phase_code="cancelled", error="", error_code="cancelled")
-                except Exception as exc:
-                    # Keep the last preview to help diagnose the error.
-                    fail_job(job_id, exc)
-                finally:
-                    _job_context.job_id = None
+                run_claimed_job(row["id"])
                 continue
         except Exception as exc:
             failure("worker_database_error", exc)
@@ -1090,6 +1131,10 @@ def cancel_job(job_id):
         con.execute("UPDATE jobs SET cancel_requested=1, status=?, phase_code=?, stage=?, updated_at=? WHERE id=?",
                     ("cancelled" if queued else "running", "cancelled" if queued else "cancelling",
                      "Cancelled" if queued else "Cancellation requested", utcnow(), job_id))
+    # The request is committed; let the running job see it without waiting for its next SQLite read.
+    signal = _cancel_signals.get(job_id)
+    if signal is not None:
+        signal.event.set()
     worker_wakeup.set()
     event("job_cancel_requested", job_id=job_id, status="cancelled" if queued else "cancelling")
     return jsonify(status="cancelled" if queued else "running", cancel_requested=True), 202

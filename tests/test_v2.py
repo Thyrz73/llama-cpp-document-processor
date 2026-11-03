@@ -260,6 +260,45 @@ class V2Tests(unittest.TestCase):
         with app.db_conn() as con:
             self.assertEqual([row[0] for row in con.execute("SELECT version FROM schema_migrations ORDER BY version")], [2, 3])
 
+    def test_running_job_cancellation_is_signalled_without_polling_sqlite(self):
+        identifier = self.create()
+        app.update_job(identifier, status="running")
+        observed = []
+
+        def analyze(job_id):
+            with patch.object(app, "read_cancellation", wraps=app.read_cancellation) as reads:
+                checks = [app.cancellation_requested(job_id) for _ in range(500)]
+                observed.append((checks[-1], reads.call_count))
+                self.assertEqual(self.client.post(f"/api/jobs/{job_id}/cancel").status_code, 202)
+                observed.append((app.cancellation_requested(job_id), reads.call_count))
+            raise Cancelled()
+
+        # A long interval keeps the read counts independent of machine speed.
+        with patch.object(app, "analyze_job", side_effect=analyze), \
+             patch.object(app, "CANCEL_RECHECK_SECONDS", 3600):
+            app.run_claimed_job(identifier)
+        # 500 checks open SQLite once; the API request is then seen without a new read.
+        self.assertEqual(observed, [(False, 1), (True, 1)])
+        self.assertEqual(app.get_job(identifier)["status"], "cancelled")
+        self.assertNotIn(identifier, app._cancel_signals)
+
+    def test_running_job_still_honors_cancellation_recorded_only_in_sqlite(self):
+        identifier = self.create()
+        app.update_job(identifier, status="running")
+
+        def analyze(job_id):
+            self.assertFalse(app.cancellation_requested(job_id))
+            app.update_job(job_id, cancel_requested=1)
+            self.assertFalse(app.cancellation_requested(job_id))
+            app._cancel_signals[job_id].checked_at -= app.CANCEL_RECHECK_SECONDS
+            self.assertTrue(app.cancellation_requested(job_id))
+            raise Cancelled()
+
+        with patch.object(app, "analyze_job", side_effect=analyze), \
+             patch.object(app, "CANCEL_RECHECK_SECONDS", 3600):
+            app.run_claimed_job(identifier)
+        self.assertEqual(app.get_job(identifier)["status"], "cancelled")
+
     def test_cancel_and_retry_are_idempotent_and_configuration_cannot_be_replaced(self):
         identifier = self.create()
         self.assertEqual(self.client.post(f"/api/jobs/{identifier}/cancel").status_code, 202)
