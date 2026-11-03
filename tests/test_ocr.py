@@ -1,10 +1,16 @@
 """Test PDF extraction with local Tesseract."""
+import os
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 import pymupdf
 from app import extract_pdf
+
+# CI installs Tesseract, so a missing binary there must fail instead of skipping.
+requires_tesseract = unittest.skipUnless(
+    shutil.which("tesseract") or os.getenv("CI"), "Tesseract is not installed locally")
 
 
 class TestExtraction(unittest.TestCase):
@@ -53,6 +59,7 @@ class TestExtraction(unittest.TestCase):
         self.assertEqual((count, ocr, missing), (1, [], []))
         self.assertIn("searchable document", pages[0]["text"])
 
+    @requires_tesseract
     def test_image_pdf_uses_ocr(self):
         """Recognize an image page and preserve its page number."""
         pdf = pymupdf.open()
@@ -65,6 +72,7 @@ class TestExtraction(unittest.TestCase):
         self.assertEqual(missing, [])
         self.assertIn("scientific document", pages[0]["text"].lower())
 
+    @requires_tesseract
     def test_mixed_pdf_ocr_only_scan_page(self):
         """Restrict OCR to the scanned page in a mixed document."""
         pdf = pymupdf.open()

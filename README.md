@@ -206,7 +206,7 @@ python3 -m venv .venv
 node tests/test_polling.js
 ```
 
-Python tests use temporary data and simulated model responses; no llama.cpp is needed. Two tests require real Tesseract. Node.js is needed only for frontend tests; CI uses Node.js 22. [CI](.github/workflows/tests.yml) also checks syntax, an offline benchmark plan, Compose and Docker packaging.
+Python tests use temporary data and simulated model responses; no llama.cpp is needed. Two tests require real Tesseract: they are skipped locally when it is missing, but never in CI (`CI` set), where a missing Tesseract fails the build. Node.js is needed only for frontend tests; CI uses Node.js 22. [CI](.github/workflows/tests.yml) also checks syntax, an offline benchmark plan, Compose and Docker packaging.
 
 Maintained by [Guillaume Luquet / Thyrz73](https://github.com/Thyrz73). Report bugs through [GitHub issues](https://github.com/Thyrz73/llama-cpp-document-processor/issues), with the revision and relevant logs, excluding secrets and document content.
 
