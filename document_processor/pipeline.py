@@ -44,6 +44,8 @@ MAX_FINAL_NOTES = 4
 # Every merge level must reduce the number of notes, so this limit is only a
 # safety net: 32 levels of groups of 4 already exceed any realistic PDF.
 MAX_MERGE_LEVELS = 32
+# Any number in raw text, for the historical "missing numeric items" counter.
+RAW_NUMBER = re.compile(r"(?<!\w)[+-]?\d+(?:[.,]\d+)?")
 
 
 @dataclass(frozen=True)
@@ -444,10 +446,10 @@ class JobRun:
         check = reliability.audit(answer, self.evidence, source_pages)
         # Retain historical recall counters for benchmark/API compatibility.
         # These raw-string differences are not numerical or citation validation.
-        references = set(re.findall(r"\[Page (\d+)\]", text))
-        output_references = set(re.findall(r"\[Page (\d+)\]", answer))
-        numbers = set(re.findall(r"(?<!\w)[+-]?\d+(?:[.,]\d+)?", text))
-        output_numbers = set(re.findall(r"(?<!\w)[+-]?\d+(?:[.,]\d+)?", answer))
+        references = set(reliability.PAGE_REFERENCE.findall(text))
+        output_references = set(reliability.PAGE_REFERENCE.findall(answer))
+        numbers = set(RAW_NUMBER.findall(text))
+        output_numbers = set(RAW_NUMBER.findall(answer))
         model.current_metrics["quality_checks"] = {
             "source": "mechanical_warning_only", "semantic_validation": False,
             "warnings": len(check["issues"]),

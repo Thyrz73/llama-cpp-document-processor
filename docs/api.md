@@ -28,7 +28,7 @@ Missing jobs return 404. Report access returns 409 unless the job is done and 40
 
 The reader escapes raw HTML, rejects executable link schemes, disables images and sends a restrictive Content Security Policy. Previews over 1 MiB return an HTML page with status 413 and an original download link. The reader also provides localized HTML messages for missing, unreadable and unfinished reports. Download errors retain the JSON API format. No arbitrary file or intermediate artifact route is exposed.
 
-Job responses additionally include `report_name` (null for old jobs until first report access), `report_available` for completed jobs, and `question_custom` (`1` for explicitly customized instructions, `0` for known defaults, null when historical origin is unknown). `question` preserves the original submitted text, including whitespace; the model still receives the same trimmed instructions as before. Configuration snapshots and system prompts remain private.
+Job responses additionally include `report_name` (null for old jobs until first report access), `report_available` for completed jobs, and `question_custom` (`1` for explicitly customized instructions, `0` for known default instructions, including older jobs whose saved request is a default, null when an older job's origin is unknown). `question` preserves the original submitted text, including whitespace; the model still receives the same trimmed instructions as before. Configuration snapshots and system prompts remain private.
 
 ## Creating a job
 

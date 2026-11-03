@@ -86,9 +86,14 @@ def instruction(config, stage, question, extra=""):
     return text + "\nUser request: " + question + "\n" + extra
 
 
+def is_french(language):
+    """Tell whether a report language setting means French ("fr", "french" or "français")."""
+    return language.lower() in ("fr", "french", "français")
+
+
 def report_header(config, filename, pages, chunks, missing, ocr_pages):
     """Localize metadata without changing the stable Markdown output filename."""
-    french = config["report_language"].lower() in ("fr", "french", "français")
+    french = is_french(config["report_language"])
     title, page_label, chunk_label = (("Analyse de", "Pages PDF", "sections analysées")
                                      if french else ("Analysis of", "PDF pages", "analyzed chunks"))
     # A filename is untrusted text even though the browser renders it safely.

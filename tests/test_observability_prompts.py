@@ -64,13 +64,19 @@ class PromptLogTests(unittest.TestCase):
                 error TEXT DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""")
             con.execute("INSERT INTO jobs (id,filename,question,status,created_at,updated_at) VALUES (?,?,?,?,?,?)",
                         ("f" * 32, "old.pdf", "Saved legacy request", "done", jobs.utcnow(), jobs.utcnow()))
+            con.execute("INSERT INTO jobs (id,filename,question,status,created_at,updated_at) VALUES (?,?,?,?,?,?)",
+                        ("e" * 32, "old.pdf", app.FALLBACK_QUESTION, "done", jobs.utcnow(), jobs.utcnow()))
         with patch.object(app, "store", legacy):
             legacy.initialize()
             legacy.initialize()
             job = self.client.get("/api/jobs/" + "f" * 32).json
+            listed = {item["id"]: item for item in self.client.get("/api/jobs").json["jobs"]}
         self.assertEqual(job["question"], "Saved legacy request")
         self.assertIsNone(job["question_custom"])
         self.assertEqual(job["progress_percent"], 100)
+        # The server, not the browser, recognizes an old request that is a default instruction.
+        self.assertIsNone(listed["f" * 32]["question_custom"])
+        self.assertEqual(listed["e" * 32]["question_custom"], 0)
 
     def test_creation_download_preview_and_cancellation_logs_contain_no_prompt(self):
         secret = "NEVER_LOG_THIS_REQUEST"

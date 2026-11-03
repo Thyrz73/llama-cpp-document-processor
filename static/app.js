@@ -663,13 +663,8 @@ function renderJobs() {
     actions.append(liveButton);
     item.append(actions);
     // The saved request is the only user-configurable prompt; server prompts stay private.
-    if (
-      j.question && j.question_custom !== 0 &&
-      (j.question_custom === 1 || ![
-        catalog.en?.default_question, catalog.fr?.default_question,
-        "Analyze the entire document",
-      ].includes(j.question.trim()))
-    ) {
+    // The server sets question_custom to 0 for default instructions, old jobs included.
+    if (j.question && j.question_custom !== 0) {
       const details = el("details", undefined, "custom-prompt");
       details.open = promptExpanded.has(j.id);
       details.append(

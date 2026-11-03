@@ -92,7 +92,25 @@ class ProcessorFlask(Flask):
 app = ProcessorFlask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_MB * 1024 * 1024 + 65536
 TRANSLATIONS = json.loads((Path(__file__).parent / "static" / "translations.json").read_text(encoding="utf-8"))
-DEFAULT_QUESTIONS = {TRANSLATIONS[language]["default_question"] for language in ("en", "fr")} | {"Analyze the entire document"}
+# Used when a request omits the question; older interfaces also sent it.
+FALLBACK_QUESTION = "Analyze the entire document"
+DEFAULT_QUESTIONS = {TRANSLATIONS[language]["default_question"] for language in ("en", "fr")} | {FALLBACK_QUESTION}
+
+
+def is_default_question(question):
+    """Tell whether a request is one of the interface's default instructions."""
+    return question.strip() in DEFAULT_QUESTIONS
+
+
+def public_job(job):
+    """Apply the default-instructions rule to jobs saved before it was recorded.
+
+    Their question_custom stays null unless the request is a known default,
+    so the browser never needs its own copy of the default questions.
+    """
+    if job.get("question_custom") is None and job.get("question") and is_default_question(job["question"]):
+        job["question_custom"] = 0
+    return job
 
 
 def read_system_prompt():
@@ -216,7 +234,7 @@ def list_jobs():
     browser keeps polling while any job is queued or running.
     """
     jobs, has_active_jobs = store.list_jobs(100)
-    return jsonify(jobs=jobs, has_active_jobs=has_active_jobs)
+    return jsonify(jobs=[public_job(job) for job in jobs], has_active_jobs=has_active_jobs)
 
 
 @app.get("/api/jobs/<job_id>")
@@ -228,7 +246,7 @@ def job_info(job_id):
     config = store.load_config(job_id)
     if config:
         job["configuration"] = job_config.public_config(config)
-    return jsonify(job)
+    return jsonify(public_job(job))
 
 
 def delete_history_job(job_id):
@@ -284,7 +302,7 @@ def create_job():
     options = job_config.parse_options(request.form.get("options"))
     config = new_snapshot(options, cached_capabilities())
     uploaded = request.files.get("file")
-    question = request.form.get("question") or "Analyze the entire document"
+    question = request.form.get("question") or FALLBACK_QUESTION
     if not uploaded or not uploaded.filename:
         return jsonify(error="Select a PDF file", error_code="invalid_pdf"), 400
     if not question.strip() or len(question) > MAX_QUESTION_CHARS:
@@ -304,14 +322,14 @@ def create_job():
         if source.stat().st_size > MAX_UPLOAD_MB * 1024 * 1024:
             raise RequestEntityTooLarge()
         config["source_hash"] = file_hash(source)
-        store.create_job(job_id, filename, question, int(question.strip() not in DEFAULT_QUESTIONS), config)
+        store.create_job(job_id, filename, question, int(not is_default_question(question)), config)
     except Exception:
         source.unlink(missing_ok=True)
         directory.rmdir()
         raise
     worker.wake()
     event("job_created", job_id=job_id, filename=filename, bytes=source.stat().st_size,
-          profile=config["profile"], custom_prompt=question.strip() not in DEFAULT_QUESTIONS,
+          profile=config["profile"], custom_prompt=not is_default_question(question),
           chunk_tokens=config["chunk_tokens"], analysis_tokens=config["analysis_tokens"],
           merge_tokens=config["merge_tokens"], final_tokens=config["final_tokens"],
           report_language=config["report_language"])

@@ -11,6 +11,7 @@ import re
 import unicodedata
 
 from .config import fingerprint
+from .prompts import is_french
 
 VERSION = 1
 EVIDENCE_PROMPT_CHARS = 2400
@@ -20,6 +21,8 @@ QUANTITY = re.compile(rf"(?<![\w.,+−–-])(?P<value>{NUMBER})\s*(?P<unit>{UNIT
 ARROW = re.compile(rf"^\s*(?P<entity>[^:|\n]{{1,120}})\s*:\s*(?P<before>{NUMBER})\s*"
                    rf"(?P<u1>{UNIT})?\s*→\s*(?P<after>{NUMBER})\s*(?P<unit>{UNIT})\s*$")
 CITATION = re.compile(r"\[(?:pages?)\s+([^\]\n]*)\]", re.I)
+# Exact "[Page N]" marker written by extraction.make_chunks() and expected in model output.
+PAGE_REFERENCE = re.compile(r"\[Page (\d+)\]")
 # Keep extracts, not machine assertions about their meaning. Deliberately narrow.
 _RESERVE_PATTERNS = {
     "fiction": r"\bficti[fv]|\bfictional\b|\binvent[ée]es?\b",
@@ -340,7 +343,7 @@ def numeric_checks(answer, evidence, input_pages):
             continue
         candidates = [item for item in evidence['comparisons'] if item['page'] in input_pages
                       and _entity_in_line(item['entity'], line)]
-        refs = [int(m[1]) for m in re.finditer(r"\[Page (\d+)\]", line)]
+        refs = [int(m[1]) for m in PAGE_REFERENCE.finditer(line)]
         if refs:
             candidates = [item for item in candidates if item['page'] in refs]
         # Duplicate source rows from repeat headers must not resolve ambiguity.
@@ -421,7 +424,7 @@ def quote_checks(answer, evidence, input_pages):
     items += [(item['page'], item['raw']) for item in evidence['comparisons']]
     issues = []
     for line in answer.splitlines():
-        refs = {int(m[1]) for m in re.finditer(r"\[Page (\d+)\]", line)}
+        refs = {int(m[1]) for m in PAGE_REFERENCE.finditer(line)}
         if not refs:
             continue
         for match in re.finditer(r'«([^»]+)»|"([^"\n]+)"|“([^”]+)”', line):
@@ -478,7 +481,7 @@ MESSAGES = {
 
 def report_warnings(checks, language):
     """Publish localized warnings, never silently remove invalid citations/results."""
-    messages = MESSAGES['fr' if language.lower() in ('fr', 'french', 'français') else 'en']
+    messages = MESSAGES['fr' if is_french(language) else 'en']
     final = checks['steps'].get('rapport_final.md', {})
     issues = final.get('issues', [])
     earlier = sum(len(check.get('issues', [])) for name, check in checks['steps'].items() if name != 'rapport_final.md')
