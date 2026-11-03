@@ -1,8 +1,13 @@
 # Document Processor for llama.cpp
 
-A self-hosted PDF analysis app using an **existing llama.cpp server**. Upload a PDF, ask a question and view or download a Markdown report with page references. One worker processes one document at a time.
+A self-hosted PDF analysis app for an **existing llama.cpp server**. Upload a PDF, ask a question and get a Markdown report whose claims cite PDF pages as `[Page N]`. The app does not install a model or reconfigure llama.cpp.
 
-The app includes English/French interface controls, report language and detail settings, selective OCR, live output, cancellation and saved progress. It does not install a model or reconfigure llama.cpp.
+- Selective OCR (English and French) for scanned pages, with PyMuPDF and pypdf for text PDFs.
+- Performance profiles, report language and detail level, all saved with each analysis.
+- Live output, cancellation and retries that reuse finished steps.
+- Mechanical checks of page citations and figures, reported as warnings.
+- English/French interface, history with deletion, light and dark themes.
+- Built for small machines: one worker, and the processor itself needs no GPU, embeddings or extra services; its container is limited to 512 MB and 0.75 CPU by default.
 
 ## Quick start
 
@@ -69,21 +74,13 @@ Keep these same `-f` options for later Compose commands. The base installation n
 3. Follow progress or open live output. Closing the browser does not stop the analysis.
 4. Choose **View** to read the formatted report in a new tab, or **Download** to save the original Markdown.
 
-Active analyses appear first in a highlighted section; history appears below a separate heading. Saved custom analysis instructions are available in a collapsible block on each job, during processing and in history. Line breaks and the complete submitted text are preserved. Default instructions do not create a custom-prompt block. Older jobs show their saved request with a neutral label when its origin is unknown; server system prompts and task templates stay private.
+- **Cancel** stops a queued analysis at once and a running one at its next safe point.
+- **Retry** restarts a failed or cancelled analysis with its original settings and reuses its finished steps. Create a new analysis to change settings or prompts.
+- **History** keeps every analysis; finished ones can be deleted one by one or in bulk.
 
-Reports use a deterministic descriptive download name such as `Consommation_energetique_des_batiments_2025-2026_rapport.md`, derived from an existing Markdown heading. Generic headings are skipped; the fallback is `<original PDF stem>_rapport.md`. Names use portable ASCII and stay within 100 characters. No model call or PDF reanalysis is needed. The internal `rapport_final.md` path stays unchanged, and older reports remain supported.
+See [using the interface in detail](docs/usage.md) for report names, the reader, live output and history.
 
-The server-rendered reader supports headings, lists, tables, quotes, links and code, with selectable Unicode text and the saved light/dark theme. Raw HTML is escaped, executable link schemes are rejected and images are disabled. A restrictive Content Security Policy blocks embedded resources. Preview is limited to **1 MiB**; larger files remain downloadable without loading the full file into application memory. Empty reports show an explicit message and can still be downloaded. Only completed final reports are exposed; private configurations and intermediate pipeline files are not published.
-
-**Cancel** stops queued jobs immediately and requests cancellation of running work. OCR finishes its current subprocess first; a remote model may take longer to stop. **Retry** is available for failed or cancelled jobs and keeps their original settings. Create a new analysis to change budgets, language or prompts.
-
-If a cancelled or timed-out HTTP reader is still closing, the next generation waits for it instead of failing subsequent jobs. This wait remains cancellable and does not consume the next generation's time limit. A response arriving after cancellation is closed before reading its body.
-
-The interface initially selects `low`, automatic report language and standard detail. Interface language and theme are saved in the browser; changing them does not translate existing reports. Automatic report language follows the request, not the interface language.
-
-Jobs refresh every six seconds while work is active, with backoff on errors. Live output refreshes every 1.7 seconds while its panel is open. Both pause when the tab is hidden. The list shows the latest 100 jobs; older jobs remain stored.
-
-## Analysis and prompts
+## How it works
 
 ```text
 PDF → text extraction / selective OCR → sections with [Page N] markers
@@ -103,7 +100,7 @@ Page markers use PDF page positions starting at 1, which may differ from printed
 
 Edit the private `config/system_prompt.txt` for installation-wide instructions. The example file is a starting point: updates do not overwrite your private copy. Each new job saves its system prompt and task templates. **Existing jobs, including retries, keep their saved prompts.**
 
-## Profiles and configuration
+## Configuration
 
 Profiles change application token budgets. They do not change model, threads, GPU, slots or KV cache. All remain experimental and sequential.
 
@@ -151,7 +148,7 @@ Settings are validated at startup. A non-integer or out-of-range number, a boole
 
 Reasoning controls require a verified model/template adapter. `chat_template` sends `enable_thinking`; `prompt` adds `/think` or `/no_think`. Hiding reasoning in the interface does not disable its generation. See [engine tuning](docs/engine-tuning.md).
 
-## Saved data and updates
+## Data, updates and backups
 
 ```text
 data/jobs.sqlite3                     # Jobs, private settings, attempts and metrics
@@ -163,17 +160,15 @@ data/jobs/<id>/
   previous_reports/                   # Earlier published reports, when replaced
 ```
 
-On restart, interrupted running jobs return to the queue unless cancellation was requested. Compatible completed steps are reused after dependency and file-hash checks. Failed/cancelled jobs wait for Retry. Old jobs without saved settings are recomputed with a warning. Files and metrics have no automatic cleanup, and there is no delete action.
-
-Startup applies numbered SQLite migrations ([database.py](document_processor/database.py)): each runs once, in its own transaction, and only adds tables, columns or indexes. A database already upgraded by a newer version stops startup with a `Database error: …` message instead of running with an unknown schema; restore a matching backup before downgrading. Report names of older jobs are computed and saved on first view or download; listing history does not read Markdown contents.
-
-Preserve `.env`, `config/system_prompt.txt` and `data/` across updates. Stop the processor before copying SQLite and its WAL/SHM files. Back up the old source/image too if you need rollback. Follow [migration and rollback](docs/migration-v2.md).
-
-Never commit private configuration, documents or reports. The supplied ignore files exclude common private paths; check what you stage.
+- After a restart, interrupted analyses return to the queue unless their cancellation was requested. Compatible finished steps are reused after dependency and file-hash checks.
+- Old jobs without saved settings are recomputed with a warning. Files and metrics are kept until the analysis is deleted from the history; there is no automatic cleanup.
+- Startup applies numbered SQLite migrations ([database.py](document_processor/database.py)): each runs once, in its own transaction, and only adds tables, columns or indexes. A database already upgraded by a newer version stops startup with a `Database error: …` message; restore a matching backup before downgrading.
+- Preserve `.env`, `config/system_prompt.txt` and `data/` across updates. Stop the processor before copying SQLite and its WAL/SHM files, back up the old source or image too if you may need to roll back, and follow [migration and rollback](docs/migration-v2.md).
+- Never commit private configuration, documents or reports. The supplied ignore files exclude common private paths; check what you stage.
 
 ## Troubleshooting and limits
 
-Application events go to stdout/stderr for `docker compose logs -f`: startup, recovery, submissions, extraction/OCR, section/merge/final steps, reuse, cancellation and report access. Events include job IDs, durations measured with a monotonic clock, progress and token usage when the backend supplies it. Logs contain neither PDF text nor full prompts/model responses. Tracebacks retain frame locations while omitting source lines and private exception messages. Streaming updates are never logged, including at DEBUG. Existing on-disk generation diagnostics remain separate. Docker log rotation stays under deployment control.
+Logs go to `docker compose logs -f`; they never contain PDF text, prompts or model output. See [logs, metrics and checks](docs/usage.md#logs-metrics-and-checks).
 
 ```bash
 docker compose ps
@@ -189,15 +184,15 @@ curl -f http://127.0.0.1:9932/api/health
 - **Garbled accents:** see [UTF-8 handling and old reports](docs/utf8-correction.md).
 - **Empty reasoning panel:** the backend may not emit it. Live output shows only the current/latest pass and may be incomplete.
 
-OCR recognizes text; it does not interpret charts or images. Columns and tables may extract in the wrong order. Model output can omit or invent facts: check important claims and citations against the PDF.
+Known limits:
 
-There are no accounts or per-user access controls. Anyone with application access can read jobs, reports and explicitly requested live reasoning. Keep the service private or use an authenticated reverse proxy.
-
-Metrics report application durations and optional backend usage/timings. Unknown values stay unknown; first-event latency is not engine prefill time. Numeric/page-reference counts are warnings, not factual scores. See [API details](docs/api.md) and [benchmark instructions](docs/engine-tuning.md).
-
-Documentary checks retain physical page/passage provenance separately from model notes. They flag nonexistent pages, some exact-quotation page mismatches and possible entity/delta errors in explicitly structured numeric rows. Source reserves and figures are carried through merges in a bounded evidence block; omitted extracts remain in private `source_evidence.json`. Detailed checks are saved in `quality_checks.json`, and warnings appear in the downloaded report. These checks neither repair numbers automatically nor verify scientific correctness or every citation. All four profiles use the same checks without an additional LLM pass. See the [implementation, limits and validation report](docs/documentary-reliability.md).
+- OCR recognizes text; it does not interpret charts or images. Columns and tables may extract in the wrong order.
+- Model output can omit or invent facts: check important claims and citations against the PDF. Automatic checks are warnings, not proof.
+- There are no accounts or per-user access controls. Anyone who can reach the app can read every job, report and requested live reasoning: keep it private or behind an authenticated reverse proxy.
 
 ## Development
+
+Contributions are welcome. Start with the [architecture guide](docs/architecture.md): it describes the code structure, the life of a job and where to make common changes.
 
 Docker and CI use Python 3.12. On Ubuntu/Debian, install `python3-venv`, `tesseract-ocr`, `tesseract-ocr-eng` and `tesseract-ocr-fra`, then:
 
@@ -221,6 +216,15 @@ Dependencies are declared with version ranges in `requirements.in` (runtime) and
 ```
 
 The Docker base image is pinned by digest. [Dependabot](.github/dependabot.yml) proposes weekly updates for Python packages, the base image and GitHub Actions on `develop`.
+
+## Documentation
+
+- [Architecture](docs/architecture.md): modules, data flow, design rules and common changes.
+- [Using the interface in detail](docs/usage.md): history, reports, cancellation, live output, logs and metrics.
+- [API](docs/api.md): routes, statuses, errors, retries and history deletion.
+- [Engine tuning and benchmarks](docs/engine-tuning.md).
+- [Documentary reliability](docs/documentary-reliability.md): what the automatic checks verify, and their limits.
+- [UTF-8 handling](docs/utf8-correction.md) and [migration and rollback](docs/migration-v2.md).
 
 Maintained by [Guillaume Luquet / Thyrz73](https://github.com/Thyrz73). Report bugs through [GitHub issues](https://github.com/Thyrz73/llama-cpp-document-processor/issues), with the revision and relevant logs, excluding secrets and document content.
 

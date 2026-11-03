@@ -12,7 +12,7 @@ Record the deployed build, model/hash, quantization, template, context per slot 
 
 ## Application settings
 
-The browser initially selects Low: section input 3000, analysis output 3072, merge output 2048 and final output 3072 tokens. See [all profiles](../README.md#profiles-and-configuration). API jobs without a profile use environment budgets instead.
+The browser initially selects Low: section input 3000, analysis output 3072, merge output 2048 and final output 3072 tokens. See [all profiles](../README.md#configuration). API jobs without a profile use environment budgets instead.
 
 Change one setting at a time, using fresh jobs:
 

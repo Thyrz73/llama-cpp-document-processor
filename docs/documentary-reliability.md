@@ -1,5 +1,7 @@
 # Fiabilité documentaire — audit et compte rendu d’implémentation
 
+> Ce rapport décrit le code au moment de l’audit. Les emplacements cités (`app.py`, `run`, `generate`…) ont été réorganisés depuis : voir l’[architecture actuelle](architecture.md).
+
 Validation locale du 2 novembre 2026. Aucun déploiement, appel à un modèle réel, changement de serveur, commit ou push.
 
 ## Diagnostic de l’existant
