@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import patch
 
 import app
-from document_processor import jobs
+from document_processor import files
 from scripts import benchmark, check_jobs
 
 
@@ -46,11 +46,11 @@ class ToolTests(unittest.TestCase):
                 response = app.app.test_client().post("/api/jobs", data={
                     "file": (io.BytesIO(b"%PDF-test"), "example.pdf")})
                 identifier = response.json["id"]
-                before = {path: jobs.file_hash(path) for path in root.rglob("*") if path.is_file()}
+                before = {path: files.file_hash(path) for path in root.rglob("*") if path.is_file()}
                 result = check_jobs.inspect(root)
                 self.assertEqual((result["snapshots_valid"], result["integrity_errors"]), (1, 0))
                 for path, digest in before.items():
-                    self.assertEqual(jobs.file_hash(path), digest)
+                    self.assertEqual(files.file_hash(path), digest)
                 (app.job_dir(identifier) / "source.pdf").write_bytes(b"changed")
                 self.assertEqual(check_jobs.inspect(root)["integrity_errors"], 1)
 

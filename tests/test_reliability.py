@@ -11,7 +11,7 @@ import pymupdf
 
 import app
 from document_processor import extraction, profiles, prompts, reliability as r
-from document_processor.model_client import ModelError
+from document_processor.errors import ModelError
 
 
 TABLE = """Bâtiment | Janvier–mars 2025 | Janvier–mars 2026 | Variation

@@ -8,7 +8,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from document_processor.config import fingerprint
-from document_processor.jobs import file_hash
+from document_processor.files import file_hash
 
 
 def inspect(data):

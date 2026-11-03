@@ -9,8 +9,8 @@ from unittest.mock import patch
 
 import app
 from document_processor import config, extraction, jobs, pipeline
-from document_processor.errors import ProcessingError
-from document_processor.model_client import ModelError, Cancelled
+from document_processor.errors import Cancelled, ModelError, ProcessingError
+from document_processor.files import atomic_json
 
 
 class FakeModel(app.ModelClient):
@@ -335,7 +335,7 @@ class V2Tests(unittest.TestCase):
     def test_live_and_download_do_not_generate_and_reasoning_is_opt_in(self):
         identifier = self.create()
         directory = app.job_dir(identifier)
-        app.atomic_json(directory / "live_preview.json", {"content": "Answer", "reasoning": "PRIVATE_REASONING",
+        atomic_json(directory / "live_preview.json", {"content": "Answer", "reasoning": "PRIVATE_REASONING",
                                                          "reasoning_chars": 17, "active": True})
         with patch.object(app.ModelClient, "complete", side_effect=AssertionError("No generation")):
             self.assertNotIn("PRIVATE_REASONING", self.client.get(f"/api/jobs/{identifier}/live").get_data(as_text=True))

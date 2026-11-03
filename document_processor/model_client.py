@@ -13,18 +13,7 @@ from typing import Any
 import requests
 
 from .config import ConfigurationError
-from .errors import ProcessingError
-
-
-class ModelError(ProcessingError):
-    """Report a model backend or generation failure without remote response bodies."""
-
-
-class Cancelled(ModelError):
-    """Signal cooperative cancellation without committing an incomplete artifact."""
-
-    def __init__(self):
-        super().__init__("cancelled", "Analysis cancelled.")
+from .errors import Cancelled, ModelError
 
 
 @dataclass

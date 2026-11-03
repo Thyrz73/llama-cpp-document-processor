@@ -19,8 +19,7 @@ os.environ.setdefault("SYSTEM_PROMPT_FILE", str(Path(__file__).resolve().parents
 
 import app
 from document_processor import config, extraction, jobs, prompts
-from document_processor.errors import ProcessingError
-from document_processor.model_client import ModelError
+from document_processor.errors import ModelError, ProcessingError
 
 SETTINGS = app.runtime_defaults()["extraction"]
 
@@ -293,7 +292,7 @@ class EncodingPipelineTests(unittest.TestCase):
             return config.fingerprint(value)
 
         with patch("document_processor.pipeline.fingerprint", side_effect=old_fingerprint), \
-             patch("document_processor.jobs.fingerprint", side_effect=old_fingerprint):
+             patch("document_processor.artifacts.fingerprint", side_effect=old_fingerprint):
             self.run_job(identifier, FRENCH, adapter)
         report = app.job_dir(identifier) / "rapport_final.md"
         original = report.read_bytes()

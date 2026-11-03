@@ -7,9 +7,10 @@ import time
 from typing import Any
 
 from . import extraction, jobs, prompts, reliability
+from .artifacts import Artifacts
 from .config import fingerprint
-from .errors import ProcessingError
-from .model_client import Cancelled
+from .errors import Cancelled, ProcessingError
+from .files import atomic_json, atomic_text, file_hash
 from .observability import event
 from .reports import report_filename
 
@@ -47,18 +48,18 @@ def run(job_id, runtime):
         # Historic artifacts remain untouched. Their original settings are unknowable.
         config = r.new_snapshot({})
         config["warnings"].append("legacy_recomputed")
-        config["source_hash"] = jobs.file_hash(directory / "source.pdf")
+        config["source_hash"] = file_hash(directory / "source.pdf")
         with r.db_conn() as con:
             jobs.save_config(con, job_id, config)
     if config.get("pipeline_version") != 2:
         raise ProcessingError("pipeline_incompatible", "This job requires a different pipeline version. Start a new analysis.")
-    if jobs.file_hash(directory / "source.pdf") != config["source_hash"]:
+    if file_hash(directory / "source.pdf") != config["source_hash"]:
         raise ProcessingError("source_changed", "The source PDF changed. Start a new analysis.")
     with r.db_conn() as con:
         attempts = con.execute("SELECT COUNT(*) FROM job_runs WHERE job_id=?", (job_id,)).fetchone()[0]
     if attempts >= config["max_attempts"]:
         raise ProcessingError("retry_limit", "The retry limit was reached. Start a new analysis.")
-    artifacts = jobs.Artifacts(directory, config, r.atomic_json, r.atomic_text)
+    artifacts = Artifacts(directory, config)
     recorder = jobs.Recorder(r.db_conn, job_id, job.get("queued_at") or job["created_at"])
     model = r.ModelClient(config)
     model.cancel_check = lambda: r.cancellation_requested(job_id)
@@ -84,7 +85,7 @@ def run(job_id, runtime):
         event("job_phase", logging.DEBUG if code in ("extraction", "ocr") else logging.INFO,
               job_id=job_id, stage=code, progress_percent=percent, **args)
         if r.LIVE_OUTPUT_ENABLED and code != "saving":
-            r.atomic_json(preview_path, {"phase": label, "phase_code": code, "phase_args": args,
+            atomic_json(preview_path, {"phase": label, "phase_code": code, "phase_args": args,
                                         "content": "", "reasoning": "", "active": False,
                                         "updated_at": jobs.now(), "metrics": {}})
 
@@ -106,7 +107,7 @@ def run(job_id, runtime):
             if cached is not None:
                 recorder.end(handle, "reused", {"artifact_reused": True})
                 if r.LIVE_OUTPUT_ENABLED and stage in ("section", "merge", "final"):
-                    r.atomic_json(preview_path, {"phase": phase_label, "phase_code": stage,
+                    atomic_json(preview_path, {"phase": phase_label, "phase_code": stage,
                         "phase_args": phase_args, "content": cached[-r.LIVE_PREVIEW_CHARS:],
                         "content_chars": len(cached), "reasoning": "", "reasoning_chars": 0,
                         "active": False, "updated_at": jobs.now(), "metrics": {"artifact_reused": True}})
@@ -142,7 +143,7 @@ def run(job_id, runtime):
             if not r.LIVE_OUTPUT_ENABLED:
                 return
             stats = dict(model.current_metrics)
-            r.atomic_json(preview_path, {
+            atomic_json(preview_path, {
                 "phase": phase_label, "phase_code": stage, "phase_args": phase_args,
                 "content": content[-r.LIVE_PREVIEW_CHARS:], "reasoning": reasoning[-r.LIVE_PREVIEW_CHARS:],
                 "content_chars": stats.get("content_chars", len(content)),
@@ -177,7 +178,7 @@ def run(job_id, runtime):
         if evidence_limit is not None:
             check["evidence_prompt_limit"] = evidence_limit
         quality["steps"][name] = check
-        r.atomic_json(artifacts.root / "quality_checks.json", quality)
+        atomic_json(artifacts.root / "quality_checks.json", quality)
         return check
 
     status = "failed"
@@ -299,9 +300,9 @@ def run(job_id, runtime):
             if previous_report.is_file():
                 archive = directory / "previous_reports"
                 archive.mkdir(exist_ok=True)
-                r.atomic_text(archive / (jobs.file_hash(previous_report) + ".md"), previous_report.read_text(encoding="utf-8"))
+                atomic_text(archive / (file_hash(previous_report) + ".md"), previous_report.read_text(encoding="utf-8"))
             report_text = header + final + "\n" + reliability.report_warnings(quality, config["report_language"])
-            r.atomic_text(directory / "rapport_final.md", report_text)
+            atomic_text(directory / "rapport_final.md", report_text)
             name = report_filename(final, job["filename"])
             model.check_cancelled()
             r.update_job(job_id, status="done", stage="Analysis completed", phase_code="done", error="", error_code="",

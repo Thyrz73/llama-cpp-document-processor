@@ -11,3 +11,14 @@ class ProcessingError(RuntimeError):
     def __init__(self, code, message):
         super().__init__(message)
         self.code = code
+
+
+class ModelError(ProcessingError):
+    """Report a model backend or generation failure without remote response bodies."""
+
+
+class Cancelled(ModelError):
+    """Signal cooperative cancellation without committing an incomplete artifact."""
+
+    def __init__(self):
+        super().__init__("cancelled", "Analysis cancelled.")

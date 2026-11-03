@@ -8,7 +8,8 @@ from unittest.mock import patch
 
 import app
 from document_processor import model_client
-from document_processor.model_client import Cancelled, ModelError, ThinkingSplitter, collect_metrics
+from document_processor.errors import Cancelled, ModelError
+from document_processor.model_client import ThinkingSplitter, collect_metrics
 
 
 class Stream:

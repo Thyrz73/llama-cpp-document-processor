@@ -13,8 +13,7 @@ import pymupdf
 import app
 from document_processor import extraction
 from document_processor.config import ConfigurationError
-from document_processor.errors import ProcessingError
-from document_processor.model_client import ModelError
+from document_processor.errors import ModelError, ProcessingError
 
 ROOT = Path(app.__file__).parent
 

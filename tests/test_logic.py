@@ -9,8 +9,9 @@ os.environ['LLAMA_API_KEY']='mock'
 os.environ['SYSTEM_PROMPT_FILE']=str(Path(__file__).resolve().parents[1]/'config/system_prompt.example.txt')
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from app import atomic_text, init_db, get_job, ModelClient, output_language_instruction
+from app import init_db, get_job, ModelClient, output_language_instruction
 from document_processor.extraction import split_with_page, make_chunks
+from document_processor.files import atomic_text
 
 CHUNK_BUDGET = 3000
 

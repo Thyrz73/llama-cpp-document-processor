@@ -31,9 +31,10 @@ from typing import Any
 
 from document_processor import config as job_config, jobs as job_store, profiles, prompts, pipeline
 from document_processor import environment, reports
-from document_processor.observability import configure_logging, current_job_id, event, failure, job_context
-from document_processor.errors import ProcessingError
-from document_processor.model_client import ModelClient as BackendClient, Cancelled
+from document_processor.observability import configure_logging, event, failure, job_context
+from document_processor.errors import Cancelled, ProcessingError
+from document_processor.files import file_hash
+from document_processor.model_client import ModelClient as BackendClient
 from flask import Flask, abort, jsonify, render_template, request, send_file, g, make_response
 from urllib.parse import urlsplit
 from waitress import serve
@@ -247,35 +248,6 @@ def job_dir(job_id):
         event("invalid_job_path", logging.WARNING, job_id=job_id, status="rejected")
         abort(404)
     return directory
-
-
-def atomic_text(path, text):
-    """Atomically replace a file with UTF-8 text through a temporary file.
-
-    path is a path or Path object whose parent must already exist. Write to
-    a neighboring file ending in .tmp first, then move it with os.replace so
-    readers never see partial content. Return no value and propagate I/O
-    errors.
-    """
-    path = Path(path)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    try:
-        tmp.write_text(text, encoding="utf-8")
-        os.replace(tmp, path)
-    except OSError as exc:
-        event("artifact_write_failed", logging.ERROR, artifact=path.name,
-              job_id=current_job_id(), error_type=type(exc).__name__)
-        raise
-
-
-def atomic_json(path, data):
-    """Atomically write data as UTF-8 JSON to path.
-
-    data must be JSON serializable. Preserve Unicode characters, then
-    delegate the write to atomic_text; the parent directory must already
-    exist.
-    """
-    atomic_text(path, json.dumps(data, ensure_ascii=False, indent=2))
 
 
 def read_system_prompt():
@@ -585,7 +557,7 @@ def create_job():
         uploaded.save(directory / "source.pdf")
         if (directory / "source.pdf").stat().st_size > MAX_UPLOAD_MB * 1024 * 1024:
             raise RequestEntityTooLarge()
-        config["source_hash"] = job_store.file_hash(directory / "source.pdf")
+        config["source_hash"] = file_hash(directory / "source.pdf")
         with db_conn() as con:
             con.execute("""INSERT INTO jobs (id, filename, question, status, stage, created_at, updated_at, question_custom)
               VALUES (?, ?, ?, 'queued', 'Queued', ?, ?, ?)""",
