@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import app
-from document_processor import config, jobs, pipeline
+from document_processor import config, extraction, jobs, pipeline
 from document_processor.errors import ProcessingError
 from document_processor.model_client import ModelError, Cancelled
 
@@ -79,8 +79,8 @@ class V2Tests(unittest.TestCase):
         app.update_job(identifier, status="running")
         chunks = [{"text": "Sample measurements [Page 1]", "pages": [1]} for _ in range(count)]
         with patch.object(app, "ModelClient", FakeModel), \
-             patch.object(app, "extract_pdf", return_value=([{"page": 1, "text": "Measurements"}], 1, [], [])), \
-             patch.object(app, "make_chunks", return_value=chunks):
+             patch.object(extraction, "extract_pdf", return_value=([{"page": 1, "text": "Measurements"}], 1, [], [])), \
+             patch.object(extraction, "make_chunks", return_value=chunks):
             app.analyze_job(identifier)
 
     def test_profiles_are_distinct_and_do_not_change_detail_or_concurrency(self):

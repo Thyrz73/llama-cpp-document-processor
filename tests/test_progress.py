@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import app
+from document_processor import extraction
 
 
 class StopWorker(BaseException):
@@ -146,7 +147,7 @@ class ProgressTests(unittest.TestCase):
                     update(identifier, **values)
                     progress.append(self.stored_job(identifier)["progress_percent"])
 
-                def extraction(path, progress, settings=None):
+                def extract(path, settings, progress):
                     """Simulate one page and call progress."""
                     progress("Extracting text: page 1/1")
                     return [{"page": 1, "text": "Example text"}], 1, [], []
@@ -154,8 +155,8 @@ class ProgressTests(unittest.TestCase):
                 with patch.object(app, "read_system_prompt", return_value="Test instructions"), \
                      patch.object(app, "job_dir", return_value=directory), \
                      patch.object(app, "ModelClient") as model_class, \
-                     patch.object(app, "extract_pdf", side_effect=extraction), \
-                     patch.object(app, "make_chunks", return_value=[
+                     patch.object(extraction, "extract_pdf", side_effect=extract), \
+                     patch.object(extraction, "make_chunks", return_value=[
                          {"pages": [1], "text": "Example section"} for _ in range(5)]), \
                      patch.object(app, "update_job", side_effect=record_update), \
                      patch.object(app.worker_wakeup, "wait", side_effect=StopWorker):

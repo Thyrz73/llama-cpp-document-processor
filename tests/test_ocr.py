@@ -6,7 +6,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 import pymupdf
-from app import extract_pdf
+import app
+from document_processor.extraction import extract_pdf
+
+SETTINGS = app.runtime_defaults()["extraction"]
 
 # CI installs Tesseract, so a missing binary there must fail instead of skipping.
 requires_tesseract = unittest.skipUnless(
@@ -54,8 +57,8 @@ class TestExtraction(unittest.TestCase):
         self.write_text_page(pdf, "This is a searchable document with real letters and words about geophysics.")
         pdf.save(self.file)
         pdf.close()
-        with patch("app.ocr_page", side_effect=AssertionError("OCR should not run")):
-            pages, count, missing, ocr = extract_pdf(self.file)
+        with patch("document_processor.extraction.ocr_page", side_effect=AssertionError("OCR should not run")):
+            pages, count, missing, ocr = extract_pdf(self.file, SETTINGS)
         self.assertEqual((count, ocr, missing), (1, [], []))
         self.assertIn("searchable document", pages[0]["text"])
 
@@ -66,7 +69,7 @@ class TestExtraction(unittest.TestCase):
         self.insert_scan_page(pdf, "Scientific document analysis. Field data and important results.")
         pdf.save(self.file)
         pdf.close()
-        pages, count, missing, ocr = extract_pdf(self.file)
+        pages, count, missing, ocr = extract_pdf(self.file, SETTINGS)
         self.assertEqual(count, 1)
         self.assertEqual(ocr, [1])
         self.assertEqual(missing, [])
@@ -80,7 +83,7 @@ class TestExtraction(unittest.TestCase):
         self.insert_scan_page(pdf, "Numerical model results are recorded here with a clear conclusion.")
         pdf.save(self.file)
         pdf.close()
-        pages, count, missing, ocr = extract_pdf(self.file)
+        pages, count, missing, ocr = extract_pdf(self.file, SETTINGS)
         self.assertEqual((count, missing, ocr), (2, [], [2]))
         self.assertEqual([p["page"] for p in pages], [1, 2])
 

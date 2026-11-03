@@ -6,7 +6,7 @@ import re
 import time
 from typing import Any
 
-from . import jobs, prompts, reliability
+from . import extraction, jobs, prompts, reliability
 from .config import fingerprint
 from .errors import ProcessingError
 from .model_client import Cancelled
@@ -200,8 +200,8 @@ def run(job_id, runtime):
                 args = {"index": int(matched[1]), "total": int(matched[2])} if matched else {}
                 phase("ocr" if label.startswith("OCR") else "extraction", label,
                       2 + round(5 * args.get("index", 0) / max(1, args.get("total", 1))), **args)
-            pages, count, missing, ocr = r.extract_pdf(directory / "source.pdf", progress=progress,
-                                                      settings=config["extraction"])
+            pages, count, missing, ocr = extraction.extract_pdf(directory / "source.pdf", config["extraction"],
+                                                               progress=progress)
             return json.dumps({"pages": pages, "page_count": count, "missing": missing, "ocr_pages": ocr}, ensure_ascii=False)
 
         extracted = json.loads(saved_step("extracted.json", "extraction",
@@ -219,7 +219,7 @@ def run(job_id, runtime):
         chunks = json.loads(saved_step("chunks.json", "chunking",
                             {"extracted": fingerprint(extracted), "budget": config["chunk_tokens"], "identity": identity,
                              "chunk_format_version": 2},
-                            lambda: json.dumps(r.make_chunks(pages, model, budget=config["chunk_tokens"]), ensure_ascii=False)))
+                            lambda: json.dumps(extraction.make_chunks(pages, model, config["chunk_tokens"]), ensure_ascii=False)))
         if not chunks:
             raise ProcessingError("empty_document", "Document contains no analyzable text.")
         r.update_job(job_id, total_chunks=len(chunks), progress_percent=10)

@@ -9,7 +9,10 @@ os.environ['LLAMA_API_KEY']='mock'
 os.environ['SYSTEM_PROMPT_FILE']=str(Path(__file__).resolve().parents[1]/'config/system_prompt.example.txt')
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from app import split_with_page, make_chunks, atomic_text, init_db, get_job, ModelClient, output_language_instruction
+from app import atomic_text, init_db, get_job, ModelClient, output_language_instruction
+from document_processor.extraction import split_with_page, make_chunks
+
+CHUNK_BUDGET = 3000
 
 class MockTokenizer:
     """Simulate tokens by counting words."""
@@ -32,9 +35,9 @@ class TestLogic(unittest.TestCase):
         """Verify the section budget and page references."""
         pages=[{'page':1,'text':' '.join('apple' for _ in range(5500))},
                {'page':2,'text':' '.join('pear' for _ in range(700))}]
-        chunks=make_chunks(pages, MockTokenizer())
+        chunks=make_chunks(pages, MockTokenizer(), CHUNK_BUDGET)
         self.assertGreaterEqual(len(chunks), 2)
-        self.assertTrue(all(MockTokenizer().tokenize(x['text'])<=__import__("app").CHUNK_TOKENS for x in chunks))
+        self.assertTrue(all(MockTokenizer().tokenize(x['text'])<=CHUNK_BUDGET for x in chunks))
         self.assertTrue(any(2 in x['pages'] for x in chunks))
     def test_atomic_file(self):
         """Verify the contents of the replaced file."""

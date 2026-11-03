@@ -11,6 +11,7 @@ from unittest.mock import patch
 import pymupdf
 
 import app
+from document_processor import extraction
 from document_processor.config import ConfigurationError
 from document_processor.errors import ProcessingError
 from document_processor.model_client import ModelError
@@ -39,7 +40,7 @@ class ExtractionErrorTests(unittest.TestCase):
 
     def assertCode(self, code, path, **settings):
         with self.assertRaises(ProcessingError) as raised:
-            app.extract_pdf(path, settings={**self.settings, **settings})
+            extraction.extract_pdf(path, {**self.settings, **settings})
         self.assertEqual(raised.exception.code, code)
 
     def test_unreadable_pdf(self):

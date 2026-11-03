@@ -10,7 +10,7 @@ from unittest.mock import patch
 import pymupdf
 
 import app
-from document_processor import profiles, prompts, reliability as r
+from document_processor import extraction, profiles, prompts, reliability as r
 from document_processor.model_client import ModelError
 
 
@@ -61,7 +61,7 @@ class ReferenceTests(unittest.TestCase):
         class Tokenizer:
             def tokenize(self, text):
                 return len(text.split())
-        chunks = app.make_chunks([{'page': 1, 'text': 'Voir [Page 99].'}], Tokenizer())
+        chunks = extraction.make_chunks([{'page': 1, 'text': 'Voir [Page 99].'}], Tokenizer(), 3000)
         self.assertEqual(chunks[0]['pages'], [1])
         self.assertEqual(chunks[0]['parts'], [{'page': 1, 'text': 'Voir [Page 99].'}])
 
@@ -108,8 +108,8 @@ class ReferenceTests(unittest.TestCase):
                 pdf.new_page()
                 pdf.new_page()
                 pdf.save(path)
-            with patch.object(app, 'ocr_page', side_effect=[TABLE, '']):
-                pages, count, missing, ocr = app.extract_pdf(path, settings={**app.runtime_defaults()['extraction'], 'enabled': True})
+            with patch.object(extraction, 'ocr_page', side_effect=[TABLE, '']):
+                pages, count, missing, ocr = extraction.extract_pdf(path, {**app.runtime_defaults()['extraction'], 'enabled': True})
         self.assertEqual((count, missing, ocr), (2, [2], [1, 2]))
         ev = r.build_evidence(pages, count, missing, ocr)
         self.assertEqual({item['page'] for item in ev['comparisons']}, {1})
@@ -337,8 +337,8 @@ class PipelineReliabilityTests(unittest.TestCase):
             else:
                 chunks = [{'text': f"[Page {page['page']}]\n{page['text']}", 'pages': [page['page']]}
                           for page in (pages[i % 3] for i in range(count))]
-                with patch.object(app, 'extract_pdf', return_value=(pages, 3, [], [3])), \
-                     patch.object(app, 'make_chunks', return_value=chunks):
+                with patch.object(extraction, 'extract_pdf', return_value=(pages, 3, [], [3])), \
+                     patch.object(extraction, 'make_chunks', return_value=chunks):
                     app.analyze_job(identifier)
 
     def load_checks(self, identifier):

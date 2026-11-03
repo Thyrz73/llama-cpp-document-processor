@@ -18,9 +18,11 @@ os.environ.setdefault("DATA_DIR", tempfile.mkdtemp(prefix="pdf-encoding-test-"))
 os.environ.setdefault("SYSTEM_PROMPT_FILE", str(Path(__file__).resolve().parents[1] / "config/system_prompt.example.txt"))
 
 import app
-from document_processor import config, jobs, prompts
+from document_processor import config, extraction, jobs, prompts
 from document_processor.errors import ProcessingError
 from document_processor.model_client import ModelError
+
+SETTINGS = app.runtime_defaults()["extraction"]
 
 
 FRENCH = "L’assemblée générale a décidé de vérifier la présence des élèves à Grenoble. Résumé : température −2,5 °C, échantillon n° 3, précision ±0,2 %."
@@ -123,9 +125,9 @@ class EncodingBoundaryTests(unittest.TestCase):
                     document.__len__.return_value = 1
                     document.__getitem__.return_value.get_text.return_value = text if reader == "pymupdf" else ""
                     fallback = SimpleNamespace(pages=[SimpleNamespace(extract_text=lambda: text)])
-                    with patch.object(app.pymupdf, "open", return_value=document), \
-                         patch.object(app, "PdfReader", return_value=fallback) as secondary:
-                        pages, count, missing, ocr = app.extract_pdf("unused.pdf")
+                    with patch.object(extraction.pymupdf, "open", return_value=document), \
+                         patch.object(extraction, "PdfReader", return_value=fallback) as secondary:
+                        pages, count, missing, ocr = extraction.extract_pdf("unused.pdf", SETTINGS)
                     self.assertEqual(pages, [{"page": 1, "text": text}], "PDF reader / normalization")
                     self.assertEqual((count, missing, ocr), (1, [], []))
                     self.assertEqual(secondary.call_count, int(reader == "pypdf"))
@@ -135,12 +137,12 @@ class EncodingBoundaryTests(unittest.TestCase):
         page.rect.width = page.rect.height = 72
         page.get_pixmap.return_value.tobytes.return_value = b"PNG"
         for text in (FRENCH, ENGLISH, MULTILINGUAL):
-            with self.subTest(text=text), patch.object(app.subprocess, "run", return_value=SimpleNamespace(
+            with self.subTest(text=text), patch.object(extraction.subprocess, "run", return_value=SimpleNamespace(
                     returncode=0, stdout=text.encode("utf-8"))):
-                self.assertEqual(app.ocr_page(page, 1), text, "OCR byte boundary")
-        with patch.object(app.subprocess, "run", return_value=SimpleNamespace(returncode=0, stdout=b"\xff")):
+                self.assertEqual(extraction.ocr_page(page, 1, SETTINGS), text, "OCR byte boundary")
+        with patch.object(extraction.subprocess, "run", return_value=SimpleNamespace(returncode=0, stdout=b"\xff")):
             with self.assertRaises(ProcessingError) as error:
-                app.ocr_page(page, 1)
+                extraction.ocr_page(page, 1, SETTINGS)
         self.assertEqual(error.exception.code, "invalid_ocr_encoding")
 
     def test_request_json_and_prompt_preserve_unicode(self):
@@ -229,7 +231,7 @@ class EncodingPipelineTests(unittest.TestCase):
         # Real chunking, tokenizer HTTP, prompts, generation, files and SQLite.
         pages = [{"page": i + 1, "text": text + "\n\n" + "padding " * 70} for i in range(5)]
         app.update_job(identifier, status="running")
-        with patch.object(app, "extract_pdf", return_value=(pages, 5, [], [])), \
+        with patch.object(extraction, "extract_pdf", return_value=(pages, 5, [], [])), \
              patch.object(app, "ModelClient", side_effect=model):
             app.analyze_job(identifier)
 
