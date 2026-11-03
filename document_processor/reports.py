@@ -60,17 +60,18 @@ def report_filename(markdown, original_filename):
     return stem[:89].rstrip("_-") + "_rapport.md"
 
 
-def render_markdown(text):
-    """Render text without HTML, images, executable links or remote resources."""
-    parser = MarkdownIt("commonmark", {"html": False, "breaks": True, "maxNesting": 20})
-    parser.enable("table").disable("image")
-    default_validate = parser.validateLink
+class _SafeLinkMarkdown(MarkdownIt):
+    """Accept only relative, web and mail links in addition to the default checks."""
 
-    def safe_link(url):
+    def validateLink(self, url: str) -> bool:
         try:
-            return default_validate(url) and urlsplit(url).scheme.lower() in ("", "http", "https", "mailto")
+            return super().validateLink(url) and urlsplit(url).scheme.lower() in ("", "http", "https", "mailto")
         except ValueError:
             return False
 
-    parser.validateLink = safe_link
+
+def render_markdown(text):
+    """Render text without HTML, images, executable links or remote resources."""
+    parser = _SafeLinkMarkdown("commonmark", {"html": False, "breaks": True, "maxNesting": 20})
+    parser.enable("table").disable("image")
     return parser.render(text)

@@ -203,11 +203,12 @@ Docker and CI use Python 3.12. On Ubuntu/Debian, install `python3-venv`, `tesser
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements-dev.txt
 .venv/bin/ruff check .
+.venv/bin/mypy
 .venv/bin/python -m unittest discover -s tests -v
 node tests/test_polling.js
 ```
 
-Python tests use temporary data and simulated model responses; no llama.cpp is needed. Two tests require real Tesseract: they are skipped locally when it is missing, but never in CI (`CI` set), where a missing Tesseract fails the build. Node.js is needed only for frontend tests; CI uses Node.js 22. [CI](.github/workflows/tests.yml) also lints with ruff (rules in [pyproject.toml](pyproject.toml)), checks syntax, an offline benchmark plan, Compose and Docker packaging.
+Python tests use temporary data and simulated model responses; no llama.cpp is needed. Two tests require real Tesseract: they are skipped locally when it is missing, but never in CI (`CI` set), where a missing Tesseract fails the build. Node.js is needed only for frontend tests; CI uses Node.js 22. [CI](.github/workflows/tests.yml) also lints with ruff and type-checks with mypy (settings in [pyproject.toml](pyproject.toml)), checks syntax, an offline benchmark plan, Compose and Docker packaging.
 
 Maintained by [Guillaume Luquet / Thyrz73](https://github.com/Thyrz73). Report bugs through [GitHub issues](https://github.com/Thyrz73/llama-cpp-document-processor/issues), with the revision and relevant logs, excluding secrets and document content.
 

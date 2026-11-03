@@ -21,7 +21,7 @@ ARROW = re.compile(rf"^\s*(?P<entity>[^:|\n]{{1,120}})\s*:\s*(?P<before>{NUMBER}
                    rf"(?P<u1>{UNIT})?\s*→\s*(?P<after>{NUMBER})\s*(?P<unit>{UNIT})\s*$")
 CITATION = re.compile(r"\[(?:pages?)\s+([^\]\n]*)\]", re.I)
 # Keep extracts, not machine assertions about their meaning. Deliberately narrow.
-RESERVES = {
+_RESERVE_PATTERNS = {
     "fiction": r"\bficti[fv]|\bfictional\b|\binvent[ée]es?\b",
     "hypothesis": r"\bhypoth[èe]se|\bhypothes[ie]s|\bassumptions?\b",
     "forecast_observation": r"\bpr[ée]vision|\bforecast|\bannon[çc]ait|\bpredicted|\bobservation|\bobserv[ée]e?\b",
@@ -29,7 +29,7 @@ RESERVES = {
     "causality_reserve": r"sans preuve de causalit|sans d[ée]montrer|n.est pas une preuve causal|causalit[ée].{0,60}(?:non|pas)|no (?:proof|evidence) of caus|without.{0,35}(?:causal|demonstrat)|causal.{0,35}(?:not|unproven)",
     "missing_information": r"ne (?:mentionne|fournit)|non (?:v[ée]rifi|document)|pas (?:[ée]t[ée] )?(?:calcul[ée]|v[ée]rifi)|n.ont pas [ée]t[ée]|n.a pas [ée]t[ée] isol|(?:not|un)(?:verified|documented)|not (?:mentioned|provided|verified|documented)|does not mention|cannot be verified|ni .{0,50}ni |ne figurent pas|sans auteur",
 }
-RESERVES = {key: re.compile(value, re.I) for key, value in RESERVES.items()}
+RESERVES = {key: re.compile(value, re.I) for key, value in _RESERVE_PATTERNS.items()}
 
 
 def decimal_value(raw):
@@ -251,7 +251,7 @@ def evidence_block(evidence, pages, limit=EVIDENCE_PROMPT_CHARS):
     reserves.sort(key=lambda item: (reserve_priority(item), len(item['text'])))
     if not rows and not reserves:
         return ''
-    buckets = {}
+    buckets: dict[tuple[int, str], deque[str]] = {}
     for page, category, row in rows:
         buckets.setdefault((page, category), deque()).append(row)
     ordered = []

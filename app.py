@@ -28,6 +28,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from document_processor import config as job_config, jobs as job_store, profiles, prompts, pipeline
 from document_processor import reports
@@ -81,8 +82,15 @@ class ProcessorFlask(Flask):
 app = ProcessorFlask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_MB * 1024 * 1024 + 65536
 worker_wakeup = threading.Event()
+# Labels log events with the job processed by the current worker thread.
+_job_context = threading.local()
 TRANSLATIONS = json.loads((Path(__file__).parent / "static" / "translations.json").read_text(encoding="utf-8"))
 DEFAULT_QUESTIONS = {TRANSLATIONS[language]["default_question"] for language in ("en", "fr")} | {"Analyze the entire document"}
+
+
+def current_job_id():
+    """Return the job processed by this thread, or None outside the worker."""
+    return getattr(_job_context, "job_id", None)
 
 
 def utcnow():
@@ -242,7 +250,7 @@ def atomic_text(path, text):
         os.replace(tmp, path)
     except OSError as exc:
         event("artifact_write_failed", logging.ERROR, artifact=path.name,
-              job_id=getattr(threading.current_thread(), "job_id", None), error_type=type(exc).__name__)
+              job_id=current_job_id(), error_type=type(exc).__name__)
         raise
 
 
@@ -383,7 +391,7 @@ def make_chunks(pages, model, budget=None):
     for p in pages:
         units.extend(split_with_page(p["text"], p["page"]))
     chunks = []
-    current = []
+    current: list[dict[str, Any]] = []
 
     def chunk_text(parts):
         """Join parts with page markers."""
@@ -462,7 +470,7 @@ def ocr_page(page, number, settings=None):
     if not settings["enabled"]:
         return ""
     started = time.monotonic()
-    job_id = getattr(threading.current_thread(), "job_id", None)
+    job_id = current_job_id()
     event("ocr_started", job_id=job_id, page=number)
     # Reduce the render before allocation to limit memory use.
     pixels_at_dpi = (page.rect.width * settings["dpi"] / 72) * (page.rect.height * settings["dpi"] / 72)
@@ -538,7 +546,7 @@ def extract_pdf(pdf_path, progress=None, settings=None):
                 text = normalize_extracted_text(page.get_text("text", sort=True))
             except Exception:
                 event("extraction_fallback", logging.WARNING, page=number, reader="pymupdf",
-                      job_id=getattr(threading.current_thread(), "job_id", None))
+                      job_id=current_job_id())
                 text = ""
             if not text_is_usable(text):
                 # Try another reader for unusual or incorrectly encoded fonts.
@@ -550,7 +558,7 @@ def extract_pdf(pdf_path, progress=None, settings=None):
                         text = alternate
                 except Exception:
                     event("extraction_fallback", logging.WARNING, page=number, reader="pypdf",
-                          job_id=getattr(threading.current_thread(), "job_id", None))
+                          job_id=current_job_id())
             if not text_is_usable(text) and settings["enabled"]:
                 if progress:
                     progress(f"OCR recognition: page {number}/{count}")
@@ -565,10 +573,10 @@ def extract_pdf(pdf_path, progress=None, settings=None):
             # Drop the page reference before moving to the next page.
             del page
         if not any(text_is_usable(p["text"]) for p in pages):
-            event("extraction_empty", logging.WARNING, job_id=getattr(threading.current_thread(), "job_id", None), pages=count)
+            event("extraction_empty", logging.WARNING, job_id=current_job_id(), pages=count)
             detail = "even after OCR" if settings["enabled"] else "(OCR disabled)"
             raise ProcessingError("no_usable_text", f"No usable text found in this PDF {detail}. Check the source PDF.")
-        event("extraction_summary", job_id=getattr(threading.current_thread(), "job_id", None), pages=count,
+        event("extraction_summary", job_id=current_job_id(), pages=count,
               ocr_pages=len(ocr_pages), insufficient_pages=len(missing), characters=sum(len(p["text"]) for p in pages))
         return pages, count, missing, ocr_pages
 
@@ -616,7 +624,7 @@ def worker_loop():
                     con.execute("UPDATE jobs SET status='running', stage='Starting', updated_at=? WHERE id=?", (utcnow(), row["id"]))
             if row:
                 job_id = row["id"]
-                threading.current_thread().job_id = job_id
+                _job_context.job_id = job_id
                 event("job_state", job_id=job_id, status="running", stage="starting")
                 try:
                     analyze_job(job_id)
@@ -626,7 +634,7 @@ def worker_loop():
                     # Keep the last preview to help diagnose the error.
                     fail_job(job_id, exc)
                 finally:
-                    threading.current_thread().job_id = None
+                    _job_context.job_id = None
                 continue
         except Exception as exc:
             failure("worker_database_error", exc)
@@ -935,7 +943,7 @@ def view_report(job_id):
     return response
 
 
-_capability_cache = {"value": None, "expires": 0}
+_capability_cache: dict[str, Any] = {"value": None, "expires": 0}
 _capability_lock = threading.Lock()
 CAPABILITY_CACHE_SECONDS = 30
 

@@ -4,6 +4,7 @@ import json
 import logging
 import re
 import time
+from typing import Any
 
 from . import jobs, prompts, reliability
 from .config import fingerprint
@@ -19,7 +20,8 @@ def plan_groups(notes, fits, max_group=4):
     A singleton may pass through unchanged, but at least one group must reduce
     the note count. The caller enforces a level/call budget as a second guard.
     """
-    groups, current = [], []
+    groups: list[list[Any]] = []
+    current: list[Any] = []
     for note in notes:
         candidate = current + [note]
         if current and (len(candidate) > max_group or not fits(candidate)):
@@ -63,7 +65,7 @@ def run(job_id, runtime):
     calls = 0
     preview_path = directory / "live_preview.json"
     phase_args = {}
-    quality = {"version": reliability.VERSION, "steps": {}}
+    quality: dict[str, Any] = {"version": reliability.VERSION, "steps": {}}
     last_percent = None
 
     def phase(code, label, percent=None, **args):

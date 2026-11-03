@@ -6,3 +6,9 @@ target-version = "py312"
 [tool.ruff.lint]
 # List rules explicitly so results do not change with ruff's default set.
 select = ["E4", "E7", "E9", "F"]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["app.py", "document_processor", "scripts"]
+# Also type-check bodies of functions that are not annotated yet.
+check_untyped_defs = true

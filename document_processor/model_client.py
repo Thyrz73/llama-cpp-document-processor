@@ -8,6 +8,7 @@ import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
+from typing import Any
 
 import requests
 
@@ -142,7 +143,7 @@ class ModelClient:
         if key:
             self.session.headers.update({"Authorization": f"Bearer {key}"})
         self.model_name = None
-        self.capabilities = {"context_tokens": None, "status": "unknown"}
+        self.capabilities: dict[str, Any] = {"context_tokens": None, "status": "unknown"}
         self.token_cache = OrderedDict()
         self.tokenization_calls = 0
         self.tokenization_ms = 0.0
@@ -171,7 +172,7 @@ class ModelClient:
 
     def inspect(self):
         """Read optional properties without inference or raw slot/prompt disclosure."""
-        result = {"status": "unavailable", "context_tokens": None, "slots": None,
+        result: dict[str, Any] = {"status": "unavailable", "context_tokens": None, "slots": None,
                   "model": None, "template_hash": None, "version": None,
                   "sampling": {},
                   "source": "backend", "observed_at": time.time()}
@@ -282,7 +283,7 @@ class ModelClient:
         self.check_cancelled()
         while not _stream_gate.acquire(timeout=0.2):
             self.check_cancelled()
-        events = queue.Queue(maxsize=32)
+        events: queue.Queue[tuple[str, bytes | None]] = queue.Queue(maxsize=32)
         stopped = threading.Event()
         response_holder = []
         deadline = time.monotonic() + self.config["step_timeout_seconds"]
@@ -352,7 +353,7 @@ class ModelClient:
     def generate(self, instruction, content, max_tokens, *, on_update=None):
         """Return a structured completion; incomplete output never becomes an artifact."""
         started = time.monotonic()
-        metrics = {key: None for key in ("prompt_tokens", "output_tokens", "reasoning_tokens",
+        metrics: dict[str, Any] = {key: None for key in ("prompt_tokens", "output_tokens", "reasoning_tokens",
                    "useful_tokens", "cached_prompt_tokens", "evaluated_prompt_tokens", "prefill_ms", "decode_ms",
                    "first_event_ms", "first_content_ms", "finish_reason")}
         metrics["output_budget"] = max_tokens
