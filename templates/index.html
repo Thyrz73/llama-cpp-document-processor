@@ -10,56 +10,53 @@
       // Apply the remembered theme before rendering to avoid a color flash.
       (function () {
         const preferred =
-          localStorage.getItem("document-processor-theme") || "system";
+          localStorage.getItem("document-processor-theme");
         document.documentElement.dataset.theme =
-          preferred === "system"
-            ? matchMedia("(prefers-color-scheme: dark)").matches
-              ? "dark"
-              : "light"
-            : preferred;
+          preferred === "dark" ? "dark" : "light";
       })();
     </script>
   </head>
   <body>
     <main>
-      <header class="hero top">
-        <div>
-          <div class="brand">
-            <div class="brand-icon" aria-hidden="true">◫</div>
-            <h1>Document Processor</h1>
-          </div>
-          <p
-            class="muted"
-            data-i18n="Analyze large PDFs locally with your llama.cpp model. Jobs continue on your server even if you close the browser."
-          >
-            Analyze large PDFs locally with your llama.cpp model. Jobs continue
-            on your server even if you close the browser.
-          </p>
+      <header class="hero">
+        <div class="brand">
+          <div class="brand-icon" aria-hidden="true">◫</div>
+          <h1>Document Processor</h1>
         </div>
         <div class="theme-controls">
-          <div class="theme-box">
+          <div class="theme-box language-control">
             <img
               id="languageFlag"
               src="{{ url_for('static', filename='en.svg') }}"
-              width="24"
-              height="16"
+              width="21"
+              height="14"
               alt=""
-            /><label for="uiLanguage" data-i18n="Language">Language</label
+            /><label
+              class="visually-hidden"
+              for="uiLanguage"
+              data-i18n="Language"
+              >Language</label
             ><select id="uiLanguage">
               <option value="en">English</option>
               <option value="fr">Français</option>
             </select>
           </div>
           <div class="theme-box">
-            <label for="theme" class="small muted" data-i18n="Theme"
+            <label for="theme" class="visually-hidden" data-i18n="Theme"
               >Theme</label
             ><select id="theme" aria-label="Theme">
-              <option value="system" data-i18n="System">System</option>
               <option value="light" data-i18n="Light">Light</option>
               <option value="dark" data-i18n="Dark">Dark</option>
             </select>
           </div>
         </div>
+        <p
+          class="muted"
+          data-i18n="Analyze large PDFs locally with your llama.cpp model. Jobs continue on your server even if you close the browser."
+        >
+          Analyze large PDFs locally with your llama.cpp model. Jobs continue
+          on your server even if you close the browser.
+        </p>
       </header>
       <section class="panel">
         <div class="top">
@@ -307,7 +304,7 @@ Analyze this entire document: objectives, methods, results, key figures, assumpt
           <div id="feedback" role="status" aria-live="polite"></div>
         </form>
       </section>
-      <section class="panel">
+      <section class="panel jobs-panel">
         <div class="top jobs-heading">
           <h2 data-i18n="Analysis jobs">Analysis jobs</h2>
           <button

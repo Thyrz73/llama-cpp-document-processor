@@ -23,7 +23,7 @@ async function runPollingTests(template, translations={en:{},fr:{}}) {
  const descendants=node=>node.children.flatMap(child=>[child,...descendants(child)]);
  // Create a fresh environment with controlled DOM, requests, and timers.
  // These tests start neither a real browser nor an HTTP server.
- function setup(withSettings=false) {
+ function setup(withSettings=false,storage=new Map()) {
   class Element {
    // Initialize a minimal DOM node and properties used by the scenarios.
    // classList provides no-op methods so CSS calls are accepted.
@@ -100,6 +100,20 @@ async function runPollingTests(template, translations={en:{},fr:{}}) {
  // Run scenario fn and record its name only after it succeeds. The modules
  // share one state, so the scenario's last continuations finish first.
  async function test(name,fn){await fn();await flush();results.push(name)}
+
+ await test('theme defaults to light and remembers explicit choices across visits',async()=>{
+  for(const initial of [null,'system','invalid','light','dark']){
+   const storage=new Map(initial===null?[]:[['document-processor-theme',initial]]);
+   const h=setup(false,storage);
+   assert(h.elements.theme.value===(initial==='dark'?'dark':'light'),'Default or remembered theme');
+   assert(h.document.documentElement.dataset.theme===h.elements.theme.value,'Apply theme on startup');
+   h.elements.theme.value='dark';h.elements.theme.handlers.change[0]();
+   assert(storage.get('document-processor-theme')==='dark','Remember dark selection');
+   assert(setup(false,storage).document.documentElement.dataset.theme==='dark','Restore dark on next visit');
+   h.elements.theme.value='light';h.elements.theme.handlers.change[0]();
+   assert(setup(false,storage).document.documentElement.dataset.theme==='light','Restore light on next visit');
+  }
+ });
 
  await test('initial load stops for empty, completed, failed and mixed terminal lists',async()=>{
   for(const jobs of [[],[job('done',100)],[job('failed')],[job('done',100),job('failed',20,'b'.repeat(32))]]){
@@ -315,9 +329,39 @@ async function runPollingTests(template, translations={en:{},fr:{}}) {
 
  const checks=h=>descendants(h.elements.jobs).filter(node=>node.dataset.selectJob);
  const select=(node,value=true)=>{node.checked=value;node.handlers.change[0]()};
+ const toggleSelection=h=>h.document.getElementById('toggleSelection').handlers.click[0]();
+ await test('selection mode starts hidden, toggles controls and resets on cancel',async()=>{
+  const h=setup();await h.respond(0,{jobs:[job('done'),job('failed',0,'b'.repeat(32)),job('running',20,'c'.repeat(32))]});
+  const get=id=>h.document.getElementById(id),trash=()=>descendants(h.elements.jobs).filter(n=>n.dataset.deleteJob);
+  assert(get('toggleSelection').textContent==='Select'&&get('toggleSelection').attributes['aria-pressed']==='false','Normal history header');
+  assert(checks(h).every(n=>n.hidden)&&get('historyControls').hidden&&get('selectionActions').hidden,'All selection UI hidden initially');
+  assert(trash().every(n=>!n.hidden),'Individual delete remains visible');
+  const status=descendants(h.elements.jobs).find(n=>n.className==='job-status'&&n.children.length===2);
+  assert(status.children[0].className.includes('pill')&&status.children[1].dataset.deleteJob,'Badge and trash stay grouped');
+  toggleSelection(h);
+  assert(get('toggleSelection').textContent==='Cancel'&&get('toggleSelection').attributes['aria-pressed']==='true','Active selection header');
+  assert(checks(h).every(n=>!n.hidden)&&!get('historyControls').hidden&&trash().every(n=>n.hidden),'Selection controls replace trash');
+  assert(get('selectionSummary').textContent==='0 analyses selected'&&get('selectionActions').hidden,'Zero count without delete bar');
+  select(checks(h)[0]);
+  assert(!get('selectionActions').hidden&&get('deleteSelection').textContent==='Delete (1)','Counted delete action');
+  const history=h.elements.jobs.children[1];
+  assert(history.children[history.children.length-1]===get('selectionActions'),'Bulk action bar below the list');
+  toggleSelection(h);
+  assert(checks(h).every(n=>n.hidden&&!n.checked)&&get('selectionActions').hidden&&get('historyControls').hidden,'Cancel fully resets selection');
+  assert(trash().every(n=>!n.hidden),'Cancel restores individual trash');
+  toggleSelection(h);assert(checks(h).every(n=>!n.checked),'Reopening does not restore old selection');
+ });
+ await test('empty history supports entering and cancelling selection without deletion',async()=>{
+  const h=setup();await h.respond(0,{jobs:[]});toggleSelection(h);
+  assert(h.document.getElementById('selectAllJobs').disabled,'Nothing to select in empty history');
+  assert(checks(h).length===0&&h.document.getElementById('selectionActions').hidden,'No checkbox rows or bulk action');
+  assert(descendants(h.elements.jobs).some(n=>n.textContent==='No analysis history yet.'),'Keep empty state');
+  toggleSelection(h);assert(h.document.getElementById('historyControls').hidden,'Cancel empty selection');
+ });
  await test('selection is visible-only, supports indeterminate and survives progress refreshes',async()=>{
   const h=setup();const list=[job('done'),job('failed',10,'b'.repeat(32)),job('running',20,'c'.repeat(32))];
   await h.respond(0,{jobs:list});assert(checks(h).length===2,'Active analyses are not selectable');
+  toggleSelection(h);
   select(checks(h)[0]);assert(h.document.getElementById('selectAllJobs').indeterminate,'Partial selection');
   assert(h.document.getElementById('selectionCount').textContent==='1 analyses selected','Selection count');
   checks(h)[0].focus();
@@ -326,7 +370,7 @@ async function runPollingTests(template, translations={en:{},fr:{}}) {
   assert(h.document.activeElement===checks(h)[0],'Keyboard focus survives a progress refresh');
   select(h.document.getElementById('selectAllJobs'));
   assert(checks(h).every(n=>n.checked),'Select all visible terminal analyses');
-  h.document.getElementById('clearSelection').handlers.click[0]();
+  select(h.document.getElementById('selectAllJobs'),false);
   assert(checks(h).every(n=>!n.checked)&&h.document.getElementById('selectionActions').hidden,'Deselect all');
   select(checks(h)[0]);h.click();await h.respond(2,{jobs:[list[1]]});
   assert(h.document.getElementById('selectionActions').hidden,'Invisible selection is discarded');
@@ -337,6 +381,7 @@ async function runPollingTests(template, translations={en:{},fr:{}}) {
   remove.handlers.click[0]();assert(h.elements.deleteDialog.open&&h.elements.deleteDocument.textContent==='example.pdf','Named confirmation');
   assert(h.requests.length===1,'No deletion before confirmation');
   h.elements.deleteCancel.handlers.click[0]();assert(!h.elements.deleteDialog.open&&h.requests.length===1,'Cancelled without request');
+  toggleSelection(h);
   select(checks(h)[0]);h.document.getElementById('deleteSelection').handlers.click[0]();
   assert(h.elements.deleteMessage.textContent.includes('1 analyses'),'Exact bulk count');
   h.elements.deleteDialog.handlers.cancel[0]({preventDefault(){}});
@@ -357,6 +402,7 @@ async function runPollingTests(template, translations={en:{},fr:{}}) {
  await test('partial batch deletion preserves failed entries and their selection',async()=>{
   const h=setup();const first='a'.repeat(32),second='b'.repeat(32);
   await h.respond(0,{jobs:[job('done'),job('failed',0,second)]});
+  toggleSelection(h);
   select(h.document.getElementById('selectAllJobs'));h.document.getElementById('deleteSelection').handlers.click[0]();
   const pending=h.api.submitDeletion();
   assert(JSON.parse(h.requests[1].options.body).ids.length===2,'Exact bulk IDs');
@@ -367,7 +413,7 @@ async function runPollingTests(template, translations={en:{},fr:{}}) {
   assert(checks(h)[0].checked&&!checks(h)[0].disabled,'Failed analysis remains retryable');
  });
  await test('network deletion errors preserve the card and selection',async()=>{
-  const h=setup();await h.respond(0,{jobs:[job('done')]});select(checks(h)[0]);
+  const h=setup();await h.respond(0,{jobs:[job('done')]});toggleSelection(h);select(checks(h)[0]);
   h.api.confirmDeletion(['a'.repeat(32)],false);const pending=h.api.submitDeletion();
   h.requests[1].reject(Error('Offline'));await pending;
   assert(h.article()&&checks(h)[0].checked&&!checks(h)[0].disabled,'Failed request keeps visible selection');
@@ -393,6 +439,20 @@ async function runPollingTests(template, translations={en:{},fr:{}}) {
 
  const resolved={profile:'low',chunk_tokens:3000,analysis_tokens:3072,merge_tokens:2048,final_tokens:3072,context_tokens:16384,warnings:[],thinking_section:'inherit',thinking_merge:'inherit',thinking_final:'inherit'};
  async function settingsReady(){const h=setup(true);await h.respond(0,{jobs:[]});await h.respond(1,{thinking_supported:false});await h.respond(2,{configuration:resolved});return h}
+ await test('history selection stays translated and selected across language and theme changes',async()=>{
+  const h=await settingsReady();h.click();await h.respond(3,{jobs:[job('done')]});
+  h.elements.uiLanguage.value='fr';h.elements.uiLanguage.handlers.change[0]();
+  assert(h.document.getElementById('toggleSelection').textContent==='Sélectionner','French select label');
+  assert(descendants(h.elements.jobs).find(n=>n.dataset.deleteJob).title==='Supprimer cette analyse','French trash tooltip');
+  toggleSelection(h);select(checks(h)[0]);
+  assert(h.document.getElementById('toggleSelection').textContent==='Annuler','French cancel label');
+  assert(h.document.getElementById('deleteSelection').textContent==='Supprimer (1)','French counted delete label');
+  h.elements.theme.value='dark';h.elements.theme.handlers.change[0]();
+  assert(checks(h)[0].checked&&!checks(h)[0].hidden,'Dark theme preserves selection');
+  h.elements.uiLanguage.value='en';h.elements.uiLanguage.handlers.change[0]();
+  assert(h.document.getElementById('toggleSelection').textContent==='Cancel'&&h.document.getElementById('deleteSelection').textContent==='Delete (1)','English labels preserve selection');
+  toggleSelection(h);assert(checks(h)[0].hidden&&!checks(h)[0].checked,'Cancel resets after language changes');
+ });
  await test('profile preview is server-resolved and keeps advanced reasoning disabled when unsupported',async()=>{
   const h=await settingsReady();assert(!h.elements.send.disabled,'Validated preview enables submission');
   assert(h.elements.thinking_section.disabled,'Unsupported reasoning must be disabled');
