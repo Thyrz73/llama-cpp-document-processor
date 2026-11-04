@@ -26,6 +26,7 @@ htmlcov/
 venv/
 
 # Local / editor / backup artifacts
+/local/
 .DS_Store
 .vscode/
 .idea/

@@ -85,6 +85,7 @@ const activeStatuses = new Set(["queued", "running"]);
 const cancellingJobs = new Set();
 const promptExpanded = new Set();
 const selectedJobs = new Set();
+let selectionMode = false;
 const terminalStatuses = new Set(["done", "failed", "cancelled"]);
 let deleting = false, deleteIntent = null, deleteTrigger = null, historyNotice = null;
 let jobs = [],
@@ -98,24 +99,15 @@ let jobs = [],
   uploading = false;
 const theme = $("theme");
 const selectedTheme =
-  localStorage.getItem("document-processor-theme") || "system";
-theme.value = ["system", "light", "dark"].includes(selectedTheme)
-  ? selectedTheme
-  : "system";
-// Resolve the system mode, apply its color, and remember choice v.
+  localStorage.getItem("document-processor-theme");
+theme.value = selectedTheme === "dark" ? "dark" : "light";
+// Keep the chosen theme across visits; first-time and legacy system choices use light.
 function applyTheme(v) {
-  document.documentElement.dataset.theme =
-    v === "system"
-      ? matchMedia("(prefers-color-scheme: dark)").matches
-        ? "dark"
-        : "light"
-      : v;
+  document.documentElement.dataset.theme = v;
   localStorage.setItem("document-processor-theme", v);
 }
+applyTheme(theme.value);
 theme.addEventListener("change", () => applyTheme(theme.value));
-matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
-  if (theme.value === "system") applyTheme("system");
-});
 file.addEventListener("change", () => {
   $("fileLabel").textContent =
     file.files[0]?.name || t("📄 Drop a PDF or click to browse");
@@ -376,16 +368,18 @@ function updateSelection() {
   all.indeterminate = selectedJobs.size > 0 && selectedJobs.size < eligible.length;
   all.disabled = deleting || !eligible.length;
   for (const checkbox of $("jobs").querySelectorAll("[data-select-job]")) {
+    checkbox.hidden = !selectionMode;
     checkbox.checked = selectedJobs.has(checkbox.dataset.selectJob);
     checkbox.disabled = deleting;
   }
   for (const item of $("jobs").querySelectorAll("[data-job-id]"))
     item.classList.toggle("item-selected", selectedJobs.has(item.dataset.jobId));
-  $("selectionActions").hidden = !selectedJobs.size;
+  $("historyControls").hidden = !selectionMode;
+  $("selectionActions").hidden = !selectionMode || !selectedJobs.size;
   $("selectionCount").textContent = t("{count} analyses selected", { count: selectedJobs.size });
-  $("clearSelection").disabled = deleting;
+  $("selectionSummary").textContent = $("selectionCount").textContent;
   $("deleteSelection").disabled = deleting;
-  $("deleteSelection").textContent = t(deleting ? "Deleting…" : "Delete selection");
+  $("deleteSelection").textContent = t(deleting ? "Deleting…" : "Delete ({count})", { count: selectedJobs.size });
   $("deleteSelection").setAttribute("aria-busy", String(deleting));
 }
 function renderDeleteDialog() {
@@ -409,7 +403,7 @@ function confirmDeletion(ids, bulk, trigger) {
 function closeDeleteDialog() {
   deleteIntent = null;
   $("deleteDialog").close();
-  (deleteTrigger?.isConnected ? deleteTrigger : $("selectAllJobs"))?.focus();
+  (deleteTrigger?.isConnected ? deleteTrigger : $("toggleSelection"))?.focus();
 }
 function renderHistoryNotice() {
   const node = $("historyNotice");
@@ -457,7 +451,7 @@ async function submitDeletion() {
   } finally {
     deleting = false;
     renderJobs();
-    $("selectAllJobs")?.focus();
+    $(selectionMode ? "selectAllJobs" : "toggleSelection")?.focus();
   }
 }
 if ($("deleteDialog")) {
@@ -470,7 +464,7 @@ if ($("deleteDialog")) {
 function renderJobs() {
   const eligible = new Set(jobs.filter((job) => terminalStatuses.has(job.status)).map((job) => job.id));
   for (const id of selectedJobs) if (!eligible.has(id)) selectedJobs.delete(id);
-  const signature = JSON.stringify([jobs, expandedId, deleting]);
+  const signature = JSON.stringify([jobs, expandedId, deleting, selectionMode]);
   if (signature === renderedJobs) return;
   const focused = document.activeElement;
   const live = expandedId ? $("live-" + expandedId) : null,
@@ -491,7 +485,22 @@ function renderJobs() {
     const list = el("div", undefined, "job-list");
     section.append(list);
     if (key === "history") {
+      const headingRow = el("div", undefined, "top history-heading");
+      const toggle = el("button", t(selectionMode ? "Cancel" : "Select"), "button-secondary");
+      toggle.id = "toggleSelection";
+      toggle.type = "button";
+      toggle.setAttribute("aria-pressed", String(selectionMode));
+      toggle.setAttribute("aria-controls", "historyControls");
+      toggle.addEventListener("click", () => {
+        selectionMode = !selectionMode;
+        selectedJobs.clear();
+        renderJobs();
+        $("toggleSelection").focus();
+      });
+      headingRow.append(title, toggle);
+      section.replaceChildren(headingRow, list);
       const controls = el("div", undefined, "history-controls");
+      controls.id = "historyControls";
       const label = el("label", undefined, "selection-label");
       const all = el("input");
       all.type = "checkbox";
@@ -504,24 +513,21 @@ function renderJobs() {
         updateSelection();
       });
       label.append(all, el("span", t("Select all displayed analyses")));
-      controls.append(label);
+      const summary = el("span", undefined, "small muted");
+      summary.id = "selectionSummary";
+      controls.append(label, summary);
       const bar = el("div", undefined, "selection-actions");
       bar.id = "selectionActions";
       const count = el("span");
       count.id = "selectionCount";
       count.setAttribute("role", "status");
-      const clear = el("button", t("Deselect"), "button-secondary");
-      clear.id = "clearSelection";
-      clear.type = "button";
-      clear.addEventListener("click", () => { selectedJobs.clear(); updateSelection(); });
-      const remove = el("button", t("Delete selection"), "button-danger");
+      const remove = el("button", undefined, "button-secondary button-danger");
       remove.id = "deleteSelection";
       remove.type = "button";
       remove.addEventListener("click", () => confirmDeletion([...selectedJobs], true, remove));
-      bar.append(count, clear, remove);
-      controls.append(bar);
-      // Keep the heading and list order stable; the toolbar sits above the cards.
+      bar.append(count, remove);
       list.append(controls);
+      section.append(bar);
     }
     host.append(section);
     groups[key] = list;
@@ -532,7 +538,7 @@ function renderJobs() {
     const item = el("article", undefined, "item"),
       top = el("div", undefined, "top");
     item.dataset.jobId = j.id;
-    const identity = el(terminalStatuses.has(j.status) ? "label" : "div", undefined, "job-identity");
+    const identity = el(selectionMode && terminalStatuses.has(j.status) ? "label" : "div", undefined, "job-identity");
     if (terminalStatuses.has(j.status)) {
       const checkbox = el("input");
       checkbox.type = "checkbox";
@@ -547,7 +553,9 @@ function renderJobs() {
     }
     identity.append(el("span", j.filename, "name"));
     top.append(identity);
-    top.append(el("span", t(codes[j.status] || j.status), `pill ${j.status}`));
+    const status = el("div", undefined, "job-status");
+    status.append(el("span", t(codes[j.status] || j.status), `pill ${j.status}`));
+    top.append(status);
     if (terminalStatuses.has(j.status)) {
       const remove = el("button", undefined, "button-danger button-icon");
       remove.type = "button";
@@ -555,6 +563,7 @@ function renderJobs() {
       remove.setAttribute("aria-label", t("Delete analysis: {name}", { name: j.filename }));
       remove.dataset.deleteJob = j.id;
       remove.disabled = deleting;
+      remove.hidden = selectionMode;
       const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
       icon.setAttribute("viewBox", "0 0 24 24");
       icon.setAttribute("class", "trash-icon");
@@ -564,7 +573,7 @@ function renderJobs() {
       icon.append(path);
       remove.append(icon);
       remove.addEventListener("click", () => confirmDeletion([j.id], false, remove));
-      top.append(remove);
+      status.append(remove);
     }
     item.append(top);
     item.append(el("div", phaseLabel(j), "meta"));
@@ -699,7 +708,7 @@ function renderJobs() {
     const replacement = [...host.querySelectorAll(focusSelector)].find((node) =>
       node.dataset.selectJob === focused.dataset.selectJob && node.dataset.deleteJob === focused.dataset.deleteJob);
     replacement?.focus();
-  } else if (["selectAllJobs", "clearSelection", "deleteSelection"].includes(focused?.id)) {
+  } else if (["selectAllJobs", "toggleSelection", "deleteSelection"].includes(focused?.id)) {
     $(focused.id)?.focus();
   }
   loadLive();
