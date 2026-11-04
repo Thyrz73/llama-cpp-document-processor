@@ -191,17 +191,6 @@ class ModelClient(BackendClient):
         return value
 
 
-def output_language_instruction():
-    """Build the language instruction from OUTPUT_LANGUAGE.
-
-    In ``auto`` mode, request the language used by the user's question.
-    Otherwise, explicitly request the configured language.
-    """
-    if OUTPUT_LANGUAGE.lower() == "auto":
-        return "Write in the same language as the user's request."
-    return f"Write in {OUTPUT_LANGUAGE}."
-
-
 # Background analysis ----------------------------------------------------------
 
 

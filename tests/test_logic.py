@@ -10,9 +10,10 @@ os.environ['SYSTEM_PROMPT_FILE']=str(Path(__file__).resolve().parents[1]/'config
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import app
-from app import ModelClient, output_language_instruction
+from app import ModelClient
 from document_processor.extraction import split_with_page, make_chunks
 from document_processor.files import atomic_text
+from document_processor.prompts import language_instruction
 
 CHUNK_BUDGET = 3000
 
@@ -48,10 +49,11 @@ class TestLogic(unittest.TestCase):
         self.assertEqual(d.read_text(), 'hello')
     def test_output_language_is_configurable(self):
         """Verify automatic and explicit language instructions."""
-        with patch('app.OUTPUT_LANGUAGE', 'auto'):
-            self.assertIn("same language", output_language_instruction())
-        with patch('app.OUTPUT_LANGUAGE', 'French'):
-            self.assertEqual(output_language_instruction(), 'Write in French.')
+        self.assertIn("same language", language_instruction("auto"))
+        self.assertEqual(language_instruction("fr"), "Write in French.")
+        self.assertEqual(language_instruction("en"), "Write in English.")
+        # OUTPUT_LANGUAGE may also name the language directly.
+        self.assertEqual(language_instruction("French"), "Write in French.")
 
     def test_llama_api_key_is_optional(self):
         """Add Bearer authentication only when a key exists."""

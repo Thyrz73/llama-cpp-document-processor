@@ -162,11 +162,8 @@ def ocr_page(page, number, settings):
     dpi = max(1, math.floor(settings["dpi"] * scale))
     if (page.rect.width * dpi / 72) * (page.rect.height * dpi / 72) > settings["max_pixels"]:
         raise ProcessingError("ocr_page_too_large", f"PDF page {number} exceeds the OCR pixel budget.")
-    pix = page.get_pixmap(dpi=dpi, colorspace=pymupdf.csGRAY, alpha=False, annots=False)
-    try:
-        png = pix.tobytes("png")
-    finally:
-        del pix
+    # Encode the bitmap right away: only the smaller PNG stays in memory while Tesseract runs.
+    png = page.get_pixmap(dpi=dpi, colorspace=pymupdf.csGRAY, alpha=False, annots=False).tobytes("png")
     try:
         process = subprocess.run(
             ["tesseract", "stdin", "stdout", "-l", settings["languages"], "--psm", "3"],
@@ -179,8 +176,6 @@ def ocr_page(page, number, settings):
     except subprocess.TimeoutExpired:
         event("ocr_failed", logging.ERROR, job_id=job_id, page=number, error_code="ocr_timeout")
         raise ProcessingError("ocr_timeout", f"OCR timed out on page {number}.") from None
-    finally:
-        del png
     if process.returncode:
         event("ocr_failed", logging.ERROR, job_id=job_id, page=number, error_code="ocr_failed")
         raise ProcessingError("ocr_failed", f"OCR failed on page {number}. Check installed language packs.")
@@ -254,7 +249,7 @@ def extract_pdf(pdf_path, settings, progress=None):
                 missing.append(number)
             if text:
                 pages.append({"page": number, "text": text})
-            # Drop the page reference before moving to the next page.
+            # Release the page now: rebinding `page` would only free it after loading the next one.
             del page
         if not any(text_is_usable(p["text"]) for p in pages):
             event("extraction_empty", logging.WARNING, job_id=current_job_id(), pages=count)
