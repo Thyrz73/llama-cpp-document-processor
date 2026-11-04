@@ -107,6 +107,6 @@ Run the commands from the README's Development section. Python tests use tempora
 
 - `test_v2.py`, `test_reliability.py`, `test_encoding.py`: full pipeline runs, artifact reuse, retries and cancellation.
 - `test_progress.py`: job states and progress, restart recovery and the worker loop.
-- `test_database.py`: migrations of databases from every past release.
-- `test_architecture.py`, `test_errors.py`, `test_environment.py`, `test_dependencies.py`: guards against import cycles, untranslated errors, configuration drift and diverging dependency locks.
+- `test_database.py`: migrations of databases from every past release, and the per-thread connections (reuse, rollback, nesting, concurrent threads, closing the log).
+- `test_architecture.py`, `test_errors.py`, `test_environment.py`, `test_dependencies.py`: guards against import cycles, untranslated errors, configuration drift and diverging dependency locks. `test_environment.py` also starts the real `app.py` and checks that `SIGTERM` stops it cleanly with every change in `jobs.sqlite3`.
 - `test_polling.js`: the interface modules against a simulated browser: polling, rendering, live output, settings and history, run with Node.js.
