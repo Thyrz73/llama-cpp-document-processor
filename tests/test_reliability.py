@@ -397,9 +397,11 @@ class PipelineReliabilityTests(unittest.TestCase):
         self.assertIn('rapport_final.md', self.load_checks(identifier)[1]['steps'])
 
     def test_reference_pdf_real_extraction_and_chunking_fake_generation(self):
-        pdf = Path(app.__file__).parent / 'PDF_TEST_ANALYSE_FR_DOCUMENT_PROCESSOR.pdf'
-        if not pdf.is_file():
-            self.skipTest('Local ignored reference PDF unavailable; deterministic fixtures cover the pipeline')
+        # The private reference PDF is kept in the ignored local/ folder, or at the repository root.
+        root, name = Path(app.__file__).parent, 'PDF_TEST_ANALYSE_FR_DOCUMENT_PROCESSOR.pdf'
+        pdf = next((path for path in (root / 'local' / name, root / name) if path.is_file()), None)
+        if pdf is None:
+            self.skipTest('Local reference PDF unavailable; deterministic fixtures cover the pipeline')
         identifier = self.create(pdf=pdf.read_bytes())
         self.run_job(identifier, real_extraction=True)
         self.assertEqual([call[0] for call in WordModel.calls], ['section', 'final'])
