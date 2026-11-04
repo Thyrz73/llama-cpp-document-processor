@@ -1,8 +1,11 @@
-"""Cheap, conservative checks; source evidence is private data, never instructions.
+"""Mechanical checks of generated text against the PDF: citations, numbers, quotes, wording.
 
-No semantic citation validation is attempted. Numeric extraction accepts only
-explicit two-value comparisons (arrows or a two-period table with units). All
-other layouts remain unchecked. Nothing here rewrites model output.
+The checks are cheap and conservative. They report possible problems as
+warnings and never rewrite model output. Citations are checked for page
+existence and scope, not for meaning. Numbers are read only from explicit
+two-value comparisons (arrows, or a two-period table with units); other
+layouts are not checked. Source evidence is given to the model as data,
+never as instructions.
 """
 
 from collections import deque
@@ -184,7 +187,13 @@ def extract_comparisons(text, page):
 
 
 def build_evidence(pages, page_count, missing=(), ocr_pages=()):
-    """Build once from physical extraction metadata; never infer pages from text."""
+    """Return the source evidence of a document, built once after extraction.
+
+    It lists the numeric comparison rows and the sentences carrying a reserve
+    (fiction, hypothesis, forecast, discordance, causality or missing
+    information), each with its physical PDF page. Pages come from the
+    extraction, never from page markers found in the text.
+    """
     comparisons, reserves = [], []
     for page in pages:
         comparisons.extend(extract_comparisons(page['text'], page['page']))
@@ -204,12 +213,16 @@ def build_evidence(pages, page_count, missing=(), ocr_pages=()):
 
 
 def note(text, pages, sections, warnings=()):
-    """A model may omit citations; metadata still survives all merge levels."""
+    """Return a note: model text with the pages, sections and warning codes it covers.
+
+    This scope survives every merge level, even when the model omits citations.
+    """
     return {"text": text, "pages": sorted(set(pages)), "sections": sorted(set(sections)),
             "warning_codes": sorted(set(warnings))}
 
 
 def merge_note(text, parents):
+    """Return the note of a merge: its text, covering all the pages, sections and warnings of parents."""
     return note(text, (p for item in parents for p in item['pages']),
                 (s for item in parents for s in item['sections']),
                 (code for item in parents for code in item.get('warning_codes', [])))
@@ -290,6 +303,11 @@ def evidence_block(evidence, pages, limit=EVIDENCE_PROMPT_CHARS):
 
 
 def combined(notes, evidence, evidence_limit=EVIDENCE_PROMPT_CHARS):
+    """Join notes into one prompt input, followed by the source evidence of their pages.
+
+    Each note is headed by its PDF pages. The evidence takes at most
+    evidence_limit characters; 0 leaves it out.
+    """
     text = '\n\n'.join(f"## Notes {i + 1} | PDF pages: {','.join(map(str, item['pages']))}\n{item['text']}"
                        + ("\nEarlier-stage warning signals (may be resolved): " + ', '.join(item['warning_codes'])
                           if item.get('warning_codes') else '')
@@ -301,10 +319,11 @@ def combined(notes, evidence, evidence_limit=EVIDENCE_PROMPT_CHARS):
 
 
 def prepare_input(notes, evidence, fits):
-    """Use exact existing context checks; fall back before adding merge calls.
+    """Return (text, fits, evidence limit) for the input of a merge or final prompt.
 
-    The compact retry is tokenized only when full evidence does not fit. Scope,
-    warnings and raw notes remain; the evidence ledger itself is never trimmed.
+    Try the notes with their evidence, then without it, before the caller
+    falls back to another merge level. The evidence kept on disk is never
+    trimmed.
     """
     text = combined(notes, evidence)
     if fits(text):
@@ -440,6 +459,12 @@ def quote_checks(answer, evidence, input_pages):
 
 
 def audit(answer, evidence, input_pages):
+    """Check one generated text against the source evidence.
+
+    input_pages are the PDF pages this step received. Return the citation and
+    numeric check details; "issues" lists every warning, including certainty
+    wording and quotations found on another page.
+    """
     citations = citation_checks(answer, evidence['pdf_pages'], input_pages,
                                set(evidence['text_pages']) - set(evidence['missing']))
     numeric = numeric_checks(answer, evidence, set(input_pages))
@@ -480,7 +505,12 @@ MESSAGES = {
 
 
 def report_warnings(checks, language):
-    """Publish localized warnings, never silently remove invalid citations/results."""
+    """Return the warnings section appended to the final report, or "" when there is none.
+
+    It lists the final report's warnings in the report language and counts
+    those of earlier steps. The pipeline appends it to the report: the
+    model's text itself is left unchanged, nothing is removed or corrected.
+    """
     messages = MESSAGES['fr' if is_french(language) else 'en']
     final = checks['steps'].get('rapport_final.md', {})
     issues = final.get('issues', [])

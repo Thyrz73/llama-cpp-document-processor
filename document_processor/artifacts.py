@@ -16,11 +16,13 @@ from .files import atomic_json, atomic_text, file_hash
 
 
 class Artifacts:
-    """Validate artifacts and publish a manifest after each atomic file write.
+    """The intermediate results of one job configuration, with their manifest.
 
-    Legacy root files are never deleted. V2 work lives in a snapshot-specific
-    directory, while the completed report is still published at its old path.
-    A crash before manifest publication causes recomputation, never unsafe reuse.
+    write() saves a file atomically, then records it in the manifest; read()
+    returns it only when the manifest entry matches both its dependencies and
+    its content. A crash between the two leads to recomputation, never to the
+    reuse of an unverified file. Files left at the job root by older versions
+    are never deleted.
     """
 
     def __init__(self, directory, config):

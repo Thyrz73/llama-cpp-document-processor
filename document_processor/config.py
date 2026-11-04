@@ -1,4 +1,8 @@
-"""Resolve immutable job options without changing the external model server."""
+"""Turn the options of a new job into its validated configuration.
+
+Options set application budgets and the sampling values sent with each
+request; they never change the llama.cpp server's own settings.
+"""
 
 import copy
 import hashlib
@@ -18,14 +22,18 @@ class ConfigurationError(ValueError):
 
 
 def fingerprint(value):
-    """Hash a canonical JSON value; never use this as an authentication token."""
+    """Return the SHA-256 of value encoded as canonical JSON, to detect changes.
+
+    Keys are sorted, so equal values always give the same fingerprint. It is
+    a checksum, not a proof of who wrote the value.
+    """
     encoded = json.dumps(value, sort_keys=True, ensure_ascii=False,
                          separators=(",", ":"), allow_nan=False).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
 
 def parse_options(raw):
-    """Decode the optional multipart JSON field with bounded size and shape."""
+    """Decode the optional "options" form field: a JSON object of at most 8,192 characters."""
     if not raw:
         return {}
     if not isinstance(raw, str) or len(raw) > 8192:
@@ -40,10 +48,14 @@ def parse_options(raw):
 
 
 def resolve(defaults, options=None, capabilities=None):
-    """Apply legacy defaults, an explicit profile, then validated overrides.
+    """Return a job configuration built from the deployment defaults and the job's options.
 
-    Context and concurrency are administrator limits, never per-job overrides.
-    Unknown backend capabilities produce warnings, not invented capacities.
+    A chosen profile replaces the default token budgets, the detail level
+    scales the final budget, then validated overrides apply last. The context
+    size and concurrency remain administrator settings. capabilities is the
+    backend inspection, when known: an unknown server context adds a warning
+    instead of a guessed value. Raise ConfigurationError for any invalid
+    option or budget.
     """
     options = {} if options is None else options
     if not isinstance(options, dict) or set(options) - {

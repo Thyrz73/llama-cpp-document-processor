@@ -69,14 +69,22 @@ TEMPLATES = {
 
 
 def language_instruction(language):
-    """Keep report language independent of the browser's interface language."""
+    """Return the sentence that sets the report language.
+
+    "auto" asks for the language of the user's request; "fr" and "en" are
+    spelled out, and any other value is used as a language name.
+    """
     if language == "auto":
         return "Write in the same language as the user's request."
     return f"Write in { {'fr': 'French', 'en': 'English'}.get(language, language) }."
 
 
 def instruction(config, stage, question, extra=""):
-    """Build an instruction exclusively from the immutable job snapshot."""
+    """Build the instruction of one generation stage from the job snapshot.
+
+    It combines the stage's task template, the report language, the detail
+    level (final stage only), the user's request and extra.
+    """
     detail = {"concise": "Be concise without losing essential evidence.",
               "standard": "Use a balanced level of detail.",
               "detailed": "Explain the documented methods and evidence in detail."}
@@ -92,7 +100,11 @@ def is_french(language):
 
 
 def report_header(config, filename, pages, chunks, missing, ocr_pages):
-    """Localize metadata without changing the stable Markdown output filename."""
+    """Return the Markdown header of the report, in the report language.
+
+    It gives the PDF name, the page and section counts, and the pages that
+    needed OCR or still lack usable text.
+    """
     french = is_french(config["report_language"])
     title, page_label, chunk_label = (("Analyse de", "Pages PDF", "sections analysées")
                                      if french else ("Analysis of", "PDF pages", "analyzed chunks"))

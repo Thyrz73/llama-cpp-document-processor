@@ -1,4 +1,9 @@
-"""llama.cpp adapter with explicit provenance and bounded streaming previews."""
+"""Talk to the llama.cpp server: inspect it, count tokens and stream generations.
+
+Only the server set by the administrator is contacted. Streamed text is split
+into the answer and the model's reasoning, and live previews keep only a
+bounded tail of each.
+"""
 
 import hashlib
 import json
@@ -18,19 +23,22 @@ from .errors import Cancelled, ModelError
 
 @dataclass
 class CompletionResult:
-    """Keep answer text separate from the metrics safe to persist or export."""
+    """The answer of one generation and its measurements, which contain no text."""
 
     content: str
     metrics: dict
 
 
 def numeric(value):
-    """Accept only finite, nonnegative measurements returned by the engine."""
+    """Return value if it is a finite, non-negative number, else None."""
     return value if type(value) in (int, float) and math.isfinite(value) and value >= 0 else None
 
 
 def collect_metrics(event, metrics):
-    """Normalize optional usage/timings without treating SSE fragments as tokens."""
+    """Copy the token counts and timings reported in one stream event into metrics.
+
+    Only values sent by the engine are recorded; rates are derived from them.
+    """
     usage = event.get("usage") or {}
     timings = event.get("timings") or {}
     if not isinstance(usage, dict) or not isinstance(timings, dict):
@@ -55,7 +63,7 @@ def collect_metrics(event, metrics):
                                   ("decode_tokens_per_second", "output_tokens", "decode_ms")):
         if metrics.get(tokens) is not None and metrics.get(elapsed):
             metrics[name] = metrics[tokens] * 1000 / metrics[elapsed]
-    # Engine fields are not universally consistent: expose no invented useful count.
+    # Derive the answer token count only when the engine's figures are consistent.
     if (metrics.get("reasoning_tokens") is not None and metrics.get("output_tokens") is not None
             and metrics["reasoning_tokens"] <= metrics["output_tokens"]):
         metrics["useful_tokens"] = metrics["output_tokens"] - metrics["reasoning_tokens"]
@@ -63,7 +71,12 @@ def collect_metrics(event, metrics):
 
 
 class ThinkingSplitter:
-    """Split fragmented tags; optionally start inside a verified template's think block."""
+    """Separate <think>...</think> reasoning from the answer in streamed text.
+
+    A tag may be split across stream events. initial_thinking starts inside a
+    reasoning block, for templates that open it themselves; reasoning_limit
+    keeps only the latest reasoning characters.
+    """
 
     def __init__(self, *, initial_thinking=False, reasoning_limit=None):
         self.content_parts, self.reasoning_parts = [], []
@@ -74,16 +87,16 @@ class ThinkingSplitter:
 
     @property
     def content(self):
-        """Return useful output; it is retained until the completed artifact is saved."""
+        """The answer text received so far."""
         return "".join(self.content_parts)
 
     @property
     def reasoning(self):
-        """Return only the retained reasoning tail when a limit is configured."""
+        """The reasoning text kept so far: its latest reasoning_limit characters, if set."""
         return "".join(self.reasoning_parts)
 
     def append(self, text):
-        """Keep total character counters independently from retained reasoning text."""
+        """Add text to the current channel; reasoning_chars counts all reasoning received."""
         if self.inside_think:
             self.reasoning_chars += len(text)
             self.reasoning_parts.append(text)
@@ -93,7 +106,7 @@ class ThinkingSplitter:
             self.content_parts.append(text)
 
     def feed(self, fragment):
-        """Consume a delta while keeping partial delimiters for the next event."""
+        """Add a streamed fragment, holding back a possibly incomplete tag until the next one."""
         self.pending += fragment
         while self.pending:
             marker = "</think>" if self.inside_think else "<think>"
@@ -112,18 +125,24 @@ class ThinkingSplitter:
             break
 
     def finish(self):
-        """Flush the final fragment without inventing an absent answer channel."""
+        """Add the text held back by feed() once the stream has ended."""
         self.append(self.pending)
         self.pending = ""
 
 
-# A cancelled HTTP read may take time to close. Never start another generation
-# while its reader is still alive, even if the external server ignores disconnects.
+# Only one generation streams at a time. A cancelled read may take time to
+# close, so the next generation waits until the previous reader has exited,
+# even if the server ignores the disconnection.
 _stream_gate = threading.Lock()
 
 
 class ModelClient:
-    """Use an administrator-owned endpoint; jobs can never choose an arbitrary URL."""
+    """Client for the llama.cpp server of the deployment.
+
+    base_url and key come from the deployment settings, never from a job.
+    config is the job configuration, prompt its system prompt, and
+    preview_limit the number of characters kept for live previews.
+    """
 
     def __init__(self, base_url, key, config, prompt, preview_limit=12000):
         self.base_url, self.config, self.prompt = base_url.rstrip("/"), config, prompt
@@ -143,12 +162,17 @@ class ModelClient:
         self.current_metrics = {}
 
     def check_cancelled(self):
-        """Check a cheap callback shared with the job cancellation state."""
+        """Raise Cancelled when the job's cancel_check() reports a cancellation request."""
         if self.cancel_check():
             raise Cancelled()
 
     def json_request(self, method, path, *, timeout=90, **kwargs):
-        """Make a bounded request and suppress server bodies and credential-bearing URLs."""
+        """Send a request to the server and return its decoded JSON body.
+
+        Raise ModelError when the request fails or the body is not JSON. The
+        error never includes the response body or the URL, which may contain
+        credentials.
+        """
         self.check_cancelled()
         try:
             with self.session.request(method, self.base_url + path, timeout=(5, timeout), **kwargs) as response:
@@ -160,7 +184,12 @@ class ModelClient:
             raise ModelError("backend_unavailable", "The model backend is unavailable or returned invalid data.") from None
 
     def inspect(self):
-        """Read optional properties without inference or raw slot/prompt disclosure."""
+        """Return sanitized server properties without generating anything.
+
+        The model comes from /v1/models; the context size, slots, template
+        hash, version and default sampling come from the optional /props.
+        Unavailable properties are reported in the result, never raised.
+        """
         result: dict[str, Any] = {"status": "unavailable", "context_tokens": None, "slots": None,
                   "model": None, "template_hash": None, "version": None,
                   "sampling": {},
@@ -198,7 +227,10 @@ class ModelClient:
         return result
 
     def tokenize(self, text):
-        """Cache identical counts within this client/job using bounded hash keys."""
+        """Return the number of tokens in text, counted by the server's /tokenize.
+
+        Counts are cached for this client: at most 1024 entries, keyed by SHA-256.
+        """
         self.check_cancelled()
         key = hashlib.sha256(text.encode("utf-8")).digest()
         if key in self.token_cache:
@@ -220,7 +252,7 @@ class ModelClient:
         return count
 
     def model(self):
-        """Select the first advertised model, preserving the historical API behavior."""
+        """Return the ID of the first model listed by /v1/models, remembered afterwards."""
         if self.model_name:
             return self.model_name
         payload = self.json_request("GET", "/v1/models", timeout=5)
@@ -231,7 +263,11 @@ class ModelClient:
         return self.model_name
 
     def messages(self, instruction, content):
-        """Build independent messages and apply only an administrator-verified adapter."""
+        """Build the system and user messages of one generation.
+
+        With the "prompt" reasoning adapter, add /think or /no_think to the
+        instruction when the current stage sets a reasoning policy.
+        """
         policy = self.config.get("thinking_" + self.current_stage, "inherit")
         if policy != "inherit" and self.config.get("thinking_adapter") == "prompt":
             instruction += "\n" + ("/think" if policy == "on" else "/no_think")
@@ -239,7 +275,11 @@ class ModelClient:
                 {"role": "user", "content": instruction + "\n\n" + content}]
 
     def prompt_size(self, instruction, content):
-        """Count a rendered template when explicitly supported, otherwise reserve headroom."""
+        """Return (token count, counting method, safety margin) for a prompt.
+
+        When apply_template is supported, count the chat template rendered by
+        the server; otherwise count the raw messages and keep a larger margin.
+        """
         messages = self.messages(instruction, content)
         if self.config.get("apply_template"):
             template_request = {"messages": messages}
@@ -253,7 +293,11 @@ class ModelClient:
         return self.tokenize("\n".join(m["content"] for m in messages)), "estimated_template", 384
 
     def fits(self, instruction, content, output_tokens):
-        """Validate every real prompt against application and known engine limits."""
+        """Tell whether a prompt and output_tokens fit the context.
+
+        Return (fits, prompt tokens, counting method, margin). The limit is the
+        job's context_tokens, or the server's context when it is smaller.
+        """
         count, source, margin = self.prompt_size(instruction, content)
         limit = self.config["context_tokens"]
         engine = self.capabilities.get("context_tokens")
@@ -262,12 +306,13 @@ class ModelClient:
         return count + output_tokens + margin <= limit, count, source, margin
 
     def stream_lines(self, payload):
-        """Poll a bounded reader queue so a silent prefill cannot defeat a deadline.
+        """Send a streamed chat completion request and yield its raw lines.
 
-        Closing a socket is delegated to a daemon because some HTTP stacks wait
-        for an ongoing read. The gate prevents overlapping local generations
-        until the reader actually exits. Waiting is cancellable and does not
-        consume the next generation's deadline. No generation retry is made.
+        A reader thread does the network I/O, so this loop can enforce the step
+        deadline and cancellation even while the server stays silent. Only one
+        stream runs at a time: the next one waits, cancellably, until the
+        previous reader has exited, and its deadline starts after that wait.
+        Failed generations are not retried.
         """
         self.check_cancelled()
         while not _stream_gate.acquire(timeout=0.2):
@@ -278,7 +323,7 @@ class ModelClient:
         deadline = time.monotonic() + self.config["step_timeout_seconds"]
 
         def emit(kind, value):
-            """Apply backpressure without trapping the reader after cancellation."""
+            """Queue an event for the consuming loop; give up once that loop has stopped."""
             while not stopped.is_set():
                 try:
                     events.put((kind, value), timeout=0.2)
@@ -287,7 +332,7 @@ class ModelClient:
                     pass
 
         def read():
-            """Keep network I/O off the deadline/cancellation monitoring thread."""
+            """Reader thread: send the request and queue each line received."""
             try:
                 with self.session.post(self.base_url + "/v1/chat/completions", json=payload,
                                        stream=True, timeout=(10, self.config["request_timeout"])) as response:
@@ -336,11 +381,19 @@ class ModelClient:
             if reader.is_alive() and response_holder:
                 close = getattr(response_holder[0], "close", None)
                 if close:
+                    # Some HTTP stacks block close() during a read: close from another thread.
                     threading.Thread(target=close, name="llama-stream-close", daemon=True).start()
             reader.join(timeout=0.25)
 
     def generate(self, instruction, content, max_tokens, *, on_update=None):
-        """Return a structured completion; incomplete output never becomes an artifact."""
+        """Stream one completion and return a CompletionResult.
+
+        on_update(content, reasoning, completed) receives previews at most
+        every 0.8 seconds, and once at the end. Raise ConfigurationError when
+        the prompt does not fit the context, and ModelError when the stream
+        fails or the answer is truncated, empty or incomplete: such an answer
+        is never saved.
+        """
         started = time.monotonic()
         metrics: dict[str, Any] = {key: None for key in ("prompt_tokens", "output_tokens", "reasoning_tokens",
                    "useful_tokens", "cached_prompt_tokens", "evaluated_prompt_tokens", "prefill_ms", "decode_ms",
@@ -356,7 +409,7 @@ class ModelClient:
         latest, completed, finish_reason = 0.0, False, None
 
         def publish(force=False):
-            """Throttle disk/UI work independently from token arrival frequency."""
+            """Send the previews to on_update, at most every 0.8 seconds unless force is set."""
             nonlocal latest
             if on_update is None or (not force and time.monotonic() - latest < 0.8):
                 return
@@ -455,5 +508,5 @@ class ModelClient:
             metrics["reasoning_chars"] = reasoning_chars + splitter.reasoning_chars
 
     def complete(self, instruction, content, max_tokens, *, on_update=None):
-        """Preserve the historical string-returning interface for pipeline callers."""
+        """Return only the answer text of generate()."""
         return self.generate(instruction, content, max_tokens, on_update=on_update).content

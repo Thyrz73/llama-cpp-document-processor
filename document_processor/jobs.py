@@ -362,7 +362,7 @@ class JobStore:
         return Recorder(self.connect, job_id, queued_at)
 
     def metrics(self, job_id, limit=200, before=None):
-        """Return bounded public records; callers enforce job access before invoking this."""
+        """Return the job's attempts and a page of its step measurements (see metrics())."""
         return metrics(self.connect, job_id, limit, before)
 
 
@@ -423,7 +423,12 @@ class Recorder:
 
 
 def metrics(connect, job_id, limit=200, before=None):
-    """Return bounded public records; callers enforce job access before invoking this."""
+    """Return a job's measurements: they never contain document text or model output.
+
+    The result holds the latest 100 attempts, the newest ``limit`` steps whose
+    ID is below ``before``, step totals, and ``next_before`` to request the
+    following page.
+    """
     with connect() as con:
         runs = [dict(row) for row in con.execute(
             "SELECT * FROM job_runs WHERE job_id=? ORDER BY id DESC LIMIT 100", (job_id,))]

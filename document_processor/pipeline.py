@@ -459,7 +459,11 @@ class JobRun:
         return answer
 
     def _check(self, name, text, source_pages, sections, evidence_limit=None):
-        """Recheck even reused generations; persist trusted scope outside Markdown."""
+        """Run the reliability checks on a generated text, new or reused, and save the results.
+
+        The results, with the pages and sections the step covered, go to
+        quality_checks.json rather than into the Markdown text.
+        """
         check = reliability.audit(text, self.evidence, source_pages)
         check.update(input_pages=sorted(set(source_pages)), source_sections=sorted(set(sections)))
         if evidence_limit is not None:

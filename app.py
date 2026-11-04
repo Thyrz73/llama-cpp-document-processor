@@ -119,8 +119,8 @@ def public_job(job):
 def read_system_prompt():
     """Read the system prompt file and strip surrounding whitespace.
 
-    Capture the file for a new job; existing jobs use their private snapshots.
-    Return a safe configuration error when it is missing or unreadable.
+    New jobs save this text in their snapshot; existing jobs keep their copy.
+    Raise ConfigurationError when the file is missing or unreadable.
     """
     try:
         return SYSTEM_FILE.read_text(encoding="utf-8").strip()
@@ -129,7 +129,10 @@ def read_system_prompt():
 
 
 def runtime_defaults():
-    """Return administrative defaults; snapshots isolate existing jobs from changes."""
+    """Return the deployment's default job configuration, read from the environment.
+
+    New jobs start from it; existing jobs keep the configuration of their snapshot.
+    """
     return {
         "chunk_tokens": CHUNK_TOKENS, "context_tokens": CONTEXT_TOKENS,
         "analysis_tokens": ANALYSIS_TOKENS, "merge_tokens": MERGE_TOKENS,
@@ -147,7 +150,12 @@ def runtime_defaults():
 
 
 def new_snapshot(options, capabilities=None):
-    """Capture actual private prompt text and templates, not only their fingerprints."""
+    """Resolve options into the configuration snapshot of a new job.
+
+    The snapshot includes the current system prompt and task templates, so a
+    retry uses the same text even after these files change. Raise
+    ConfigurationError for invalid options or an empty system prompt.
+    """
     config = job_config.resolve(runtime_defaults(), options, capabilities)
     config.update(system_prompt=read_system_prompt(), templates=dict(prompts.TEMPLATES),
                   prompt_version=prompts.PROMPT_VERSION)
@@ -162,14 +170,17 @@ CAPABILITY_CACHE_SECONDS = 30
 
 
 def cached_capabilities():
-    """Read an advisory cache without initiating network traffic during form submission."""
+    """Return the backend inspection made less than CAPABILITY_CACHE_SECONDS ago, or None.
+
+    This never contacts the backend.
+    """
     if time.monotonic() < _capability_cache["expires"]:
         return _capability_cache["value"]
     return None
 
 
 def remember_capabilities(value):
-    """Publish a sanitized inspection from diagnostics or a job start for a short period."""
+    """Cache a backend inspection for CAPABILITY_CACHE_SECONDS."""
     # Readers check the expiry first, so publish the value before extending it.
     _capability_cache["value"] = value
     _capability_cache["expires"] = time.monotonic() + CAPABILITY_CACHE_SECONDS
@@ -185,7 +196,7 @@ class ModelClient(BackendClient):
                          read_system_prompt() if prompt is None else prompt, LIVE_PREVIEW_CHARS)
 
     def inspect(self):
-        """Share each job's read-only inspection with form validation and diagnostics."""
+        """Inspect the backend and cache the result for form validation and diagnostics."""
         value = super().inspect()
         remember_capabilities(value)
         return value
@@ -223,7 +234,7 @@ def job_directory(job_id):
 
 @app.get("/")
 def index():
-    """Serve the HTML page and its PDF size limit."""
+    """Serve the interface page with its upload limit and translations."""
     return render_template("index.html", limit=MAX_UPLOAD_MB, translations=TRANSLATIONS)
 
 
@@ -235,7 +246,7 @@ def health():
 
 @app.get("/api/profiles")
 def profile_info():
-    """Describe profiles without running a model or altering server settings."""
+    """Return the profiles, the default job configuration and the cached backend capabilities."""
     return jsonify(profiles=profiles.catalog(),
                    defaults=job_config.public_config(job_config.resolve(runtime_defaults())),
                    capabilities=cached_capabilities(),
@@ -244,7 +255,7 @@ def profile_info():
 
 @app.post("/api/config/preview")
 def config_preview():
-    """Resolve a small JSON request; the server repeats validation on job creation."""
+    """Resolve job options sent as JSON for the settings preview; job creation checks them again."""
     if request.content_length and request.content_length > 8192:
         raise job_config.ConfigurationError("invalid_options", "Options are too large.")
     options = request.get_json()
@@ -257,7 +268,10 @@ def config_preview():
 
 @app.get("/api/diagnostics")
 def diagnostics():
-    """Expose only read-only, sanitized properties and this process's own resources."""
+    """Return the backend inspection, cached or made now, and this process's memory use.
+
+    The inspection is sanitized and never asks the model to generate anything.
+    """
     with _capability_lock:
         value = cached_capabilities()
         if value is None:
@@ -305,7 +319,11 @@ def job_info(job_id):
 
 
 def delete_history_job(job_id):
-    """Commit history removal before touching files; serialize against retry/claim."""
+    """Delete one finished job and return (result dictionary, HTTP status).
+
+    The database record is deleted first and the files afterwards, so a file
+    cleanup problem only adds a warning_code to a successful result.
+    """
     if not is_job_id(job_id):
         return {"id": job_id, "deleted": False, "error_code": "invalid_job_id"}, 400
     try:
@@ -329,7 +347,7 @@ def delete_job(job_id):
 
 @app.post("/api/jobs/delete")
 def delete_jobs():
-    """Return an explicit outcome per unique ID, including partial failures."""
+    """Delete up to 100 finished jobs by ID; return one result per unique ID, with HTTP 207 if any fails."""
     if request.content_length and request.content_length > 8192:
         return jsonify(error_code="invalid_job_ids"), 400
     payload = request.get_json(silent=True)
@@ -343,16 +361,14 @@ def delete_jobs():
 
 @app.post("/api/jobs")
 def create_job():
-    """Store the uploaded PDF and create a queued job.
+    """Save an uploaded PDF and queue a job for it.
 
-    Read the multipart ``file`` and ``question`` fields. Use the default
-    question when absent; validate its content and length, the filename
-    extension, and the PDF header. The worker performs actual analysis and
-    page-limit validation.
-
-    Save the PDF, insert the job, and wake the worker. Return HTTP 201
-    with the ID and status, or HTTP 400 for an invalid form. Remove the file
-    if insertion fails.
+    Read the multipart fields "file", "question" (the default instructions
+    when empty) and "options". Resolve the options first, then check the
+    question length, the .pdf extension and the PDF header; the worker checks
+    the page count. Return HTTP 201 with the ID, status and public
+    configuration, 400 for an invalid request or 413 for an oversized file.
+    The saved PDF is removed if the job cannot be created.
     """
     options = job_config.parse_options(request.form.get("options"))
     config = new_snapshot(options, cached_capabilities())
@@ -393,11 +409,12 @@ def create_job():
 
 @app.get("/api/jobs/<job_id>/live")
 def job_live(job_id):
-    """Return the live preview for job_id, or HTTP 404.
+    """Return the latest live preview of job_id, or HTTP 404.
 
-    Read the preview JSON without calling the model. Return an empty preview
-    when live output is disabled, missing, or unreadable. A completed or
-    failed job is never reported as still generating.
+    The preview file is read as is: the model is never called. The preview is
+    empty when live output is disabled or the file is missing or unreadable,
+    and only a running job is reported as active. Reasoning is included only
+    with include_reasoning=true.
     """
     job = store.get_job(job_id)
     if not job:
@@ -428,7 +445,10 @@ def job_live(job_id):
 
 @app.get("/api/jobs/<job_id>/metrics")
 def job_metrics(job_id):
-    """Serve bounded measurements; no prompts, documents or reasoning are included."""
+    """Return a job's attempts and step measurements, paged with limit (1-500) and before.
+
+    Measurements never contain document text, prompts or model output.
+    """
     if not store.get_job(job_id):
         abort(404)
     try:
@@ -443,11 +463,11 @@ def job_metrics(job_id):
 
 @app.post("/api/jobs/<job_id>/retry")
 def retry_job(job_id):
-    """Requeue a failed job and wake the worker.
+    """Queue a failed or cancelled job again, with its original configuration.
 
-    Keep files and progress for resumption. Clear the error and return
-    HTTP 200; return 404 when the job is absent or 409 when its status is not
-    ``failed``.
+    Finished steps are reused. Return HTTP 200, 400 when the request has a
+    body (a retry cannot change the settings), 404 for an unknown job, or 409
+    when the job is neither failed nor cancelled or has used all its attempts.
     """
     if not store.get_job(job_id):
         abort(404)
@@ -466,7 +486,12 @@ def retry_job(job_id):
 
 @app.post("/api/jobs/<job_id>/cancel")
 def cancel_job(job_id):
-    """Request cancellation idempotently; active OCR stops at its next safe boundary."""
+    """Request the cancellation of a queued or running job.
+
+    Return HTTP 202 once requested: a queued job is cancelled at once, a
+    running job stops at its next cancellation check. Return 200 when the job
+    is already cancelled, 404 for an unknown job and 409 for a finished one.
+    """
     outcome, status = store.request_cancel(job_id)
     if outcome == "missing":
         abort(404)
@@ -500,7 +525,10 @@ def report(job_id):
 
 
 def resolve_report(job_id):
-    """Authorize the only publicly available artifact; never accept a filename."""
+    """Return (job, report path) for a finished job, or answer HTTP 404 or 409.
+
+    The server chooses the path: a request can never name a file.
+    """
     directory = job_directory(job_id)
     job = store.get_job(job_id)
     if not job:
@@ -515,7 +543,11 @@ def resolve_report(job_id):
 
 
 def ensure_report_name(job, path):
-    """Calculate old report names lazily, without loading a whole file or history."""
+    """Return the report's download name.
+
+    Jobs created before names were stored get one computed from the
+    beginning of the report, which is then saved.
+    """
     if job.get("report_name"):
         return job["report_name"]
     with path.open(encoding="utf-8", errors="replace") as stream:
@@ -526,7 +558,11 @@ def ensure_report_name(job, path):
 
 @app.get("/api/jobs/<job_id>/report/view")
 def view_report(job_id):
-    """Render bounded Markdown on the server; viewing never schedules model work."""
+    """Render the report as HTML in the report viewer page.
+
+    A report larger than reports.PREVIEW_MAX_BYTES is not rendered; it can
+    still be downloaded.
+    """
     language = request.args.get("lang", "en")
     if language not in ("en", "fr"):
         language = "en"
@@ -609,7 +645,7 @@ def invalid_configuration(exc):
 @app.errorhandler(409)
 @app.errorhandler(500)
 def api_error(exc):
-    """Never expose exception internals, local paths or backend response bodies."""
+    """Answer HTTP 400, 404, 409 and 500 with a generic JSON error, without exception details."""
     code = getattr(exc, "code", 500)
     messages = {400: "Invalid request.", 404: "Job or file not found.",
                 409: "The result is not ready.", 500: "An internal error occurred."}

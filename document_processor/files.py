@@ -10,12 +10,10 @@ from .observability import current_job_id, event
 
 
 def atomic_text(path, text):
-    """Atomically replace a file with UTF-8 text through a temporary file.
+    """Replace path with UTF-8 text atomically: readers never see a partial file.
 
-    path is a path or Path object whose parent must already exist. Write to
-    a neighboring file ending in .tmp first, then move it with os.replace so
-    readers never see partial content. Return no value and propagate I/O
-    errors.
+    The text is written to a neighbouring .tmp file, then moved over path. The
+    parent directory must exist. I/O errors are logged, then raised.
     """
     path = Path(path)
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -29,12 +27,7 @@ def atomic_text(path, text):
 
 
 def atomic_json(path, data):
-    """Atomically write data as UTF-8 JSON to path.
-
-    data must be JSON serializable. Preserve Unicode characters, then
-    delegate the write to atomic_text; the parent directory must already
-    exist.
-    """
+    """Write data to path as UTF-8 JSON, atomically (see atomic_text)."""
     atomic_text(path, json.dumps(data, ensure_ascii=False, indent=2))
 
 
