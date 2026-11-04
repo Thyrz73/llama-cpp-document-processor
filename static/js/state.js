@@ -28,6 +28,8 @@ function initialState() {
     jobsFailures: 0,
     cancellingJobs: new Set(),
     promptExpanded: new Set(),
+    // Outcome of the last retry, cancellation or deletion, shown above the list.
+    jobsNotice: null,
     // Live panel (live.js).
     expandedId: null,
     liveTab: "content",
@@ -37,7 +39,6 @@ function initialState() {
     deleting: false,
     deleteIntent: null,
     deleteTrigger: null,
-    historyNotice: null,
     // Upload form and settings preview (upload.js, settings.js).
     uploading: false,
     previewGeneration: 0,

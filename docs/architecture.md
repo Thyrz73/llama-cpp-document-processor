@@ -63,9 +63,9 @@ There is one process, one worker thread and a few web threads. SQLite holds the 
 | --- | --- |
 | `app.js` | `start()`: connects the page controls to the other modules and loads the list. |
 | `state.js` | All mutable interface state, in a single `state` object. |
-| `jobs.js`, `card.js` | The analyses list: polling, rendering, and the retry, cancel and delete actions. |
+| `jobs.js`, `card.js` | The analyses list: polling, rendering, the retry, cancel and delete actions, and the notice reporting their outcome. |
 | `live.js`, `metrics.js` | The live output and metrics panels of a job. |
-| `history.js` | History selection, the deletion dialog and its notice. |
+| `history.js` | History selection and the deletion dialog. |
 | `settings.js`, `upload.js` | The analysis settings with their server preview, and the upload form. |
 | `i18n.js`, `theme.js`, `api.js`, `dom.js` | Translations, color theme, JSON requests and DOM helpers. |
 

@@ -9,16 +9,13 @@ import { initTheme } from "./theme.js";
 import { initUpload } from "./upload.js";
 import {
   refresh,
+  renderJobsNotice,
   rerenderJobs,
   stopJobsPolling,
   submitDeletion,
 } from "./jobs.js";
 import { loadLive, translateLive } from "./live.js";
-import {
-  closeDeleteDialog,
-  renderDeleteDialog,
-  renderHistoryNotice,
-} from "./history.js";
+import { closeDeleteDialog, renderDeleteDialog } from "./history.js";
 import { initSettings, renderConfig } from "./settings.js";
 
 // The open live panel is reloaded this often, in milliseconds.
@@ -61,6 +58,6 @@ function changeLanguage() {
   translateLive();
   rerenderJobs();
   renderDeleteDialog();
-  renderHistoryNotice();
+  renderJobsNotice();
   if (state.profileConfig) renderConfig(state.profileConfig);
 }

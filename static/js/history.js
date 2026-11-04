@@ -1,6 +1,6 @@
-// History: selection of finished analyses, the deletion confirmation dialog
-// and the notice that reports the outcome of a deletion.
-// The deletion request itself is in jobs.js, which reloads the list.
+// History: selection of finished analyses and the deletion confirmation dialog.
+// The deletion request and the notice reporting its outcome are in jobs.js,
+// which reloads the list.
 import { $, el } from "./dom.js";
 import { state, TERMINAL_STATUSES } from "./state.js";
 import { t } from "./i18n.js";
@@ -117,26 +117,4 @@ export function closeDeleteDialog() {
   $("deleteDialog").close();
   const trigger = state.deleteTrigger;
   (trigger?.isConnected ? trigger : $("selectAllJobs"))?.focus();
-}
-
-// Show the outcome of the last deletion above the list.
-export function renderHistoryNotice() {
-  const node = $("historyNotice"),
-    notice = state.historyNotice;
-  if (!node || !notice) return;
-  node.hidden = false;
-  node.className =
-    "history-notice" +
-    (notice.error || notice.failed || notice.warnings ? " warning" : "");
-  node.textContent =
-    notice.error || t("Deleted: {count}.", { count: notice.deleted });
-  if (notice.failed)
-    node.textContent +=
-      " " +
-      t("Could not delete: {count}.", { count: notice.failed }) +
-      " " +
-      notice.reasons.map((code) => t("error." + code)).join(" ");
-  if (notice.warnings)
-    node.textContent +=
-      " " + t("Some associated files were retained. Check the server storage.");
 }

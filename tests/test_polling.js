@@ -48,7 +48,7 @@ async function runPollingTests(template, translations={en:{},fr:{}}) {
    // Accept form reset without additional simulation.
    reset(){}
   }
-  const elements=Object.fromEntries(['file','drop','feedback','theme','uploadForm','fileLabel','send','refresh','jobs','jobsError','historyNotice','deleteDialog','deleteTitle','deleteMessage','deleteDocument','deleteCancel','deleteConfirm'].map(id=>[id,new Element('div')]));
+  const elements=Object.fromEntries(['file','drop','feedback','theme','uploadForm','fileLabel','send','refresh','jobs','jobsError','jobsNotice','deleteDialog','deleteTitle','deleteMessage','deleteDocument','deleteCancel','deleteConfirm'].map(id=>[id,new Element('div')]));
   if(withSettings){
    for(const id of ['translations','uiLanguage','languageFlag','profile','reportLanguage','detailLevel','profileHelp','configPreview','configWarnings','diagnostics','diagnosticOutput','chunk_tokens','analysis_tokens','merge_tokens','final_tokens','temperature','top_p','top_k','min_p','step_timeout_seconds','max_calls','thinking_section','thinking_merge','thinking_final'])elements[id]=new Element('div');
    elements.translations.textContent=JSON.stringify(translations);
@@ -74,7 +74,9 @@ async function runPollingTests(template, translations={en:{},fr:{}}) {
   // the interface as main.js does. start() resets the state shared by the modules.
   Object.assign(globalThis,{document,localStorage:{getItem(){return null},setItem(){}},matchMedia:()=>({matches:false,addEventListener(){}}),fetch,
    setTimeout:(fn,delay)=>timer(fn,delay,false),clearTimeout:id=>timers.delete(id),setInterval:(fn,delay)=>timer(fn,delay,true),
-   FormData:class {constructor(){this.values=new Map()}set(k,v){this.values.set(k,v)}get(k){return this.values.get(k)}},alert:message=>{throw Error(message)}});
+   FormData:class {constructor(){this.values=new Map()}set(k,v){this.values.set(k,v)}get(k){return this.values.get(k)}},
+   // The interface never blocks with alert(): a call fails the scenario.
+   alert:message=>{throw Error(message)}});
   for(const code of inlineScripts)new Function(code)();
   start();
   const api={refresh:jobs.refresh,toggleLive:jobs.toggleLive,loadLive:live.loadLive,retry:jobs.retry,cancelJob:jobs.cancelJob,
@@ -197,7 +199,7 @@ async function runPollingTests(template, translations={en:{},fr:{}}) {
   const pending=h.api.cancelJob('a'.repeat(32));h.requests[1].reject(Error('Offline'));await pending;
   const cancel=descendants(h.elements.jobs).find(node=>node.className==='button-danger'&&!node.id);
   assert(!cancel.disabled&&cancel.textContent==='Cancel','Failed cancellation remains retryable');
-  assert(h.elements.feedback.textContent==='Offline','Error is visible');
+  assert(!h.elements.jobsNotice.hidden&&h.elements.jobsNotice.textContent==='Offline','Error is shown above the list');
  });
  await test('hidden tabs stop polling and visibility performs one fresh load',async()=>{
   const h=setup();await h.respond(0,{jobs:[job()]});await h.visible(false);
@@ -239,6 +241,17 @@ async function runPollingTests(template, translations={en:{},fr:{}}) {
   await h.respond(1,{status:'queued'});assert(h.requests[1].url.endsWith('/retry'),'Retry endpoint');
   await h.respond(2,{},false);await pending;assert(h.polls().length===1,'Known new work must retry the failed GET');
   await h.tick(6000);await h.respond(3,{jobs:[job('running')]});assert(h.polls().length===1,'Recovered active list');
+ });
+ await test('a refused retry is reported above the list and the next action clears it',async()=>{
+  const h=setup();await h.respond(0,{jobs:[job('failed')]});
+  const refused=h.api.retry('a'.repeat(32));
+  await h.respond(1,{error_code:'retry_limit',error:'The retry limit was reached.'},false);await refused;
+  assert(!h.elements.jobsNotice.hidden&&h.elements.jobsNotice.textContent==='The retry limit was reached.','Refusal shown without blocking the page');
+  assert(h.polls().length===0,'A refused retry starts no polling');
+  const accepted=h.api.retry('a'.repeat(32));
+  assert(h.elements.jobsNotice.hidden,'A new action hides the previous outcome');
+  await h.respond(2,{status:'queued'});await h.respond(3,{jobs:[job('queued')]});await accepted;
+  assert(h.elements.jobsNotice.hidden&&h.polls().length===1,'Accepted retry polls the queued job');
  });
  await test('transient list errors preserve cards and recover without unnecessary rendering',async()=>{
   const h=setup();const jobs=[job()];await h.respond(0,{jobs});const article=h.article();
@@ -335,8 +348,8 @@ async function runPollingTests(template, translations={en:{},fr:{}}) {
   assert(h.requests.length===2&&h.requests[1].url===`/api/jobs/${id}/delete`,'One individual POST');
   assert(checks(h)[0].disabled,'Selection disabled while deleting');
   await h.respond(1,{id,deleted:true,warning_code:null});
-  assert(!h.article()&&!h.elements.historyNotice.hidden,'Immediately remove successful entry');
-  assert(h.elements.historyNotice.textContent==='Deleted: 1.','Success notice');
+  assert(!h.article()&&!h.elements.jobsNotice.hidden,'Immediately remove successful entry');
+  assert(h.elements.jobsNotice.textContent==='Deleted: 1.','Success notice');
   await h.respond(2,{jobs:[]});await pending;
   assert(descendants(h.elements.jobs).some(n=>n.textContent==='No analysis history yet.'),'Empty history');
   assert(h.polls().length===0,'Deletion must not start active polling');
@@ -349,7 +362,7 @@ async function runPollingTests(template, translations={en:{},fr:{}}) {
   assert(JSON.parse(h.requests[1].options.body).ids.length===2,'Exact bulk IDs');
   await h.respond(1,{results:[{id:first,deleted:true},{id:second,deleted:false,error_code:'delete_database'}]});
   assert(checks(h).length===1&&checks(h)[0].checked,'Only failed analysis stays selected');
-  assert(h.elements.historyNotice.textContent.includes('Could not delete: 1.'),'Partial success is explicit');
+  assert(h.elements.jobsNotice.textContent.includes('Could not delete: 1.'),'Partial success is explicit');
   await h.respond(2,{jobs:[job('failed',0,second)]});await pending;
   assert(checks(h)[0].checked&&!checks(h)[0].disabled,'Failed analysis remains retryable');
  });
@@ -358,13 +371,13 @@ async function runPollingTests(template, translations={en:{},fr:{}}) {
   h.api.confirmDeletion(['a'.repeat(32)],false);const pending=h.api.submitDeletion();
   h.requests[1].reject(Error('Offline'));await pending;
   assert(h.article()&&checks(h)[0].checked&&!checks(h)[0].disabled,'Failed request keeps visible selection');
-  assert(h.elements.historyNotice.textContent==='Offline','Visible error');
+  assert(h.elements.jobsNotice.textContent==='Offline','Visible error');
  });
  await test('cleanup warnings are shown and old GETs cannot resurrect deleted cards',async()=>{
   const h=setup();const id='a'.repeat(32);await h.respond(0,{jobs:[job('done')]});
   h.click();h.api.confirmDeletion([id],false);const pending=h.api.submitDeletion();
   await h.respond(2,{id,deleted:true,warning_code:'delete_files_failed'});
-  assert(!h.article()&&h.elements.historyNotice.textContent.includes('Some associated files were retained.'),'Durable removal and explicit cleanup warning');
+  assert(!h.article()&&h.elements.jobsNotice.textContent.includes('Some associated files were retained.'),'Durable removal and explicit cleanup warning');
   await h.respond(1,{jobs:[job('done')]});assert(!h.article(),'Ignore stale GET');
   await h.respond(3,{jobs:[]});await pending;
  });

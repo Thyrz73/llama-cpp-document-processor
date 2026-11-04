@@ -9,7 +9,6 @@ import { loadLive } from "./live.js";
 import {
   closeDeleteDialog,
   historyControls,
-  renderHistoryNotice,
   updateSelection,
 } from "./history.js";
 
@@ -174,21 +173,53 @@ export function toggleLive(id) {
   renderJobs();
 }
 
-// Queue a failed or cancelled job again, then reload the list.
+// Show the outcome of a job action above the list, or hide it when notice
+// is null. notice is { error } or the counts of a deletion.
+function showJobsNotice(notice) {
+  state.jobsNotice = notice;
+  renderJobsNotice();
+}
+
+// Render the current notice in the interface language.
+export function renderJobsNotice() {
+  const node = $("jobsNotice"),
+    notice = state.jobsNotice;
+  if (!node) return;
+  node.hidden = !notice;
+  if (!notice) return;
+  node.className =
+    "jobs-notice" +
+    (notice.error || notice.failed || notice.warnings ? " warning" : "");
+  node.textContent =
+    notice.error || t("Deleted: {count}.", { count: notice.deleted });
+  if (notice.failed)
+    node.textContent +=
+      " " +
+      t("Could not delete: {count}.", { count: notice.failed }) +
+      " " +
+      notice.reasons.map((code) => t("error." + code)).join(" ");
+  if (notice.warnings)
+    node.textContent +=
+      " " + t("Some associated files were retained. Check the server storage.");
+}
+
+// Queue a failed or cancelled job again, then reload the list. A refusal,
+// such as an exhausted retry limit, is shown above the list.
 export async function retry(id) {
+  showJobsNotice(null);
   try {
     const r = await jsonFetch(`/api/jobs/${id}/retry`, { method: "POST" });
     const d = await r.json();
     if (!r.ok) throw Error(errorText(d, "Retry failed"));
     await refresh(true);
   } catch (err) {
-    alert(err.message);
+    showJobsNotice({ error: err.message });
   }
 }
 
 // Ask the server to cancel job id, then reload the list. Cancellation is
 // cooperative: a running job stops at its next check. Closing the browser
-// never cancels a job.
+// never cancels a job. A refusal is shown above the list.
 export async function cancelJob(id) {
   const current = state.jobs.find((job) => job.id === id);
   if (
@@ -199,6 +230,7 @@ export async function cancelJob(id) {
   )
     return;
   state.cancellingJobs.add(id);
+  showJobsNotice(null);
   rerenderJobs();
   try {
     const response = await jsonFetch(`/api/jobs/${id}/cancel`, {
@@ -213,7 +245,7 @@ export async function cancelJob(id) {
     }
     await refresh(true);
   } catch (error) {
-    $("feedback").textContent = error.message;
+    showJobsNotice({ error: error.message });
   } finally {
     state.cancellingJobs.delete(id);
     rerenderJobs();
@@ -226,6 +258,7 @@ export async function submitDeletion() {
   if (!state.deleteIntent || state.deleting) return;
   const { ids, bulk } = state.deleteIntent;
   closeDeleteDialog();
+  showJobsNotice(null);
   state.deleting = true;
   renderJobs();
   try {
@@ -249,7 +282,7 @@ export async function submitDeletion() {
         .map((result) => result.id),
     );
     const failures = results.filter((result) => !result.deleted);
-    state.historyNotice = {
+    state.jobsNotice = {
       deleted: removed.size,
       failed: ids.length - removed.size,
       warnings: results.some((result) => result.deleted && result.warning_code),
@@ -266,11 +299,10 @@ export async function submitDeletion() {
     // A list request sent before the deletion must not bring the cards back.
     state.refreshPending = true;
     renderJobs();
-    renderHistoryNotice();
+    renderJobsNotice();
     await refresh();
   } catch (error) {
-    state.historyNotice = { error: error.message };
-    renderHistoryNotice();
+    showJobsNotice({ error: error.message });
   } finally {
     state.deleting = false;
     renderJobs();
