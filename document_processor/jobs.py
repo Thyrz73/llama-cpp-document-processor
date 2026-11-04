@@ -2,8 +2,9 @@
 
 JobStore is the only code that reads or writes job records: the web routes,
 the worker and the pipeline call its methods instead of writing SQL. Each
-method opens a short-lived connection, so the store is safe to share between
-the web threads and the worker thread.
+thread uses its own SQLite connection, kept open between calls (see
+database.ThreadConnections), so the store is safe to share between the web
+threads and the worker thread. Call close() when the process stops.
 """
 
 import json
@@ -61,10 +62,21 @@ class JobStore:
     def __init__(self, data_dir):
         self.data_dir = Path(data_dir)
         self.db_path = self.data_dir / "jobs.sqlite3"
+        self._connections = database.ThreadConnections(self.db_path)
 
     def connect(self):
-        """Open a transaction on the jobs database (see database.connect)."""
-        return database.connect(self.db_path)
+        """Open a transaction on the jobs database, on this thread's connection (see database.ThreadConnections).
+
+        The block cannot contain another one, so do not call other JobStore methods inside it.
+        """
+        return self._connections.transaction()
+
+    def close(self):
+        """Fold the write-ahead log into the database file and close this thread's connection.
+
+        Call it from the main thread when the process stops (see ThreadConnections.close).
+        """
+        self._connections.close()
 
     def initialize(self):
         """Create the data directory and schema, then recover jobs cut short by a restart."""

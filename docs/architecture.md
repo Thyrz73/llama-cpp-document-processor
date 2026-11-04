@@ -74,6 +74,7 @@ Modules keep no state of their own and do nothing when imported; only `main.js` 
 ## Design rules
 
 - **One owner per concern.** Job queries live in `jobs.py` and schema migrations in `database.py`. PDF handling lives in `extraction.py`, and llama.cpp access in `model_client.py`.
+- **One database block at a time.** A `with store.connect()` block runs on its thread's own connection and cannot contain another one: call other `JobStore` methods after it. `JobStore` methods each use a single block.
 - **No dependency on the web app.** Package modules never import `app.py`, and their imports form no cycle. `tests/test_architecture.py` enforces both.
 - **Immutable jobs.** A job keeps its configuration snapshot forever; retries reuse it. To use new settings, create a new analysis.
 - **Public errors are coded.** Raise `ProcessingError(code, message)`, or a subclass, and translate the code in both languages of `static/translations.json`. `tests/test_errors.py` keeps codes and translations in sync.
@@ -84,7 +85,7 @@ Modules keep no state of their own and do nothing when imported; only `main.js` 
 The application targets small machines. The defaults are 512 MB of memory and 0.75 CPU for the container.
 
 - One worker processes one job at a time, and the model client never runs two generations at once.
-- SQLite connections are short-lived. Cancellation checks are answered in memory, and SQLite is reread at most once per second.
+- Each thread keeps one SQLite connection open, so an update no longer pays for opening a connection, and reads write nothing. In WAL mode, commits do not wait for the disk (`synchronous=NORMAL`): a power failure can undo the latest updates but never corrupts the database. A normal stop (`SIGTERM`, sent by `docker compose stop`) folds the log into `jobs.sqlite3`; after a crash, the `-wal` file still holds the latest changes. Cancellation checks are answered in memory, and SQLite is reread at most once per second.
 - OCR renders one page at a time within a pixel budget. Each result is written to disk as soon as it is ready, so a crash or a retry only repeats unfinished work.
 - Live previews are bounded. The browser stops polling when no job is active or when the tab is hidden.
 

@@ -47,6 +47,9 @@ class ToolTests(unittest.TestCase):
                 response = app.app.test_client().post("/api/jobs", data={
                     "file": (io.BytesIO(b"%PDF-test"), "example.pdf")})
                 identifier = response.json["id"]
+                # The inspector is meant for a stopped processor: a running one keeps its log and
+                # shared-memory files open, and every reader updates the latter.
+                app.store.close()
                 before = {path: files.file_hash(path) for path in root.rglob("*") if path.is_file()}
                 result = check_jobs.inspect(root)
                 self.assertEqual((result["snapshots_valid"], result["integrity_errors"]), (1, 0))

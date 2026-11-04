@@ -9,9 +9,14 @@ existing rows are never rewritten.
 Databases created before version tracking may already contain part of the
 schema, so every migration must also be safe to run on such a database
 (CREATE ... IF NOT EXISTS, add a column only when it is missing).
+
+Startup uses short-lived connections (connect). The running application keeps
+one connection per thread (ThreadConnections).
 """
 
+import logging
 import sqlite3
+import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
@@ -22,22 +27,98 @@ class SchemaVersionError(RuntimeError):
     """The database was upgraded by a newer version of the application."""
 
 
-@contextmanager
-def connect(path):
-    """Yield a connection whose transaction commits on success, rolls back on error.
+def _open(path):
+    """Open a connection: dictionary-like rows (sqlite3.Row), foreign keys, a 20 second wait for locks.
 
-    Rows behave like dictionaries (sqlite3.Row). A locked database is retried
-    for up to 20 seconds, and the connection is always closed afterward.
+    In WAL mode (see initialize) synchronous=NORMAL lets a commit return
+    without waiting for the disk. A power failure can then undo the latest
+    commits but never corrupts the database. Without WAL, the database keeps
+    SQLite's default, which is the only safe setting there.
     """
     con = sqlite3.connect(path, timeout=20)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA busy_timeout=20000")
     con.execute("PRAGMA foreign_keys=ON")
+    if con.execute("PRAGMA journal_mode").fetchone()[0] == "wal":
+        con.execute("PRAGMA synchronous=NORMAL")
+    return con
+
+
+@contextmanager
+def connect(path):
+    """Yield a short-lived connection whose transaction commits on success, rolls back on error.
+
+    A locked database is retried for up to 20 seconds, and the connection is
+    always closed afterward.
+    """
+    con = _open(path)
     try:
         with con:
             yield con
     finally:
         con.close()
+
+
+class ThreadConnections:
+    """Give each thread its own connection to the database and keep it open between uses.
+
+    Opening a connection for every query cost far more than the query: it
+    created and deleted the -wal and -shm files, because closing the last
+    connection of a WAL database folds the log into it, and every commit
+    waited for the disk. The application has few threads (the web threads and
+    the worker), so each one opens its connection on first use. A connection
+    never leaves its thread, so no lock is needed.
+    """
+
+    def __init__(self, path):
+        self.path = path
+        self._local = threading.local()
+
+    @contextmanager
+    def transaction(self):
+        """Yield this thread's connection; commit on success, roll back on error.
+
+        It works like connect(), except that the connection stays open. Blocks
+        cannot be nested: the inner one would commit the work of the outer
+        one. After a SQLite error the connection is closed and replaced at the
+        next use, as every use of connect() starts from a fresh one.
+        """
+        local = self._local
+        if getattr(local, "busy", False):
+            raise RuntimeError("Database transactions cannot be nested.")
+        con = getattr(local, "connection", None)
+        if con is None:
+            con = local.connection = _open(self.path)
+        local.busy = True
+        try:
+            with con:
+                yield con
+        except sqlite3.Error:
+            local.connection = None
+            con.close()
+            raise
+        finally:
+            local.busy = False
+
+    def close(self):
+        """Fold the write-ahead log into the database file, then close this thread's connection.
+
+        Call it when the process stops, so that the database file alone holds
+        every committed change. The connection of another thread may stay
+        open: an idle one does not prevent the folding. If it fails, the next
+        start recovers the log anyway.
+        """
+        con, self._local.connection = getattr(self._local, "connection", None), None
+        if con is None:
+            return
+        try:
+            # A thread that is writing only delays the folding: do not hold up the shutdown.
+            con.execute("PRAGMA busy_timeout=1000")
+            con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except sqlite3.Error as exc:
+            event("sqlite_checkpoint_failed", logging.WARNING, error_type=type(exc).__name__)
+        finally:
+            con.close()
 
 
 def _add_columns(con, table, columns):
@@ -106,7 +187,10 @@ def initialize(path):
     with connect(path) as con:
         event("sqlite_initializing", status="connected")
         # WAL lets the web threads read while the worker writes.
-        con.execute("PRAGMA journal_mode=WAL")
+        mode = con.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+        if mode != "wal":
+            # Some file systems cannot share the memory WAL needs; see _open for what changes.
+            event("sqlite_wal_unavailable", logging.WARNING, journal_mode=mode)
         con.execute("CREATE TABLE IF NOT EXISTS schema_migrations "
                     "(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
         applied = {row["version"] for row in con.execute("SELECT version FROM schema_migrations")}

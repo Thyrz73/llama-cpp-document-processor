@@ -163,7 +163,7 @@ data/jobs/<id>/
 - After a restart, interrupted analyses return to the queue unless their cancellation was requested. Compatible finished steps are reused after dependency and file-hash checks.
 - Old jobs without saved settings are recomputed with a warning. Files and metrics are kept until the analysis is deleted from the history; there is no automatic cleanup.
 - Startup applies numbered SQLite migrations ([database.py](document_processor/database.py)): each runs once, in its own transaction, and only adds tables, columns or indexes. A database already upgraded by a newer version stops startup with a `Database error: …` message; restore a matching backup before downgrading.
-- Preserve `.env`, `config/system_prompt.txt` and `data/` across updates. Stop the processor before copying SQLite and its WAL/SHM files, back up the old source or image too if you may need to roll back, and follow [migration and rollback](docs/migration-v2.md).
+- Preserve `.env`, `config/system_prompt.txt` and `data/` across updates. Stop the processor before copying SQLite and its WAL/SHM files (`docker compose stop` folds them into `jobs.sqlite3`; after a crash, the `-wal` file still holds the latest changes), back up the old source or image too if you may need to roll back, and follow [migration and rollback](docs/migration-v2.md).
 - Never commit private configuration, documents or reports. The supplied ignore files exclude common private paths; check what you stage.
 
 ## Troubleshooting and limits

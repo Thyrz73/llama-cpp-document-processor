@@ -18,7 +18,9 @@ import json
 import logging
 import os
 import re
+import signal
 import sqlite3
+import sys
 import threading
 import time
 import uuid
@@ -664,4 +666,10 @@ if __name__ == "__main__":
         raise SystemExit(f"Database error: {exc}") from None
     worker.start()
     log.info("processor_started port=%s", APP_PORT)
-    serve(app, host="0.0.0.0", port=APP_PORT, threads=4)
+    # docker stop sends SIGTERM. Make it a normal exit: waitress stops, then the database is closed cleanly.
+    signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(0))
+    try:
+        serve(app, host="0.0.0.0", port=APP_PORT, threads=4)
+    finally:
+        store.close()
+        event("processor_stopped", status="stopped")

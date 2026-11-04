@@ -1,14 +1,21 @@
-"""Validate environment settings and keep code defaults aligned with Compose."""
+"""Validate environment settings, startup and shutdown, and keep code defaults aligned with Compose."""
 
 import json
 import os
 import re
+import shutil
+import signal
+import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+
+import requests
 
 from document_processor import environment
 
@@ -98,6 +105,62 @@ class StartupTests(unittest.TestCase):
                 self.assertIn(name, COMPOSE_DEFAULTS, "variable missing from compose.yaml")
                 expected = COMPOSE_DEFAULTS[name]
                 self.assertEqual(str(value).lower() if isinstance(value, bool) else str(value), expected)
+
+
+class ShutdownTests(unittest.TestCase):
+    @staticmethod
+    def free_port():
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            return probe.getsockname()[1]
+
+    def wait_until(self, condition, server, timeout=30):
+        """Poll condition until it is true; fail at once if the server exits first."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if server.poll() is not None:
+                self.fail(f"app.py exited with status {server.returncode}")
+            try:
+                if condition():
+                    return
+            except (requests.RequestException, ValueError):
+                pass
+            time.sleep(0.1)
+        self.fail("timed out waiting for app.py")
+
+    @unittest.skipUnless(os.name == "posix", "SIGTERM is a POSIX signal")
+    def test_stop_signal_leaves_every_committed_change_in_the_database_file(self):
+        with tempfile.TemporaryDirectory(prefix="shutdown-test-") as data:
+            # The backend port is closed: the job fails at once, so the web thread and the worker both write.
+            env = {key: value for key, value in os.environ.items() if key not in COMPOSE_DEFAULTS}
+            port = self.free_port()
+            env.update(DATA_DIR=data, APP_PORT=str(port), LLAMA_BASE_URL=f"http://127.0.0.1:{self.free_port()}",
+                       SYSTEM_PROMPT_FILE=str(ROOT / "config/system_prompt.example.txt"),
+                       NO_PROXY="127.0.0.1", no_proxy="127.0.0.1")
+            http = requests.Session()
+            http.trust_env = False  # the server is local: ignore any proxy variable
+            self.addCleanup(http.close)
+            server = subprocess.Popen([sys.executable, "app.py"], cwd=ROOT, env=env,
+                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            try:
+                base = f"http://127.0.0.1:{port}"
+                self.wait_until(lambda: http.get(base + "/api/health", timeout=2).ok, server)
+                created = http.post(base + "/api/jobs", data={"question": "Summarize"}, timeout=10,
+                                    files={"file": ("a.pdf", b"%PDF-1.4")})
+                self.assertEqual(created.status_code, 201)
+                job = f"{base}/api/jobs/{created.json()['id']}"
+                self.wait_until(lambda: http.get(job, timeout=2).json()["status"] == "failed", server)
+                server.send_signal(signal.SIGTERM)
+                self.assertEqual(server.wait(timeout=30), 0)
+            finally:
+                if server.poll() is None:
+                    server.kill()
+                    server.wait()
+            # Copy the database file alone: its content must not depend on the -wal and -shm files.
+            copy = Path(data) / "copy.sqlite3"
+            shutil.copy(Path(data) / "jobs.sqlite3", copy)
+            with sqlite3.connect(copy) as con:
+                self.assertEqual(con.execute("SELECT status FROM jobs").fetchall(), [("failed",)])
 
 
 if __name__ == "__main__":
