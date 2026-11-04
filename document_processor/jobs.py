@@ -2,12 +2,57 @@
 
 import hashlib
 import json
+import os
+import re
+import shutil
+import stat
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 from .config import fingerprint
 from .observability import event
+
+
+def remove_private_files(data, job_id):
+    """Remove only an application's private UUID directory after DB commit.
+
+    Retain the entire tree if ownership is uncertain (links, mounts, special
+    files or an unsafe rmtree implementation). Never follow a stored filename
+    or artifact path. A cleanup error is a warning, not a database rollback:
+    some files may already be gone and history removal is still durable.
+    """
+    if not isinstance(job_id, str) or not re.fullmatch(r"[0-9a-f]{32}", job_id):
+        return "delete_files_unsafe"
+    directory = Path(data) / "jobs" / job_id
+    try:
+        if directory.resolve() != Path(data).resolve() / "jobs" / job_id or directory.is_symlink():
+            return "delete_files_unsafe"
+        try:
+            root_stat = directory.lstat()
+        except FileNotFoundError:
+            return None
+        if not stat.S_ISDIR(root_stat.st_mode) or not getattr(shutil.rmtree, "avoids_symlink_attacks", False):
+            return "delete_files_unsafe"
+
+        def walk_error(error):
+            raise error
+
+        for root, dirs, files in os.walk(directory, followlinks=False, onerror=walk_error):
+            for path in [Path(root), *(Path(root) / name for name in dirs + files)]:
+                info = path.lstat()
+                if (path.is_symlink() or path.is_mount() or info.st_dev != root_stat.st_dev
+                        or not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode))
+                        or (stat.S_ISREG(info.st_mode) and info.st_nlink != 1)):
+                    return "delete_files_unsafe"
+        shutil.rmtree(directory)
+    except RuntimeError:
+        # Path.resolve raises RuntimeError for symlink loops on Python 3.12.
+        return "delete_files_unsafe"
+    except OSError as exc:
+        event("history_cleanup_failed", job_id=job_id, error_type=type(exc).__name__)
+        return "delete_files_failed"
+    return None
 
 
 def now():
