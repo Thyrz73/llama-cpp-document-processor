@@ -1,0 +1,8 @@
+# Commits that only reformat files. "git blame" skips them, so it shows the
+# commit that last changed the content of each line.
+# GitHub uses this file automatically. To do the same locally, run once:
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+# List a commit here only if it changes no content (see CONTRIBUTING.md).
+
+# chore: improve code file format (Prettier style for the interface, CSS and docs)
+3f4030a9bc7b6a826f87bb92a19c5f7916a33120
