@@ -1,0 +1,142 @@
+// History: selection of finished analyses, the deletion confirmation dialog
+// and the notice that reports the outcome of a deletion.
+// The deletion request itself is in jobs.js, which reloads the list.
+import { $, el } from "./dom.js";
+import { state, TERMINAL_STATUSES } from "./state.js";
+import { t } from "./i18n.js";
+
+// Build the history toolbar: "select all" and the selection actions.
+// eligible holds the IDs of the finished analyses shown in the list.
+export function historyControls(eligible) {
+  const controls = el("div", undefined, "history-controls");
+  const label = el("label", undefined, "selection-label");
+  const all = el("input");
+  all.type = "checkbox";
+  all.id = "selectAllJobs";
+  all.addEventListener("change", () => {
+    for (const id of eligible) {
+      if (all.checked) state.selectedJobs.add(id);
+      else state.selectedJobs.delete(id);
+    }
+    updateSelection();
+  });
+  label.append(all, el("span", t("Select all displayed analyses")));
+  controls.append(label);
+  const bar = el("div", undefined, "selection-actions");
+  bar.id = "selectionActions";
+  const count = el("span");
+  count.id = "selectionCount";
+  count.setAttribute("role", "status");
+  const clear = el("button", t("Deselect"), "button-secondary");
+  clear.id = "clearSelection";
+  clear.type = "button";
+  clear.addEventListener("click", () => {
+    state.selectedJobs.clear();
+    updateSelection();
+  });
+  const remove = el("button", t("Delete selection"), "button-danger");
+  remove.id = "deleteSelection";
+  remove.type = "button";
+  remove.addEventListener("click", () =>
+    confirmDeletion([...state.selectedJobs], true, remove),
+  );
+  bar.append(count, clear, remove);
+  controls.append(bar);
+  return controls;
+}
+
+// Show the selection on the checkboxes, cards and toolbar.
+// Only the finished analyses of the displayed list can be selected.
+export function updateSelection() {
+  const { selectedJobs, deleting } = state;
+  const eligible = state.jobs.filter((job) => TERMINAL_STATUSES.has(job.status));
+  const all = $("selectAllJobs");
+  if (!all) return;
+  all.checked = eligible.length > 0 && selectedJobs.size === eligible.length;
+  all.indeterminate =
+    selectedJobs.size > 0 && selectedJobs.size < eligible.length;
+  all.disabled = deleting || !eligible.length;
+  for (const checkbox of $("jobs").querySelectorAll("[data-select-job]")) {
+    checkbox.checked = selectedJobs.has(checkbox.dataset.selectJob);
+    checkbox.disabled = deleting;
+  }
+  for (const item of $("jobs").querySelectorAll("[data-job-id]"))
+    item.classList.toggle("item-selected", selectedJobs.has(item.dataset.jobId));
+  $("selectionActions").hidden = !selectedJobs.size;
+  $("selectionCount").textContent = t("{count} analyses selected", {
+    count: selectedJobs.size,
+  });
+  $("clearSelection").disabled = deleting;
+  $("deleteSelection").disabled = deleting;
+  $("deleteSelection").textContent = t(
+    deleting ? "Deleting…" : "Delete selection",
+  );
+  $("deleteSelection").setAttribute("aria-busy", String(deleting));
+}
+
+// Fill the confirmation dialog for the pending deletion.
+export function renderDeleteDialog() {
+  const intent = state.deleteIntent;
+  if (!intent) return;
+  $("deleteTitle").textContent = t(
+    intent.bulk ? "Delete selected analyses?" : "Delete analysis?",
+  );
+  $("deleteMessage").textContent = t(
+    intent.bulk
+      ? "Permanently delete {count} analyses? This action cannot be undone."
+      : "Delete this analysis from history? This action cannot be undone.",
+    { count: intent.ids.length },
+  );
+  $("deleteDocument").textContent = intent.bulk ? "" : intent.name;
+}
+
+// Ask for confirmation before deleting ids (finished analyses only).
+// trigger is the button that opened the dialog; it gets the focus back.
+export function confirmDeletion(ids, bulk, trigger) {
+  if (state.deleting || state.deleteIntent) return;
+  const eligible = ids.filter((id) =>
+    state.jobs.some(
+      (job) => job.id === id && TERMINAL_STATUSES.has(job.status),
+    ),
+  );
+  if (!eligible.length) return;
+  state.deleteIntent = {
+    ids: [...new Set(eligible)],
+    bulk,
+    name: state.jobs.find((job) => job.id === eligible[0]).filename,
+  };
+  state.deleteTrigger = trigger;
+  renderDeleteDialog();
+  $("deleteDialog").showModal();
+  $("deleteCancel").focus();
+}
+
+// Close the dialog without deleting anything.
+export function closeDeleteDialog() {
+  state.deleteIntent = null;
+  $("deleteDialog").close();
+  const trigger = state.deleteTrigger;
+  (trigger?.isConnected ? trigger : $("selectAllJobs"))?.focus();
+}
+
+// Show the outcome of the last deletion above the list.
+export function renderHistoryNotice() {
+  const node = $("historyNotice"),
+    notice = state.historyNotice;
+  if (!node || !notice) return;
+  node.hidden = false;
+  node.className =
+    "history-notice" +
+    (notice.error || notice.failed || notice.warnings ? " warning" : "");
+  node.textContent =
+    notice.error || t("Deleted: {count}.", { count: notice.deleted });
+  if (notice.failed)
+    node.textContent +=
+      " " +
+      t("Could not delete: {count}.", { count: notice.failed }) +
+      " " +
+      notice.reasons.map((code) => t("error." + code)).join(" ");
+  if (notice.warnings)
+    node.textContent +=
+      " " + t("Some associated files were retained. Check the server storage.");
+}

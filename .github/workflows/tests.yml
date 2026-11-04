@@ -32,8 +32,7 @@ jobs:
         run: node tests/test_polling.js
       - name: Validate frontend syntax and Compose
         run: |
-          node --check static/app.js
-          node --check static/report.js
+          for file in static/js/*.js static/report.js; do node --check "$file"; done
           docker compose config --quiet
       - name: Check application packaging
         run: docker build -t document-processor:test .

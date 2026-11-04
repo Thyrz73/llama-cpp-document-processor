@@ -1,14 +1,23 @@
 /* Dependency-free browser logic tests. Run with: node tests/test_polling.js
- * The runner also accepts the template source in any JavaScript test host.
+ * The interface modules of static/js/ run against a simulated DOM, network
+ * and timers; no browser or HTTP server is started.
  */
-// Run scenarios against JavaScript extracted from the HTML template.
+const path=require('node:path');
+const {pathToFileURL}=require('node:url');
+// Import an interface module from static/js/.
+const loadModule=name=>import(pathToFileURL(path.join(__dirname,'../static/js',name)).href);
+// Run the scenarios with the page template and its translations.
 // Return successful test names; throw on the first failure.
 async function runPollingTests(template, translations={en:{},fr:{}}) {
- const source=[...template.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m=>m[1]).join('\n');
+ // The page's inline scripts (the early theme script) run before the modules.
+ const inlineScripts=[...template.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m=>m[1]);
+ const [{start},jobs,live,settings,history]=await Promise.all(['app.js','jobs.js','live.js','settings.js','history.js'].map(loadModule));
  // Throw a test error when condition is false, using the supplied message.
  const assert=(condition,message)=>{if(!condition)throw Error(message)};
- // Let promise continuations run without waiting for the network.
- const flush=async()=>{for(let i=0;i<20;i++)await Promise.resolve()};
+ // Let every pending promise continuation run: Node starts a macrotask only
+ // once the microtask queue is empty. Network responses and timers stay
+ // under the scenario's control.
+ const flush=()=>new Promise(resolve=>setImmediate(resolve));
  // Build a reproducible job with a status, progress, and ID.
  const job=(status='running',progress=52,id='a'.repeat(32))=>({id,status,progress_percent:progress,filename:'example.pdf',created_at:'2026-10-31T12:00:00Z'});
  const descendants=node=>node.children.flatMap(child=>[child,...descendants(child)]);
@@ -61,9 +70,16 @@ async function runPollingTests(template, translations={en:{},fr:{}}) {
   const requests=[];
   // Keep each request pending until the scenario resolves it.
   const fetch=(url,options)=>new Promise((resolve,reject)=>requests.push({url,options,resolve,reject}));
-  const api=new Function('document','localStorage','matchMedia','fetch','setTimeout','clearTimeout','setInterval','FormData','alert',source+'\nreturn {refresh,toggleLive,loadLive,retry,cancelJob,selectedOptions,previewConfig,schedulePreview,confirmDeletion,submitDeletion,closeDeleteDialog};')(
-   document,{getItem(){return null},setItem(){}},()=>({matches:false,addEventListener(){}}),fetch,
-   (fn,delay)=>timer(fn,delay,false),id=>timers.delete(id),(fn,delay)=>timer(fn,delay,true),class {constructor(){this.values=new Map()}set(k,v){this.values.set(k,v)}get(k){return this.values.get(k)}},message=>{throw Error(message)});
+  // Install the simulated browser, run the page's inline scripts, then start
+  // the interface as main.js does. start() resets the state shared by the modules.
+  Object.assign(globalThis,{document,localStorage:{getItem(){return null},setItem(){}},matchMedia:()=>({matches:false,addEventListener(){}}),fetch,
+   setTimeout:(fn,delay)=>timer(fn,delay,false),clearTimeout:id=>timers.delete(id),setInterval:(fn,delay)=>timer(fn,delay,true),
+   FormData:class {constructor(){this.values=new Map()}set(k,v){this.values.set(k,v)}get(k){return this.values.get(k)}},alert:message=>{throw Error(message)}});
+  for(const code of inlineScripts)new Function(code)();
+  start();
+  const api={refresh:jobs.refresh,toggleLive:jobs.toggleLive,loadLive:live.loadLive,retry:jobs.retry,cancelJob:jobs.cancelJob,
+   selectedOptions:settings.selectedOptions,previewConfig:settings.previewConfig,schedulePreview:settings.schedulePreview,
+   confirmDeletion:history.confirmDeletion,submitDeletion:jobs.submitDeletion,closeDeleteDialog:history.closeDeleteDialog};
   // Resolve request index with payload, then run its asynchronous continuations.
   const respond=async(index,payload,ok=true)=>{assert(!!requests[index],'Missing request '+index);requests[index].resolve({ok,status:ok?200:503,json:async()=>payload});await flush()};
   // List only six-second timers dedicated to the jobs list.
@@ -79,8 +95,9 @@ async function runPollingTests(template, translations={en:{},fr:{}}) {
   return {api,elements,document,requests,respond,polls,tick,visible,click,upload,article:()=>elements.jobs.children.flatMap(section=>section.children.flatMap(node=>node.children)).find(node=>node.tag==='article')};
  }
  const results=[];
- // Run scenario fn and record its name only after it succeeds.
- async function test(name,fn){await fn();results.push(name)}
+ // Run scenario fn and record its name only after it succeeds. The modules
+ // share one state, so the scenario's last continuations finish first.
+ async function test(name,fn){await fn();await flush();results.push(name)}
 
  await test('initial load stops for empty, completed, failed and mixed terminal lists',async()=>{
   for(const jobs of [[],[job('done',100)],[job('failed')],[job('done',100),job('failed',20,'b'.repeat(32))]]){
@@ -393,12 +410,10 @@ async function runPollingTests(template, translations={en:{},fr:{}}) {
  return results;
 }
 
-if(typeof module!=='undefined'&&typeof require==='function'){
- module.exports=runPollingTests;
- if(require.main===module){
-  const fs=require('node:fs'),path=require('node:path');
-  runPollingTests(fs.readFileSync(path.join(__dirname,'../templates/index.html'),'utf8').replace(/<script src=[^>]*><\/script>/,()=>'<script>'+fs.readFileSync(path.join(__dirname,'../static/app.js'),'utf8')+'</script>'),JSON.parse(fs.readFileSync(path.join(__dirname,'../static/translations.json'),'utf8')))
-   .then(results=>{for(const name of results)console.log('ok - '+name);console.log(`${results.length} tests passed`);})
-   .catch(error=>{console.error(error);process.exitCode=1;});
- }
+module.exports=runPollingTests;
+if(require.main===module){
+ const fs=require('node:fs');
+ runPollingTests(fs.readFileSync(path.join(__dirname,'../templates/index.html'),'utf8'),JSON.parse(fs.readFileSync(path.join(__dirname,'../static/translations.json'),'utf8')))
+  .then(results=>{for(const name of results)console.log('ok - '+name);console.log(`${results.length} tests passed`);})
+  .catch(error=>{console.error(error);process.exitCode=1;});
 }

@@ -372,9 +372,13 @@ class V2Tests(unittest.TestCase):
         self.assertNotIn("KEEP_PRIVATE", response.get_data(as_text=True))
         catalog = json.loads((Path(app.__file__).parent / "static/translations.json").read_text())
         self.assertEqual(set(catalog["fr"]), set(catalog["en"]))
-        for path in ("app.js", "app.css", "fr.svg", "en.svg"):
+        modules = sorted(path.name for path in (Path(app.__file__).parent / "static/js").glob("*.js"))
+        for path in ("app.css", "fr.svg", "en.svg", "report.js", *(f"js/{name}" for name in modules)):
             with self.client.get("/static/" + path) as asset:
                 self.assertEqual(asset.status_code, 200)
+                if path.endswith(".js"):
+                    # Browsers refuse to run a module served with a non-JavaScript type.
+                    self.assertIn(asset.mimetype, ("text/javascript", "application/javascript"))
 
     def test_cross_origin_posts_and_external_report_symlinks_are_rejected(self):
         self.assertEqual(self.client.post("/api/jobs", headers={"Origin": "https://foreign.invalid"}).status_code, 403)

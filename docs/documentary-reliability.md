@@ -163,7 +163,7 @@ Justifier les pénalités et conserver les rapports pour comparaison. Aucun scor
 .venv/bin/python -m compileall -q app.py document_processor scripts tests
 .venv/bin/python scripts/benchmark.py --variants docs/benchmark-variants.example.json --repeat 1
 node tests/test_polling.js
-node --check static/app.js
+for file in static/js/*.js; do node --check "$file"; done
 git diff --check
 ```
 

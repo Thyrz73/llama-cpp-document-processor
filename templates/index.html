@@ -363,6 +363,6 @@ Analyze this entire document: objectives, methods, results, key figures, assumpt
     <script id="translations" type="application/json">
       {{ translations|tojson }}
     </script>
-    <script src="{{ url_for('static', filename='app.js') }}" defer></script>
+    <script type="module" src="{{ url_for('static', filename='js/main.js') }}"></script>
   </body>
 </html>

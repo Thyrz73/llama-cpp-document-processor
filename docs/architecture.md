@@ -40,7 +40,8 @@ There is one process, one worker thread and a few web threads. SQLite holds the 
 | `document_processor/reports.py` | Report download names and safe Markdown rendering. |
 | `document_processor/pipeline.py` | `JobRun`: the analysis steps of one job. |
 | `document_processor/worker.py` | `Worker`: claims queued jobs, runs them and records how they ended. |
-| `static/`, `templates/` | Browser interface: `app.js`, styles and the English/French `translations.json`. |
+| `static/js/` | Browser interface: ES modules started by `main.js` (see [Browser interface](#browser-interface)). |
+| `static/`, `templates/` | Page template, styles, report viewer script and the English/French `translations.json`. |
 | `scripts/` | `check_jobs.py` (read-only data check) and `benchmark.py`. |
 | `tests/` | `unittest` suites and the Node.js interface tests (`test_polling.js`). |
 
@@ -53,6 +54,22 @@ There is one process, one worker thread and a few web threads. SQLite holds the 
 5. **End.** The job becomes `done`, `failed` (with a translated error code) or `cancelled`. Failed and cancelled jobs can be retried with the same snapshot, up to `MAX_JOB_ATTEMPTS` attempts in total.
 
 `POST /api/jobs/<id>/cancel` records the request in SQLite, then signals the running job in memory. The job checks for it at each phase change, tokenizer call and streamed token, and every 0.2 seconds while it waits for the model. After a restart, `JobStore.initialize()` requeues interrupted jobs and completes pending cancellations.
+
+## Browser interface
+
+`templates/index.html` loads `static/js/main.js` as an ES module, which calls `start()` in `app.js`. There is no build step: browsers load the modules directly.
+
+| Module | Responsibility |
+| --- | --- |
+| `app.js` | `start()`: connects the page controls to the other modules and loads the list. |
+| `state.js` | All mutable interface state, in a single `state` object. |
+| `jobs.js`, `card.js` | The analyses list: polling, rendering, and the retry, cancel and delete actions. |
+| `live.js`, `metrics.js` | The live output and metrics panels of a job. |
+| `history.js` | History selection, the deletion dialog and its notice. |
+| `settings.js`, `upload.js` | The analysis settings with their server preview, and the upload form. |
+| `i18n.js`, `theme.js`, `api.js`, `dom.js` | Translations, color theme, JSON requests and DOM helpers. |
+
+Modules keep no state of their own and do nothing when imported; only `main.js` starts the interface. Their imports form no cycle (`tests/test_architecture.py`), and `tests/test_polling.js` runs the real modules against a simulated browser.
 
 ## Design rules
 
@@ -81,6 +98,7 @@ The application targets small machines. The defaults are 512 MB of memory and 0.
 | Change a task prompt | `prompts.TEMPLATES`, and increase `PROMPT_VERSION` | Existing jobs keep their saved prompts |
 | Change a profile | `profiles.PROFILES`, increase `PROFILE_VERSION`, then update the README table | `tests/test_v2.py` |
 | Add an API route | A route in `app.py` that calls `JobStore` methods, then document it in [api.md](api.md) | Route tests in `tests/` |
+| Change the interface | The module of the [Browser interface](#browser-interface) concerned; add new text to both languages of `static/translations.json` | `tests/test_polling.js` |
 
 ## Tests
 
@@ -90,4 +108,4 @@ Run the commands from the README's Development section. Python tests use tempora
 - `test_progress.py`: job states and progress, restart recovery and the worker loop.
 - `test_database.py`: migrations of databases from every past release.
 - `test_architecture.py`, `test_errors.py`, `test_environment.py`, `test_dependencies.py`: guards against import cycles, untranslated errors, configuration drift and diverging dependency locks.
-- `test_polling.js`: interface polling, rendering and history selection, run with Node.js.
+- `test_polling.js`: the interface modules against a simulated browser: polling, rendering, live output, settings and history, run with Node.js.
