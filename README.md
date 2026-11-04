@@ -192,7 +192,7 @@ Known limits:
 
 ## Development
 
-Contributions are welcome. Start with the [architecture guide](docs/architecture.md): it describes the code structure, the life of a job and where to make common changes.
+Contributions are welcome: [CONTRIBUTING.md](CONTRIBUTING.md) describes the workflow, the checks and the commit conventions, and the [architecture guide](docs/architecture.md) explains the code structure, the life of a job and where to make common changes.
 
 Docker and CI use Python 3.12. On Ubuntu/Debian, install `python3-venv`, `tesseract-ocr`, `tesseract-ocr-eng` and `tesseract-ocr-fra`, then:
 
@@ -207,18 +207,11 @@ node tests/test_polling.js
 
 Python tests use temporary data and simulated model responses; no llama.cpp is needed. Two tests require real Tesseract: they are skipped locally when it is missing, but never in CI (`CI` set), where a missing Tesseract fails the build. Node.js 22.7 or later is needed only for the frontend tests (CI uses Node.js 22). [CI](.github/workflows/tests.yml) also lints with ruff and type-checks with mypy (settings in [pyproject.toml](pyproject.toml)), checks syntax, an offline benchmark plan, Compose and Docker packaging.
 
-Dependencies are declared with version ranges in `requirements.in` (runtime) and `requirements-dev.in` (tools). The installed `requirements.txt` and `requirements-dev.txt` files are hash-locked for Linux and Python 3.12; never edit them by hand. After changing a `.in` file, regenerate both locks with pip-tools, runtime first:
-
-```bash
-.venv/bin/python -m pip install pip-tools
-.venv/bin/pip-compile --generate-hashes --strip-extras --allow-unsafe --no-emit-index-url -o requirements.txt requirements.in
-.venv/bin/pip-compile --generate-hashes --strip-extras --allow-unsafe --no-emit-index-url -o requirements-dev.txt requirements-dev.in
-```
-
-The Docker base image is pinned by digest. [Dependabot](.github/dependabot.yml) proposes weekly updates for Python packages, the base image and GitHub Actions on `develop`.
+Dependencies are hash-locked and the Docker base image is pinned by digest; [Dependabot](.github/dependabot.yml) proposes weekly updates on `develop`. To change a dependency, see [updating dependencies](CONTRIBUTING.md#updating-dependencies).
 
 ## Documentation
 
+- [Contributing](CONTRIBUTING.md): workflow, checks, commit conventions and dependency updates.
 - [Architecture](docs/architecture.md): modules, data flow, design rules and common changes.
 - [Using the interface in detail](docs/usage.md): history, reports, cancellation, live output, logs and metrics.
 - [API](docs/api.md): routes, statuses, errors, retries and history deletion.
