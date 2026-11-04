@@ -27,6 +27,21 @@ class SchemaVersionError(RuntimeError):
     """The database was upgraded by a newer version of the application."""
 
 
+class _Connection(sqlite3.Connection):
+    """A connection that closes itself when it is dropped.
+
+    A thread's connection lives as long as the thread, and the threads of the
+    web server cannot close theirs. Python 3.13 and later warn about a
+    connection that was never closed explicitly.
+    """
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass  # dropped by another thread than the one that opened it: SQLite still frees it
+
+
 def _open(path):
     """Open a connection: dictionary-like rows (sqlite3.Row), foreign keys, a 20 second wait for locks.
 
@@ -35,7 +50,7 @@ def _open(path):
     commits but never corrupts the database. Without WAL, the database keeps
     SQLite's default, which is the only safe setting there.
     """
-    con = sqlite3.connect(path, timeout=20)
+    con = sqlite3.connect(path, timeout=20, factory=_Connection)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA busy_timeout=20000")
     con.execute("PRAGMA foreign_keys=ON")

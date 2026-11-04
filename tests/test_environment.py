@@ -12,6 +12,7 @@ import sys
 import tempfile
 import time
 import unittest
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
@@ -159,7 +160,7 @@ class ShutdownTests(unittest.TestCase):
             # Copy the database file alone: its content must not depend on the -wal and -shm files.
             copy = Path(data) / "copy.sqlite3"
             shutil.copy(Path(data) / "jobs.sqlite3", copy)
-            with sqlite3.connect(copy) as con:
+            with closing(sqlite3.connect(copy)) as con:
                 self.assertEqual(con.execute("SELECT status FROM jobs").fetchall(), [("failed",)])
 
 

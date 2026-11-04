@@ -1,10 +1,12 @@
 """Upgrade databases of every past release with numbered, atomic migrations, and share the connections."""
 
+import gc
 import shutil
 import sqlite3
 import tempfile
 import threading
 import unittest
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
@@ -108,6 +110,7 @@ class ThreadConnectionsTests(unittest.TestCase):
         def use():
             with self.connections.transaction() as con:
                 other.append(id(con))
+            self.connections.close()
 
         thread = threading.Thread(target=use)
         thread.start()
@@ -147,6 +150,23 @@ class ThreadConnectionsTests(unittest.TestCase):
         with self.connections.transaction() as replacement:
             self.assertIsNot(replacement, failing)
 
+    def test_a_dropped_connection_is_closed_explicitly(self):
+        closed = []
+        real_close = sqlite3.Connection.close
+
+        def spy(connection):
+            closed.append(True)
+            real_close(connection)
+
+        # Python 3.13 warns about a connection that was never closed: nothing closes the ones of web server threads.
+        connections = database.ThreadConnections(self.path)
+        with patch.object(database._Connection, "close", spy):
+            with connections.transaction():
+                pass
+            del connections
+            gc.collect()  # a connection is part of a reference cycle
+        self.assertEqual(closed, [True])
+
     def test_transactions_cannot_be_nested(self):
         with self.assertRaisesRegex(RuntimeError, "cannot be nested"):
             with self.connections.transaction() as con:
@@ -164,6 +184,7 @@ class ThreadConnectionsTests(unittest.TestCase):
                 pass
             connected.set()
             release.wait(30)
+            self.connections.close()
 
         other = threading.Thread(target=stay_connected)
         other.start()
@@ -177,7 +198,7 @@ class ThreadConnectionsTests(unittest.TestCase):
         self.assertEqual(self.path.with_name(self.path.name + "-wal").stat().st_size, 0)
         copy = self.path.with_name("copy.sqlite3")
         shutil.copy(self.path, copy)
-        with sqlite3.connect(copy) as check:
+        with closing(sqlite3.connect(copy)) as check:
             self.assertEqual(check.execute("SELECT id FROM jobs").fetchall(), [("a",)])
         self.connections.close()  # a second call has nothing to do
 
@@ -195,6 +216,8 @@ class ThreadConnectionsTests(unittest.TestCase):
                     store.update_job(identifier, progress_percent=percent)
             except Exception as exc:
                 failures.append(exc)
+            finally:
+                store.close()
 
         def read():
             try:
@@ -204,6 +227,8 @@ class ThreadConnectionsTests(unittest.TestCase):
                     store.read_cancellation(identifiers[1])
             except Exception as exc:
                 failures.append(exc)
+            finally:
+                store.close()
 
         with patch("document_processor.jobs.event"):  # keep the log of 160 updates out of the test output
             writers = [threading.Thread(target=write, args=(identifier,)) for identifier in identifiers]
