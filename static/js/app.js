@@ -14,12 +14,9 @@ import {
   stopJobsPolling,
   submitDeletion,
 } from "./jobs.js";
-import { loadLive, translateLive } from "./live.js";
+import { stopLivePolling, syncLivePolling, translateLive } from "./live.js";
 import { closeDeleteDialog, renderDeleteDialog } from "./history.js";
 import { initSettings, renderConfig } from "./settings.js";
-
-// The open live panel is reloaded this often, in milliseconds.
-const LIVE_REFRESH_MS = 1700;
 
 export function start() {
   resetState();
@@ -38,17 +35,33 @@ export function start() {
     $("deleteConfirm").addEventListener("click", submitDeletion);
   }
   // A hidden tab stops polling; it reloads once when it becomes visible again.
-  document.addEventListener("visibilitychange", () => {
-    if (document.hidden) stopJobsPolling();
-    else {
+  const page = document;
+  const visibility = () => {
+    if (page.hidden) {
+      stopJobsPolling();
+      stopLivePolling();
+    } else {
       refresh();
-      loadLive();
+      syncLivePolling(true);
     }
-  });
+  };
+  page.addEventListener("visibilitychange", visibility);
+  state.uiCleanup = () => {
+    page.removeEventListener("visibilitychange", visibility);
+  };
   refresh();
-  setInterval(loadLive, LIVE_REFRESH_MS);
   $("uiLanguage")?.addEventListener("change", changeLanguage);
   initSettings();
+}
+
+// Release polling when the page is destroyed; late requests cannot restart it.
+export function stop() {
+  stopJobsPolling();
+  stopLivePolling();
+  state.uiCleanup?.();
+  state.uiCleanup = null;
+  state.uiActive = false;
+  state.uiGeneration++;
 }
 
 // Switch the interface language; reports and model output are unchanged.

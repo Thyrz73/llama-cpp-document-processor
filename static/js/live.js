@@ -1,7 +1,7 @@
 // Live panel: the latest model output of the job whose panel is open.
-// app.js calls loadLive() every 1.7 seconds; one request runs at a time.
+// Poll only an open active analysis, 1.7 seconds after the previous request settles.
 import { $, el } from "./dom.js";
-import { state } from "./state.js";
+import { state, ACTIVE_STATUSES } from "./state.js";
 import { t, phaseLabel } from "./i18n.js";
 import { jsonFetch } from "./api.js";
 
@@ -9,6 +9,43 @@ const TAB_LABELS = {
   content: "Generated text",
   reasoning: "Reasoning (if available)",
 };
+const LIVE_REFRESH_MS = 1700;
+
+export function stopLivePolling() {
+  if (state.liveTimer !== null) clearTimeout(state.liveTimer);
+  state.liveTimer = null;
+}
+
+function liveJobStatus() {
+  return state.jobs.find((job) => job.id === state.expandedId)?.status;
+}
+
+function canPollLive() {
+  return state.uiActive && !document.hidden && state.expandedId &&
+    $("live-content") && ACTIVE_STATUSES.has(liveJobStatus());
+}
+
+function scheduleLivePolling() {
+  if (!canPollLive() || state.liveBusy || state.liveTimer !== null) return;
+  state.liveTimer = setTimeout(() => {
+    state.liveTimer = null;
+    loadLive();
+  }, LIVE_REFRESH_MS);
+}
+
+// A new panel or job status needs one fresh preview, including the final one.
+// Unrelated list rebuilds keep the current timer and leave historical previews idle.
+export function syncLivePolling(resume = false) {
+  const output = $("live-content"), status = liveJobStatus();
+  const changed = output !== state.liveOutput || status !== state.liveJobStatus;
+  if (!canPollLive()) stopLivePolling();
+  if (!state.uiActive || document.hidden) return;
+  state.liveOutput = output;
+  state.liveJobStatus = status;
+  if (!output) return;
+  if (changed || (resume && canPollLive())) loadLive();
+  else scheduleLivePolling();
+}
 
 // Build the live panel of job id; loadLive() fills it afterwards.
 export function createLive(id) {
@@ -69,22 +106,25 @@ export function translateLive() {
 // replaced in the meantime is ignored. The text follows new output only when
 // the reader is already at the bottom.
 export async function loadLive() {
-  if (document.hidden || state.liveBusy) return;
+  if (!state.uiActive || document.hidden || state.liveBusy) return;
+  stopLivePolling();
   const id = state.expandedId,
     output = $("live-content"),
     note = $("live-note");
   if (!id || !output || !note) return;
+  const generation = state.uiGeneration, tab = state.liveTab, status = liveJobStatus();
   state.liveBusy = true;
   try {
     const res = await jsonFetch(
       `/api/jobs/${id}/live` +
-        (state.liveTab === "reasoning" ? "?include_reasoning=true" : ""),
+        (tab === "reasoning" ? "?include_reasoning=true" : ""),
       { cache: "no-store" },
     );
     if (!res.ok) throw Error(`HTTP ${res.status}`);
     const d = await res.json();
-    if (id !== state.expandedId || output !== $("live-content")) return;
-    // Show the tab selected now, even if it changed during the request.
+    if (generation !== state.uiGeneration || !state.uiActive || document.hidden ||
+        id !== state.expandedId || output !== $("live-content") || tab !== state.liveTab) return;
+    // Render the requested channel; pending channel changes load after settlement.
     const reasoning = state.liveTab === "reasoning";
     const content = reasoning ? d.reasoning : d.content;
     const truncated =
@@ -113,12 +153,16 @@ export async function loadLive() {
       " · " +
       liveMetrics(d);
   } catch (err) {
-    if (id === state.expandedId && output === $("live-content"))
+    if (generation === state.uiGeneration && state.uiActive && !document.hidden &&
+        id === state.expandedId && output === $("live-content"))
       note.textContent = t("Cannot load live output: ") + err.message;
   } finally {
+    if (generation !== state.uiGeneration) return;
     state.liveBusy = false;
-    // Load a panel opened during the request as soon as this one settles.
-    if ($("live-content") && output !== $("live-content")) loadLive();
+    // Follow a changed panel, channel or terminal status once this request settles.
+    if ($("live-content") && (output !== $("live-content") || tab !== state.liveTab || status !== liveJobStatus()))
+      loadLive();
+    else scheduleLivePolling();
   }
 }
 

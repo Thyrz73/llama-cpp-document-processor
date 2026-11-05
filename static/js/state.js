@@ -10,11 +10,18 @@ export const state = initialState();
 
 // Give every field its value from when the page opens.
 export function resetState() {
-  Object.assign(state, initialState());
+  for (const timer of [state.jobsTimer, state.liveTimer, state.previewTimer])
+    if (timer !== null) clearTimeout(timer);
+  state.uiCleanup?.();
+  const generation = state.uiGeneration + 1;
+  Object.assign(state, initialState(), { uiGeneration: generation });
 }
 
 function initialState() {
   return {
+    uiActive: true,
+    uiGeneration: 0,
+    uiCleanup: null,
     // Interface language and translation catalog (i18n.js).
     language: "en",
     catalog: { en: {}, fr: {} },
@@ -34,6 +41,9 @@ function initialState() {
     expandedId: null,
     liveTab: "content",
     liveBusy: false,
+    liveTimer: null,
+    liveOutput: null,
+    liveJobStatus: null,
     // History selection and deletion (history.js).
     selectionMode: false,
     selectedJobs: new Set(),

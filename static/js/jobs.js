@@ -5,7 +5,7 @@ import { state, ACTIVE_STATUSES, TERMINAL_STATUSES } from "./state.js";
 import { t, errorText } from "./i18n.js";
 import { jsonFetch } from "./api.js";
 import { jobCard } from "./card.js";
-import { loadLive } from "./live.js";
+import { syncLivePolling } from "./live.js";
 import {
   closeDeleteDialog,
   historyControls,
@@ -33,7 +33,7 @@ export function stopJobsPolling() {
 // Plan the next automatic reload while a job is active and the tab is visible.
 function scheduleJobsPolling() {
   stopJobsPolling();
-  if (state.hasActiveJobs && !document.hidden)
+  if (state.uiActive && state.hasActiveJobs && !document.hidden)
     state.jobsTimer = setTimeout(
       refresh,
       Math.min(MAX_POLL_MS, POLL_MS * 2 ** Math.max(0, state.jobsFailures - 1)),
@@ -46,6 +46,8 @@ function scheduleJobsPolling() {
 // (The Refresh button passes its click event instead.) On errors the cards
 // stay visible; polling adapts once the request settles.
 export function refresh(afterChange = false) {
+  if (!state.uiActive) return Promise.resolve();
+  const generation = state.uiGeneration;
   if (afterChange === true) {
     state.hasActiveJobs = true;
     state.refreshPending = true;
@@ -59,6 +61,7 @@ export function refresh(afterChange = false) {
         const res = await jsonFetch("/api/jobs", { cache: "no-store" });
         if (!res.ok) throw Error(t("Unable to load jobs"));
         const data = await res.json();
+        if (generation !== state.uiGeneration) return;
         if (state.refreshPending) continue;
         state.jobsFailures = 0;
         state.jobs = data.jobs;
@@ -68,6 +71,7 @@ export function refresh(afterChange = false) {
         $("jobsError").hidden = true;
         renderJobs();
       } catch (err) {
+        if (generation !== state.uiGeneration) return;
         state.jobsFailures++;
         const error = $("jobsError"),
           message = t("Cannot refresh analyses: ") + err.message;
@@ -76,6 +80,7 @@ export function refresh(afterChange = false) {
       }
     } while (state.refreshPending);
   })().finally(() => {
+    if (generation !== state.uiGeneration) return;
     state.jobsRequest = null;
     // A change can be reported between the end of the loop and this cleanup.
     if (state.refreshPending) return refresh(true);
@@ -101,7 +106,10 @@ export function renderJobs() {
     state.deleting,
     state.selectionMode,
   ]);
-  if (signature === state.renderedSignature) return;
+  if (signature === state.renderedSignature) {
+    syncLivePolling();
+    return;
+  }
   const focused = document.activeElement;
   const live = state.expandedId ? $("live-" + state.expandedId) : null,
     host = $("jobs");
@@ -141,7 +149,7 @@ export function renderJobs() {
     $("live-content").scrollTop = priorScroll;
   updateSelection();
   restoreFocus(focused, host);
-  loadLive();
+  syncLivePolling();
 }
 
 // Give the keyboard focus back to the control that had it before a rebuild,

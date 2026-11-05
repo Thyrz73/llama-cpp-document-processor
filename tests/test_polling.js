@@ -11,7 +11,7 @@ const loadModule=name=>import(pathToFileURL(path.join(__dirname,'../static/js',n
 async function runPollingTests(template, translations={en:{},fr:{}}) {
  // The page's inline scripts (the early theme script) run before the modules.
  const inlineScripts=[...template.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m=>m[1]);
- const [{start},jobs,live,settings,history]=await Promise.all(['app.js','jobs.js','live.js','settings.js','history.js'].map(loadModule));
+ const [{start,stop},jobs,live,settings,history,{resetState}]=await Promise.all(['app.js','jobs.js','live.js','settings.js','history.js','state.js'].map(loadModule));
  // Throw a test error when condition is false, using the supplied message.
  const assert=(condition,message)=>{if(!condition)throw Error(message)};
  // Let every pending promise continuation run: Node starts a macrotask only
@@ -65,7 +65,7 @@ async function runPollingTests(template, translations={en:{},fr:{}}) {
   // Expose DOM operations used by the template and store its events.
   const document={hidden:false,documentElement:new Element('html'),createElement:tag=>new Element(tag),createElementNS:(namespace,tag)=>new Element(tag),
    getElementById:id=>elements[id]||find(elements.jobs,id)||null,
-   addEventListener(type,fn){events[type]=fn}};
+   addEventListener(type,fn){events[type]=fn},removeEventListener(type,fn){if(events[type]===fn)delete events[type]}};
   const timers=new Map();let timerId=0;
   // Register a simulated timer and return its ID without starting it.
   const timer=(fn,delay,interval)=>{timers.set(++timerId,{fn,delay,interval});return timerId};
@@ -83,13 +83,14 @@ async function runPollingTests(template, translations={en:{},fr:{}}) {
   for(const code of inlineScripts)new Function(code)();
   const earlyTheme=document.documentElement.dataset.theme;
   start();
-  const api={refresh:jobs.refresh,toggleLive:jobs.toggleLive,loadLive:live.loadLive,retry:jobs.retry,cancelJob:jobs.cancelJob,
+  const api={start,stop,resetState,refresh:jobs.refresh,toggleLive:jobs.toggleLive,loadLive:live.loadLive,retry:jobs.retry,cancelJob:jobs.cancelJob,
    selectedOptions:settings.selectedOptions,previewConfig:settings.previewConfig,schedulePreview:settings.schedulePreview,
    confirmDeletion:history.confirmDeletion,submitDeletion:jobs.submitDeletion,closeDeleteDialog:history.closeDeleteDialog};
   // Resolve request index with payload, then run its asynchronous continuations.
   const respond=async(index,payload,ok=true)=>{assert(!!requests[index],'Missing request '+index);requests[index].resolve({ok,status:ok?200:503,json:async()=>payload});await flush()};
   // List only six-second timers dedicated to the jobs list.
   const polls=()=>[...timers.values()].filter(t=>t.delay===6000);
+  const livePolls=()=>[...timers.values()].filter(t=>t.delay===1700);
   // Trigger the single timer for the requested delay; keep interval timers.
   const tick=async delay=>{const matches=[...timers.entries()].filter(([,t])=>t.delay===delay);assert(matches.length===1,'Expected one timer at '+delay);const [id,t]=matches[0];if(!t.interval)timers.delete(id);t.fn();await flush()};
   // Simulate a visibility change and run the page handler.
@@ -98,7 +99,7 @@ async function runPollingTests(template, translations={en:{},fr:{}}) {
   const click=()=>elements.refresh.handlers.click[0]({type:'click'});
   // Simulate form submission and return its processing promise.
   const upload=()=>elements.uploadForm.handlers.submit[0]({preventDefault(){},target:elements.uploadForm});
-  return {api,elements,document,requests,respond,polls,tick,visible,click,upload,systemTheme,earlyTheme,article:()=>elements.jobs.children.flatMap(section=>section.children.flatMap(node=>node.children)).find(node=>node.tag==='article')};
+  return {api,elements,document,requests,respond,polls,livePolls,tick,visible,click,upload,systemTheme,earlyTheme,article:()=>elements.jobs.children.flatMap(section=>section.children.flatMap(node=>node.children)).find(node=>node.tag==='article')};
  }
  const results=[];
  // Run scenario fn and record its name only after it succeeds. The modules
@@ -319,19 +320,25 @@ async function runPollingTests(template, translations={en:{},fr:{}}) {
   const h=setup();await h.respond(0,{},false);assert(h.polls().length===0,'No active work is known');
   h.click();await h.respond(1,{jobs:[job('queued',0)]});assert(h.polls().length===1,'Manual recovery starts active polling');
  });
- await test('Live uses its existing timer without overlapping requests or list reloads',async()=>{
+ await test('Live schedules one timeout after each request without overlaps or list reloads',async()=>{
   const h=setup();await h.respond(0,{jobs:[job()]});h.api.toggleLive('a'.repeat(32));
-  assert(h.requests[1].url.endsWith('/live'),'Opening Live only loads its endpoint');h.api.loadLive();await h.tick(1700);
+  assert(h.requests[1].url.endsWith('/live'),'Opening Live only loads its endpoint');h.api.loadLive();
+  assert(h.livePolls().length===0,'Do not schedule while a request is pending');
   const reasoningTab=h.document.getElementById('live-'+'a'.repeat(32)).children[0].children[0].children[1];
   reasoningTab.handlers.click[0]();assert(h.requests.length===2,'Live requests must not overlap');
-  await h.respond(1,{phase:'Analysis',content:'Preview',reasoning:'Reasoning preview',active:true});
+  await h.respond(1,{phase:'Analysis',content:'Preview',reasoning:'',active:true});
+  assert(h.requests.length===3&&h.requests[2].url.endsWith('?include_reasoning=true'),'A pending channel change fetches opt-in reasoning');
+  await h.respond(2,{phase:'Analysis',content:'Preview',reasoning:'Reasoning preview',active:true});
+  assert(h.livePolls().length===1&&!h.livePolls()[0].interval,'Use one cancellable timeout');
   const panel=h.document.getElementById('live-'+'a'.repeat(32)),output=h.document.getElementById('live-content');output.scrollTop=25;
-  await h.tick(6000);await h.respond(2,{jobs:[job('running',70)]});
+  await h.tick(6000);await h.respond(3,{jobs:[job('running',70)]});
   assert(h.document.getElementById('live-'+'a'.repeat(32))===panel,'Reuse the Live panel when progress changes');
   assert(output.textContent==='Reasoning preview'&&output.scrollTop===25,'Preserve the selected Live tab, content and scroll position');
-  await h.respond(3,{phase:'Analysis',content:'Preview',reasoning:'Reasoning preview',active:true});await h.visible(false);await h.tick(1700);
-  assert(h.requests.length===4,'No hidden Live requests');h.api.toggleLive('a'.repeat(32));await h.tick(1700);
-  assert(h.requests.length===4,'No requests when Live is closed');
+  assert(h.requests.length===4,'List updates do not cause extra Live loads');
+  await h.tick(1700);await h.respond(4,{phase:'Analysis',content:'Preview',reasoning:'Reasoning preview',active:true});
+  await h.visible(false);assert(h.livePolls().length===0,'Hidden tabs remove the Live timer');
+  h.api.loadLive();assert(h.requests.length===5,'No hidden Live requests');h.api.toggleLive('a'.repeat(32));
+  assert(h.livePolls().length===0,'No timer when Live is closed');
  });
  await test('Live follows a panel reopened or switched while a request is pending',async()=>{
   for(const nextId of ['a'.repeat(32),'b'.repeat(32)]){
@@ -348,6 +355,91 @@ async function runPollingTests(template, translations={en:{},fr:{}}) {
    await h.respond(2,{phase:'New pass',content:'Current preview',active:true});
    assert(output.textContent==='Current preview','Update the current panel');
   }
+ });
+ await test('Live keeps polling queued and running jobs between inactive model passes',async()=>{
+  for(const status of ['queued','running']){
+   const h=setup();await h.respond(0,{jobs:[job(status)]});
+   assert(h.livePolls().length===0,'Closed panels have no Live timer');
+   h.api.toggleLive('a'.repeat(32));await h.respond(1,{content:'Between passes',active:false});
+   assert(h.livePolls().length===1,'Job activity governs polling, not model-pass activity');
+   await h.tick(1700);await h.respond(2,{content:'Next pass',active:true});
+   assert(h.livePolls().length===1,'Resume output without reopening the panel');
+   h.api.toggleLive('a'.repeat(32));assert(h.livePolls().length===0,'Closing cancels the timeout');
+  }
+ });
+ await test('terminal Live panels load on demand and stay idle across other job updates',async()=>{
+  for(const status of ['done','failed','cancelled']){
+   const h=setup();await h.respond(0,{jobs:[job(status),job('running',20,'b'.repeat(32))]});
+   h.api.toggleLive('a'.repeat(32));await h.respond(1,{content:'Old answer',active:false});
+   assert(h.livePolls().length===0,'Opening history performs only one load');
+   await h.tick(6000);await h.respond(2,{jobs:[job(status),job('running',30,'b'.repeat(32))]});
+   assert(h.requests.length===3&&h.livePolls().length===0,'Another job must not poll a historical panel');
+   const tabs=h.document.getElementById('live-'+'a'.repeat(32)).children[0].children[0].children;
+   tabs[1].handlers.click[0]();await h.respond(3,{content:'Old answer',reasoning:'Old reasoning',active:false});
+   assert(h.document.getElementById('live-content').textContent==='Old reasoning','Manual reasoning selection still loads');
+   tabs[0].handlers.click[0]();await h.respond(4,{content:'Old answer',active:false});
+   assert(h.livePolls().length===0,'Channel changes never start history polling');
+  }
+ });
+ await test('a terminal job gets one final preview before Live polling stops',async()=>{
+  for(const status of ['done','failed','cancelled']){
+   const h=setup();await h.respond(0,{jobs:[job()]});h.api.toggleLive('a'.repeat(32));
+   await h.respond(1,{content:'Partial',active:true});
+   await h.tick(6000);await h.respond(2,{jobs:[job(status)]});
+   assert(h.livePolls().length===0&&h.requests.length===4,'Cancel the timer and fetch the final preview');
+   await h.respond(3,{content:'Final',active:false});
+   assert(h.document.getElementById('live-content').textContent==='Final'&&h.livePolls().length===0,'Keep the last useful text without a timer');
+  }
+ });
+ await test('termination during a Live request coalesces one final reload',async()=>{
+  const h=setup();await h.respond(0,{jobs:[job()]});h.api.toggleLive('a'.repeat(32));
+  await h.tick(6000);await h.respond(2,{jobs:[job('done')]});
+  assert(h.requests.length===3,'Do not overlap the pending preview');
+  await h.respond(1,{content:'Older snapshot',active:true});
+  assert(h.requests.length===4,'Follow the changed job status with one final request');
+  await h.respond(3,{content:'Completed',active:false});assert(h.livePolls().length===0,'No restart after the final response');
+ });
+ await test('visibility cancels Live timers and late hidden responses never restart them',async()=>{
+  const h=setup();await h.respond(0,{jobs:[job()]});h.api.toggleLive('a'.repeat(32));
+  await h.visible(false);await h.respond(1,{content:'Hidden snapshot',active:true});
+  assert(h.livePolls().length===0,'An in-flight response cannot restart hidden polling');
+  await h.visible(true);assert(h.requests.length===4,'Visibility performs one list and one active Live load');
+  await h.respond(2,{jobs:[job()]});await h.respond(3,{content:'Current',active:false});
+  assert(h.livePolls().length===1,'Visible running jobs resume between passes');
+  await h.visible(false);assert(h.livePolls().length===0,'Cancel an already planned timeout too');
+ });
+ await test('destroying or resetting UI prevents late Live and list responses from restarting polling',async()=>{
+  for(const cleanup of ['stop','resetState']){
+   const h=setup();await h.respond(0,{jobs:[job()]});h.api.toggleLive('a'.repeat(32));h.api.refresh();
+   h.api[cleanup]();assert(h.polls().length===0&&h.livePolls().length===0,'Cleanup releases both polling timers');
+   await h.respond(1,{content:'Old response',active:true});await h.respond(2,{jobs:[job()]});
+   assert(h.polls().length===0&&h.livePolls().length===0&&h.requests.length===3,'Late old responses do not schedule or request anything');
+  }
+ });
+ await test('reinitializing UI isolates pending requests and schedules only new work',async()=>{
+  const h=setup();await h.respond(0,{jobs:[job()]});h.api.toggleLive('a'.repeat(32));
+  h.api.start();assert(h.requests.length===3,'Restart requests a fresh jobs list');
+  await h.respond(2,{jobs:[job('running',70)]});h.api.toggleLive('a'.repeat(32));
+  await h.respond(1,{content:'Old UI response',active:true});
+  assert(h.requests.length===4&&h.livePolls().length===0,'Old completion cannot unlock or schedule over a new request');
+  await h.respond(3,{content:'New UI response',active:true});
+  assert(h.livePolls().length===1&&h.polls().length===1,'Only the new UI schedules polling');
+ });
+ await test('UI cleanup clears already scheduled Live and list timeouts',async()=>{
+  for(const cleanup of ['stop','resetState']){
+   const h=setup();await h.respond(0,{jobs:[job()]});h.api.toggleLive('a'.repeat(32));
+   await h.respond(1,{content:'Current',active:true});
+   assert(h.livePolls().length===1&&h.polls().length===1,'Both timers are scheduled');
+   h.api[cleanup]();assert(h.livePolls().length===0&&h.polls().length===0,'Cleanup cancels both scheduled timers');
+  }
+ });
+ await test('termination observed while hidden still gets a final preview on visibility',async()=>{
+  const h=setup();await h.respond(0,{jobs:[job()]});h.api.toggleLive('a'.repeat(32));
+  await h.respond(1,{content:'Partial',active:true});h.api.refresh();await h.visible(false);
+  await h.respond(2,{jobs:[job('done')]});assert(h.requests.length===3,'No hidden final preview request');
+  await h.visible(true);assert(h.requests.length===5,'Visibility requests the final preview once');
+  await h.respond(3,{jobs:[job('done')]});await h.respond(4,{content:'Final',active:false});
+  assert(h.livePolls().length===0&&h.document.getElementById('live-content').textContent==='Final','Final output stays idle');
  });
 
  await test('a stalled jobs request times out and releases its shared promise',async()=>{
