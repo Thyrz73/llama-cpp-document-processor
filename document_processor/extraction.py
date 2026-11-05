@@ -10,11 +10,13 @@ Limits come from the extraction settings saved with the job (keys: enabled,
 languages, dpi, max_pixels, timeout, max_pages), so a retry always reuses them.
 """
 
+import hashlib
 import logging
 import math
 import re
 import subprocess
 import time
+from collections import OrderedDict, deque
 from typing import Any
 
 import pymupdf
@@ -63,55 +65,113 @@ def make_chunks(pages, model, budget):
     """Group passages into sections of at most ``budget`` tokens.
 
     pages is a list of ``page``/``text`` dictionaries from extract_pdf().
-    model must provide tokenize() to count tokens. Prefix each passage with
-    its page reference, then group passages while the budget allows. Split
-    passages that are still too long.
+    model must provide tokenize() to count tokens. Memoize exact counts and
+    estimate additions with separator/safety headroom. This is only a scheduling
+    heuristic: tokenization is not additive, and every emitted section is checked
+    exactly. Oversized groups are bisected at passage boundaries until they fit.
 
     Return ``text``/``pages``/``parts`` dictionaries; pages contains sorted unique
-    physical page numbers, parts retains exact passage/page pairs independently
-    of markers embedded in source text. Raise ProcessingError if a passage exceeds the
-    budget. Propagate errors from the remote tokenizer.
+    physical page numbers, parts retains lossless passage/page pairs independently
+    of markers embedded in source text. Raise chunking_failed for invalid counts,
+    invalid budgets or an indivisible passage that cannot fit. Propagate tokenizer
+    failures and cancellation unchanged.
     """
+    def failed():
+        return ProcessingError("chunking_failed", "Unable to split a PDF passage into sufficiently small chunks.")
+
+    if type(budget) is not int or budget < 1:
+        raise failed()
+
     units = []
     for p in pages:
-        units.extend(split_with_page(p["text"], p["page"]))
+        # Reuse the natural cuts, restoring whitespace stripped by split_with_page().
+        text, start = p["text"], 0
+        fragments = split_with_page(text, p["page"])
+        for index, fragment in enumerate(fragments):
+            end = text.find(fragment["text"], start) + len(fragment["text"])
+            if index == len(fragments) - 1:
+                end = len(text)
+            units.append({"page": p["page"], "text": text[start:end]})
+            start = end
+        if not fragments and text:
+            units.append({"page": p["page"], "text": text})
     chunks = []
     current: list[dict[str, Any]] = []
+    estimated = 0
+    counts: OrderedDict[bytes, int] = OrderedDict()
+
+    def count(text):
+        """Keep bounded count-only memoization; cache hits remain cancellable."""
+        key = hashlib.sha256(text.encode("utf-8")).digest()
+        if key in counts:
+            check = getattr(model, "check_cancelled", None)
+            if check is not None:
+                check()
+            counts.move_to_end(key)
+            return counts[key]
+        value = model.tokenize(text)
+        if type(value) is not int or value < 0:
+            raise failed()
+        counts[key] = value
+        if len(counts) > 1024:
+            counts.popitem(last=False)
+        return value
 
     def chunk_text(parts):
         """Join parts with page markers."""
         return "\n\n".join(f"[Page {x['page']}]\n{x['text']}" for x in parts)
 
-    for u in units:
-        # Count actual tokens: density depends on the tokenizer.
-        pending = [u]
-        while pending:
-            piece = pending.pop(0)
-            solo = chunk_text([piece])
-            if model.tokenize(solo) > budget:
-                if len(piece["text"]) < 50:
-                    raise ProcessingError("chunking_failed", "Unable to split a PDF passage into sufficiently small chunks.")
-                half = len(piece["text"]) // 2
-                pivot = -1
-                for boundary in ("\n\n", "\n", " "):
-                    pivot = piece["text"].rfind(boundary, max(0, half-300), half+300)
-                    if pivot > 0:
-                        break
-                if pivot < 1:
-                    pivot = half
-                pending.insert(0, {"page": piece["page"], "text": piece["text"][pivot:].strip()})
-                pending.insert(0, {"page": piece["page"], "text": piece["text"][:pivot].strip()})
-                continue
-            candidate = current + [piece]
-            if current and model.tokenize(chunk_text(candidate)) > budget:
-                chunks.append({"text": chunk_text(current), "pages": sorted(set(v["page"] for v in current)),
-                               "parts": list(current)})
-                current = [piece]
+    def emit(parts):
+        """Exact validation only; each failed group becomes two strictly smaller groups."""
+        pending_groups = [parts]
+        while pending_groups:
+            group = pending_groups.pop()
+            text = chunk_text(group)
+            if count(text) <= budget:
+                chunks.append({"text": text, "pages": sorted({part["page"] for part in group}),
+                               "parts": list(group)})
+            elif len(group) > 1:
+                middle = len(group) // 2
+                pending_groups.extend((group[middle:], group[:middle]))
             else:
-                current = candidate
+                raise failed()  # Every individual passage was already checked.
+
+    pending = deque(units)
+    while pending:
+        piece = pending.popleft()
+        solo_tokens = count(chunk_text([piece]))
+        if solo_tokens > budget:
+            size = len(piece["text"])
+            if size < 2:
+                raise failed()
+            half = size // 2
+            radius = min(300, size // 5)
+            pivot = half
+            for boundary in ("\n\n", "\n", " "):
+                found = piece["text"].rfind(boundary, max(1, half - radius), half + radius)
+                cut = found + len(boundary)
+                if found >= 0 and 0 < cut < size:
+                    pivot = cut
+                    break
+            pending.appendleft({"page": piece["page"], "text": piece["text"][pivot:]})
+            pending.appendleft({"page": piece["page"], "text": piece["text"][:pivot]})
+            continue
+        # Reserve at least eight tokens per join, or 5% for larger passages.
+        # This is not a mathematical upper bound for an arbitrary tokenizer.
+        addition = solo_tokens + max(8, (solo_tokens + 19) // 20)
+        if current and estimated + addition > budget:
+            candidate = current + [piece]
+            exact = count(chunk_text(candidate))
+            if exact > budget:
+                emit(current)
+                current, estimated = [piece], solo_tokens
+            else:
+                current, estimated = candidate, exact
+        else:
+            current.append(piece)
+            estimated = estimated + addition if len(current) > 1 else solo_tokens
     if current:
-        chunks.append({"text": chunk_text(current), "pages": sorted(set(v["page"] for v in current)),
-                       "parts": list(current)})
+        emit(current)
     return chunks
 
 

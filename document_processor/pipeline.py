@@ -243,7 +243,7 @@ class JobRun:
         budget = self.config["chunk_tokens"]
         chunks = json.loads(self._step(
             "chunks.json", "chunking",
-            {"extracted": fingerprint(extracted), "budget": budget, "identity": self.identity, "chunk_format_version": 2},
+            {"extracted": fingerprint(extracted), "budget": budget, "identity": self.identity, "chunk_format_version": 3},
             lambda: json.dumps(extraction.make_chunks(extracted["pages"], self.model, budget), ensure_ascii=False)))
         if not chunks:
             raise ProcessingError("empty_document", "Document contains no analyzable text.")
