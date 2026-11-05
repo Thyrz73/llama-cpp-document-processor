@@ -497,22 +497,37 @@ def create_job():
 def job_live(job_id):
     """Return the latest live preview of job_id, or HTTP 404.
 
-    The preview file is read as is: the model is never called. The preview is
-    empty when live output is disabled or the file is missing or unreadable,
-    and only a running job is reported as active. Reasoning is included only
-    with include_reasoning=true.
+    Prefer the process-local cache, falling back to JSON checkpoints without
+    caching disk reads. A previous attempt cannot appear as the current pass.
+    Only a running job is active; reasoning requires include_reasoning=true.
     """
-    job = store.get_job(job_id)
+    job, attempt_id = store.get_live_job(job_id)
     if not job:
         abort(404)
     path = job_directory(job_id) / PREVIEW_FILE
-    if not LIVE_OUTPUT_ENABLED or not path.exists():
+    if not LIVE_OUTPUT_ENABLED:
         return jsonify(phase=job["stage"], content="", reasoning="",
                        active=False, enabled=LIVE_OUTPUT_ENABLED)
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return jsonify(phase=job["stage"], content="", reasoning="", active=False)
+    payload = store.previews.get(job_id)
+    if payload is not None and payload.get("_attempt_id") != attempt_id:
+        store.previews.discard(job_id)
+        payload = None
+    if payload is None:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, UnicodeError):
+            payload = None
+    if (not isinstance(payload, dict)
+            or (attempt_id is not None and job["status"] == "queued")
+            or (job["status"] == "running" and job["stage"] == "Starting")
+            or (payload.get("_attempt_id") is not None and payload["_attempt_id"] != attempt_id)
+            or (attempt_id is not None and job["status"] == "running" and payload.get("_attempt_id") != attempt_id)):
+        return jsonify(phase=job["stage"], phase_code=job["phase_code"], phase_args=job["phase_args"],
+                       content="", reasoning="", active=False, enabled=True)
+    payload.pop("_attempt_id", None)
+    for field in ("content", "reasoning"):
+        value = payload.get(field, "")
+        payload[field] = value[-LIVE_PREVIEW_CHARS:] if isinstance(value, str) else ""
     # The last file may have been written before the job completed or failed.
     payload["active"] = bool(payload.get("active") and job["status"] == "running")
     if payload["active"] and payload.get("started_at"):

@@ -3,14 +3,21 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 os.environ.setdefault("DATA_DIR", tempfile.mkdtemp(prefix="pdf-live-test-"))
 os.environ.setdefault("SYSTEM_PROMPT_FILE", str(Path(__file__).resolve().parents[1] / "config/system_prompt.example.txt"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import app
 from app import ModelClient
+from document_processor import pipeline, previews, reliability
+from document_processor.errors import Cancelled, ModelError, WorkerStopping
+from document_processor.files import atomic_json, file_hash
 from document_processor.jobs import JobStore
 from document_processor.model_client import ThinkingSplitter
 
@@ -129,6 +136,317 @@ class LiveTests(unittest.TestCase):
                 client = app.app.test_client()
                 self.assertEqual(client.get('/api/jobs').get_json()['jobs'][0]['progress_percent'], 100)
                 self.assertEqual(client.get('/api/jobs/' + 'a' * 32).get_json()['progress_percent'], 100)
+
+
+class PreviewCacheTests(unittest.TestCase):
+    def test_bounds_copies_and_expiration_are_independent_of_reads(self):
+        cache = previews.PreviewCache(max_entries=2, ttl=5)
+        payload = {"content": "abcdefgh", "reasoning": "12345678", "content_chars": 8,
+                   "metrics": {"quality_checks": {"warnings": 1}}, "private_prompt": "SECRET"}
+        with patch.object(previews.time, "monotonic", return_value=100) as clock:
+            cache.put("a", payload, 4)
+            payload["metrics"]["quality_checks"]["warnings"] = 99
+            first = cache.get("a")
+            self.assertEqual(first["content"], "efgh")
+            self.assertEqual(first["reasoning"], "5678")
+            self.assertEqual(first["content_chars"], 8)
+            self.assertNotIn("private_prompt", first)
+            first["reasoning"] = ""
+            first["metrics"]["quality_checks"]["warnings"] = 42
+            self.assertEqual(cache.get("a")["metrics"]["quality_checks"]["warnings"], 1)
+            self.assertEqual(cache.get("a")["reasoning"], "5678")
+            clock.return_value = 104
+            cache.get("a")
+            clock.return_value = 105
+            self.assertIsNone(cache.get("a"))
+            cache.put("a", payload, 4)
+            cache.put("b", payload, 4)
+            cache.get("a")  # Polling must not protect old publications from eviction.
+            cache.put("c", payload, 4)
+            self.assertIsNone(cache.get("a"))
+            self.assertIsNotNone(cache.get("b"))
+            cache.discard("b")
+            self.assertIsNone(cache.get("b"))
+            cache.clear()
+            self.assertIsNone(cache.get("c"))
+
+    def test_concurrent_publishers_and_readers_observe_whole_snapshots(self):
+        cache = previews.PreviewCache(max_entries=3)
+        gate = threading.Barrier(6)
+        for number in range(3):
+            cache.put(str(number), {"content": "0", "content_chars": 0, "metrics": {"output_tokens": 0}}, 16)
+
+        def publish(identifier):
+            gate.wait(timeout=5)
+            for number in range(200):
+                cache.put(identifier, {"content": str(number), "content_chars": number,
+                                       "metrics": {"output_tokens": number}}, 16)
+
+        def read(identifier):
+            gate.wait(timeout=5)
+            for _ in range(300):
+                payload = cache.get(identifier)
+                if payload:
+                    self.assertEqual(int(payload["content"]), payload["content_chars"])
+                    self.assertEqual(payload["metrics"]["output_tokens"], payload["content_chars"])
+                    payload["metrics"]["output_tokens"] = -1
+
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            tasks = [pool.submit(action, str(number)) for number in range(3) for action in (publish, read)]
+            for task in tasks:
+                task.result(timeout=10)
+
+
+class HybridPreviewTests(unittest.TestCase):
+    """Exercise the pipeline writer, SQLite attempt identity and real live route together."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.store = JobStore(Path(temporary.name))
+        self.addCleanup(self.store.close)
+        self.store.initialize()
+        changed = patch.object(app, "store", self.store)
+        changed.start()
+        self.addCleanup(changed.stop)
+        enabled = patch.object(app, "LIVE_OUTPUT_ENABLED", True)
+        enabled.start()
+        self.addCleanup(enabled.stop)
+        self.client = app.app.test_client()
+        self.identifier = "a" * 32
+        self.directory = self.store.job_dir(self.identifier)
+        self.directory.mkdir(parents=True)
+        source = self.directory / "source.pdf"
+        source.write_bytes(b"%PDF-test")
+        with patch.object(app, "read_system_prompt", return_value="PRIVATE_PROMPT"):
+            self.config = app.new_snapshot({"profile": "low"})
+        self.config["source_hash"] = file_hash(source)
+        self.store.create_job(self.identifier, "test.pdf", "Analyze", 1, self.config)
+        self.store.update_job(self.identifier, status="running", phase_code="section", stage="Analyzing section 1/1",
+                              phase_args=json.dumps({"index": 1, "total": 1}))
+        self.model = Mock(tokenization_calls=0, tokenization_ms=0, tokenization_cache_hits=0, capabilities={})
+        self.model.current_metrics = {}
+        runtime = pipeline.Runtime(self.store, Mock(), Mock(return_value=self.model), Mock(), True, 8)
+        self.run = pipeline.JobRun(self.identifier, runtime)
+        self.run.phase_args = {"index": 1, "total": 1}
+        self.run.evidence = reliability.build_evidence([{"page": 1, "text": "Source text"}], 1, [], [])
+        self.path = self.directory / "live_preview.json"
+        self.clock = 100.0
+        timer = patch.object(pipeline.time, "monotonic", side_effect=lambda: self.clock)
+        timer.start()
+        self.addCleanup(timer.stop)
+        self.run.recorder.started = self.clock
+
+    def live(self, reasoning=False):
+        response = self.client.get(f"/api/jobs/{self.identifier}/live" +
+                                   ("?include_reasoning=true" if reasoning else ""))
+        self.assertEqual(response.status_code, 200)
+        return response.get_json()
+
+    def publish(self, content, *, active=True, force=False):
+        self.run._write_preview("section", force=force, content=content, reasoning="SECRET_REASONING",
+                                content_chars=len(content), reasoning_chars=16, active=active,
+                                started_at="2026-11-05T12:00:00+00:00", elapsed_seconds=1,
+                                metrics={"output_tokens": 12})
+
+    def stream(self, *args, on_update):
+        """Emit 150 refreshes over 120 simulated seconds, then a terminal callback."""
+        for index in range(1, 151):
+            self.clock = 100 + index * 0.8
+            content = "Scientific answer é. " * (index * 8)
+            reasoning = "Emitted reasoning. " * (index * 4)
+            self.model.current_metrics = {"content_chars": len(content), "reasoning_chars": len(reasoning),
+                                          "output_tokens": index}
+            on_update(content, reasoning, False)
+        on_update(content, reasoning, True)
+        return content
+
+    def test_long_generation_keeps_refresh_cadence_with_eight_disk_writes(self):
+        self.model.complete.side_effect = self.stream
+        with patch.object(pipeline, "atomic_json", wraps=atomic_json) as writes, \
+             patch.object(self.store.previews, "put", wraps=self.store.previews.put) as publications:
+            answer = self.run._generate("section", "instructions", "source", 100, [1])
+        self.assertEqual(publications.call_count, 152)  # start, 150 refreshes, end
+        self.assertEqual(writes.call_count, 8)  # start, six 20-second checkpoints, end
+        self.assertEqual(self.live()["content"], answer[-8:])
+        self.assertFalse(self.live()["active"])
+
+    def test_frequent_updates_use_memory_and_checkpoint_only_at_boundaries(self):
+        with patch.object(pipeline, "atomic_json", wraps=atomic_json) as writes:
+            self.publish("")
+            for index in range(1, 25):
+                self.clock = 100 + index * 0.8
+                self.publish(f"Answer {index:02d}")
+                self.assertEqual(self.live()["content"], f"Answer {index:02d}"[-8:])
+            self.assertEqual(writes.call_count, 1)
+            self.assertEqual(json.loads(self.path.read_text())["content"], "")
+            self.clock = 120
+            self.publish("checkpoint")
+            self.assertEqual(writes.call_count, 2)
+            self.assertEqual(json.loads(self.path.read_text())["content"], "eckpoint")
+            self.clock = 120.8
+            self.publish("final answer", active=False)
+            self.assertEqual(writes.call_count, 3)
+            self.assertFalse(self.live()["active"])
+            self.assertEqual(json.loads(self.path.read_text())["content"], "l answer")
+
+    def test_cache_preferred_and_reasoning_redaction_never_mutates_it(self):
+        self.publish("first")
+        self.publish("latest content")
+        with patch.object(Path, "read_text", side_effect=AssertionError("Cache hit must not read JSON")):
+            public = self.live()
+            private = self.live(reasoning=True)
+        self.assertEqual(public["content"], " content")
+        self.assertEqual(public["reasoning"], "")
+        self.assertTrue(public["reasoning_available"])
+        self.assertEqual(private["reasoning"], "EASONING")
+        self.assertTrue(private["active"])
+        self.assertEqual(private["metrics"], {"output_tokens": 12})
+        self.assertEqual(private["phase_args"], {"index": 1, "total": 1})
+        self.assertNotIn("_attempt_id", private)
+        self.assertNotIn("PRIVATE_PROMPT", json.dumps(private))
+
+    def test_empty_cache_legacy_malformed_and_missing_disk_fallbacks(self):
+        self.assertEqual(self.live()["content"], "")
+        self.run.recorder.finish("done")
+        self.store.update_job(self.identifier, status="done")
+        for raw in ("not json", "[]", "null", "\udcff"):
+            self.path.write_bytes(raw.encode("utf-8", errors="surrogateescape"))
+            self.assertEqual(self.live()["content"], "")
+        atomic_json(self.path, {"content": "legacy", "reasoning": "SECRET", "reasoning_chars": 6, "active": True})
+        self.assertEqual(self.live()["content"], "legacy")
+        self.assertFalse(self.live()["active"])
+        self.assertEqual(self.live(True)["reasoning"], "SECRET")
+
+    def test_separate_process_store_sees_checkpoints_without_caching_disk(self):
+        self.publish("checkpoint")
+        other_store = JobStore(self.store.data_dir)
+        self.addCleanup(other_store.close)
+        with patch.object(app, "store", other_store):
+            self.assertEqual(self.live()["content"], "eckpoint")
+            self.publish("memory only")
+            self.assertEqual(self.live()["content"], "eckpoint")
+            self.clock = 120
+            self.publish("fresh")
+            self.assertEqual(self.live()["content"], "fresh")
+            self.publish("finished", active=False)
+            self.assertEqual(self.live()["content"], "finished")
+            self.assertFalse(self.live()["active"])
+        self.assertIsNone(other_store.previews.get(self.identifier))
+
+    def test_restart_recovery_and_claim_never_activate_old_output(self):
+        self.publish("old pass")
+        self.store.initialize()
+        self.assertIsNone(self.store.previews.get(self.identifier))
+        self.assertEqual(self.live()["content"], "")
+        self.assertEqual(self.store.claim_next_job(), self.identifier)
+        self.assertEqual(self.live()["content"], "")
+        self.store.start_attempt(self.identifier, app.store.get_job(self.identifier)["queued_at"])
+        self.store.update_job(self.identifier, stage="Preparing document", phase_code="preparing")
+        self.assertEqual(self.live()["content"], "")
+
+    def test_retry_discards_cache_and_rejects_old_disk_then_accepts_new_attempt(self):
+        self.publish("old pass")
+        old = self.store.previews.get(self.identifier)
+        self.run.recorder.finish("failed")
+        self.store.update_job(self.identifier, status="failed")
+        with patch.object(app.worker, "wake"):
+            self.assertEqual(self.client.post(f"/api/jobs/{self.identifier}/retry").status_code, 200)
+        self.assertIsNone(self.store.previews.get(self.identifier))
+        self.assertEqual(self.live()["content"], "")
+        self.store.claim_next_job()
+        self.assertEqual(self.live()["content"], "")
+        self.run = pipeline.JobRun(self.identifier, self.run.runtime)
+        self.store.update_job(self.identifier, phase_code="section", stage="Analyzing section 1/1")
+        self.publish("new pass")
+        # Simulate another process retaining an old cached snapshot across the retry.
+        self.store.previews.put(self.identifier, old, 8)
+        self.assertEqual(self.live()["content"], "new pass")
+        self.assertTrue(self.live()["active"])
+
+    def test_generation_failure_cancellation_and_shutdown_flush_partial_text(self):
+        for error in (ModelError("stream_error", "Unavailable"), Cancelled(), WorkerStopping()):
+            with self.subTest(error=type(error).__name__):
+                def stream(*args, on_update):
+                    self.model.current_metrics = {"content_chars": 18, "reasoning_chars": 9, "output_tokens": 4}
+                    on_update("useful partial text", "reasoning", False)
+                    raise error
+
+                self.model.complete.side_effect = stream
+                with self.assertRaises(type(error)) as raised:
+                    self.run._generate("section", "instructions", "source", 100, [1])
+                self.assertIs(raised.exception, error)
+                disk = json.loads(self.path.read_text())
+                self.assertEqual(disk["content"], "ial text")
+                self.assertEqual(disk["reasoning"], "easoning")
+                self.assertFalse(disk["active"])
+                self.assertEqual(disk["metrics"]["output_tokens"], 4)
+
+    def test_generation_end_and_attempt_end_persist_then_release_cache(self):
+        def stream(*args, on_update):
+            on_update("final answer", "reasoning", True)
+            return "final answer"
+
+        self.model.complete.side_effect = stream
+        self.run._prepare = Mock()
+        self.run._extract = Mock(return_value={"page_count": 1, "missing": [], "ocr_pages": []})
+        self.run._split = Mock(return_value=[{}])
+        self.run._analyze_sections = Mock(return_value=[])
+        self.run._merge_until_final_fits = Mock(return_value=([], "source", None))
+        self.run._write_final = lambda *args: self.run._generate("final", "instructions", "source", 100, [1])
+        self.run._save_report = lambda *args: self.store.update_job(self.identifier, status="done")
+        self.run.execute()
+        self.assertIsNone(self.store.previews.get(self.identifier))
+        self.assertEqual(self.live()["content"], "l answer")
+        self.assertFalse(self.live()["active"])
+        self.assertFalse(json.loads(self.path.read_text())["active"])
+
+    def test_failed_checkpoint_keeps_the_original_generation_error(self):
+        error = ModelError("stream_error", "PRIVATE_REMOTE_MESSAGE")
+
+        def stream(*args, on_update):
+            on_update("partial", "reasoning", False)
+            raise error
+
+        def persist(path, payload):
+            if not payload["active"]:
+                raise OSError("PRIVATE_PATH")
+            atomic_json(path, payload)
+
+        self.model.complete.side_effect = stream
+        with patch.object(pipeline, "atomic_json", side_effect=persist), \
+             self.assertLogs(app.log, level="ERROR") as logs, self.assertRaises(ModelError) as raised:
+            self.run._generate("section", "instructions", "source", 100, [1])
+        self.assertIs(raised.exception, error)
+        self.assertNotIn("PRIVATE_REMOTE_MESSAGE", "\n".join(logs.output))
+        self.assertNotIn("PRIVATE_PATH", "\n".join(logs.output))
+        self.assertEqual(self.live()["content"], "partial")
+        self.assertFalse(self.live()["active"])
+
+    def test_terminal_status_delete_and_disabled_live_output(self):
+        self.publish("useful")
+        for status in ("failed", "cancelled", "done"):
+            self.store.update_job(self.identifier, status=status)
+            self.assertEqual(self.live()["content"], "useful")
+            self.assertFalse(self.live()["active"])
+        self.run.runtime = replace(self.run.runtime, live_output=False)
+        with patch.object(app, "LIVE_OUTPUT_ENABLED", False), \
+             patch.object(pipeline, "atomic_json", side_effect=AssertionError("Live output is disabled")), \
+             patch.object(self.store.previews, "put", side_effect=AssertionError("Live output is disabled")):
+            self.run._write_preview("final", content="not cached")
+            self.assertEqual(self.live()["content"], "")
+            self.assertFalse(self.live()["enabled"])
+            def stream(*args, on_update):
+                on_update("answer", "reasoning", True)
+                return "answer"
+
+            self.model.complete.side_effect = stream
+            self.assertEqual(self.run._generate("final", "instructions", "source", 100, [1]), "answer")
+        self.run.recorder.finish("done")
+        self.assertEqual(self.client.post(f"/api/jobs/{self.identifier}/delete").status_code, 200)
+        self.assertIsNone(self.store.previews.get(self.identifier))
+        self.assertFalse(self.path.exists())
+        self.assertEqual(self.client.get(f"/api/jobs/{self.identifier}/live").status_code, 404)
 
 if __name__ == '__main__':
     unittest.main()

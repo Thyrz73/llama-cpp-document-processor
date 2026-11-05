@@ -21,6 +21,7 @@ from . import database
 from .config import fingerprint, public_config
 from .errors import Cancelled, ProcessingError
 from .observability import event
+from .previews import PreviewCache
 
 # Files kept in each job directory. The report name predates the English
 # code base and is kept so existing installations keep working.
@@ -63,6 +64,7 @@ class JobStore:
         self.data_dir = Path(data_dir)
         self.db_path = self.data_dir / "jobs.sqlite3"
         self._connections = database.ThreadConnections(self.db_path)
+        self.previews = PreviewCache()
 
     def connect(self):
         """Open a transaction on the jobs database, on this thread's connection (see database.ThreadConnections).
@@ -82,6 +84,7 @@ class JobStore:
 
     def initialize(self):
         """Create the data directory and schema, then recover jobs cut short by a restart."""
+        self.previews.clear()
         self.data_dir.mkdir(parents=True, exist_ok=True)
         event("workspace_ready", status="available")
         database.initialize(self.db_path)
@@ -196,6 +199,13 @@ class JobStore:
             row = con.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
         return None if row is None else self.serialize(row)
 
+    def get_live_job(self, job_id):
+        """Read job state and the latest attempt together, without loading its configuration."""
+        with self.connect() as con:
+            row = con.execute("SELECT jobs.*, (SELECT MAX(id) FROM job_runs WHERE job_id=jobs.id) "
+                              "AS latest_attempt_id FROM jobs WHERE id=?", (job_id,)).fetchone()
+        return (None, None) if row is None else (self.serialize(row), row["latest_attempt_id"])
+
     def list_jobs(self, limit=100):
         """Return the latest jobs with their public configuration, and whether any job is active.
 
@@ -278,6 +288,7 @@ class JobStore:
             if row["status"] not in ("done", "failed", "cancelled") or finishing:
                 return "delete_active"
             con.execute("DELETE FROM jobs WHERE id=?", (job_id,))
+        self.previews.discard(job_id)
         return None
 
     # Queue --------------------------------------------------------------------
@@ -341,6 +352,8 @@ class JobStore:
             changed = con.execute("""UPDATE jobs SET status='queued', error='', error_code='', stage='Retrying',
                 phase_code='queued', cancel_requested=0, queued_at=?, updated_at=?
                 WHERE id=? AND status IN ('failed','cancelled')""", (utcnow(), utcnow(), job_id)).rowcount
+        if changed:
+            self.previews.discard(job_id)
         return ("queued" if changed else "conflict"), attempts
 
     # Configuration snapshots and attempts -------------------------------------

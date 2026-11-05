@@ -11,6 +11,7 @@ from document_processor import extraction, jobs, pipeline
 from document_processor.errors import Cancelled, ProcessingError, WorkerStopping
 from document_processor.files import file_hash
 from document_processor.jobs import JobStore
+from document_processor.previews import PreviewCache
 from document_processor.worker import IDLE_SECONDS, Worker
 
 
@@ -32,6 +33,8 @@ class ExtractionProgressTests(unittest.TestCase):
         self.directory = Path(temporary.name)
         (self.directory / jobs.SOURCE_FILE).write_bytes(b"%PDF-test")
         self.store = Mock(spec=JobStore)
+        self.store.previews = PreviewCache()
+        self.store.start_attempt.return_value.run_id = 1
         self.store.job_dir.return_value = self.directory
         self.store.get_job.return_value = {
             "question": "Analyze", "stage": "Starting", "created_at": jobs.utcnow()}
@@ -71,7 +74,7 @@ class ExtractionProgressTests(unittest.TestCase):
         self.assertEqual(self.row["phase_code"], code)
         self.assertEqual(json.loads(self.row["phase_args"]), {"index": index, "total": total})
         self.assertEqual(self.row["progress_percent"], 2 + round(5 * index / total))
-        preview = self.preview.call_args.args[1]
+        preview = self.store.previews.get(self.run.job_id)
         self.assertEqual(preview["phase_code"], code)
         self.assertEqual(preview["phase_args"], {"index": index, "total": total})
 
@@ -88,7 +91,7 @@ class ExtractionProgressTests(unittest.TestCase):
         self.assertEqual(len(self.rows), 3)
         self.assert_phase(202, 1000)
         self.assertEqual(self.model.check_cancelled.call_count, 6)
-        self.assertEqual(self.preview.call_count, 3)
+        self.assertEqual(self.preview.call_count, 1)
         self.assertEqual(self.events.call_count, 3)
 
     def test_long_extraction_reduces_database_preview_and_log_writes(self):
@@ -97,7 +100,7 @@ class ExtractionProgressTests(unittest.TestCase):
             self.clock = 100 + (index - 1) / 100
             self.progress(index)
         self.assertEqual(self.store.update_job.call_count, 11)
-        self.assertEqual(self.preview.call_count, 11)
+        self.assertEqual(self.preview.call_count, 2)
         self.assertEqual(self.events.call_count, 11)
         self.assertEqual(self.model.check_cancelled.call_count, 1000)
         for row in self.rows:

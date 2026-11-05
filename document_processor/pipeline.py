@@ -29,7 +29,8 @@ from .errors import Cancelled, ProcessingError, WorkerStopping
 from .files import atomic_json, atomic_text, file_hash
 from .jobs import PREVIEW_FILE, REPORT_FILE, SOURCE_FILE, JobStore, now
 from .model_client import ModelClient
-from .observability import event, log
+from .observability import event, failure, log
+from .previews import CHECKPOINT_SECONDS
 from .reports import report_filename
 
 # Stages that call the model. Their artifacts also depend on the text transport
@@ -122,6 +123,8 @@ class JobRun:
         self.model.cancel_check = lambda: runtime.cancellation_requested(job_id)
         self.recorder = self.store.start_attempt(job_id, self.job.get("queued_at") or self.job["created_at"])
         self.preview_path = self.directory / PREVIEW_FILE
+        self.preview_payload: dict[str, Any] | None = None
+        self.preview_persisted_at = float("-inf")
         self.calls = 0
         self.last_percent: int | None = None
         self.extraction_phase: str | None = None
@@ -158,6 +161,7 @@ class JobRun:
             status = "cancelled"
             raise
         finally:
+            self.store.previews.discard(self.job_id)
             model = self.model
             self.recorder.provenance({**model.capabilities,
                 "tokenization_calls": model.tokenization_calls, "tokenization_ms": model.tokenization_ms,
@@ -393,13 +397,31 @@ class JobRun:
         event("job_phase", logging.DEBUG if code in ("extraction", "ocr") else logging.INFO,
               job_id=self.job_id, stage=code, progress_percent=percent, **args)
         if code != "saving":
-            self._write_preview(code, content="", reasoning="", active=False, metrics={})
+            self._write_preview(code, force=code not in ("extraction", "ocr") or
+                                bool(args) and args.get("index") == args.get("total"),
+                                content="", reasoning="", active=False, metrics={})
 
-    def _write_preview(self, phase_code, **fields):
-        """Publish the live preview file read by the /live route, when enabled."""
-        if self.runtime.live_output:
-            atomic_json(self.preview_path, {"phase": self.phase_label, "phase_code": phase_code,
-                                            "phase_args": self.phase_args, "updated_at": now(), **fields})
+    def _write_preview(self, phase_code, *, force=False, **fields):
+        """Refresh memory immediately; checkpoint boundaries and active text every 20s."""
+        if not self.runtime.live_output:
+            return
+        payload = {"phase": self.phase_label, "phase_code": phase_code,
+                   "phase_args": self.phase_args, "updated_at": now(),
+                   "_attempt_id": self.recorder.run_id, **fields}
+        for field in ("content", "reasoning"):
+            payload[field] = payload.get(field, "")[-self.runtime.preview_chars:]
+        previous = self.preview_payload or {}
+        boundary = any(payload.get(key) != previous.get(key)
+                       for key in ("phase_code", "active", "started_at"))
+        current = time.monotonic()
+        checkpoint = (payload.get("active") and (payload["content"] or payload["reasoning"])
+                      and current - self.preview_persisted_at >= CHECKPOINT_SECONDS)
+        # Cache owns a copy of the bounded payload, including nested metrics.
+        self.store.previews.put(self.job_id, payload, self.runtime.preview_chars)
+        self.preview_payload = payload
+        if force or boundary or checkpoint:
+            atomic_json(self.preview_path, payload)
+            self.preview_persisted_at = current
 
     def _step(self, name, stage, dependencies, compute):
         """Reuse a verified artifact, or run compute() and save its text.
@@ -425,7 +447,7 @@ class JobRun:
             if cached is not None:
                 self.recorder.end(handle, "reused", {"artifact_reused": True})
                 if generation:
-                    self._write_preview(stage, content=cached[-self.runtime.preview_chars:],
+                    self._write_preview(stage, force=True, content=cached[-self.runtime.preview_chars:],
                                         content_chars=len(cached), reasoning="", reasoning_chars=0,
                                         active=False, metrics={"artifact_reused": True})
                 return cached
@@ -465,14 +487,27 @@ class JobRun:
             if not self.runtime.live_output:
                 return
             stats = dict(model.current_metrics)
-            self._write_preview(stage, content=content[-limit:], reasoning=reasoning[-limit:],
+            self._write_preview(stage, force=completed, content=content[-limit:], reasoning=reasoning[-limit:],
                                 content_chars=stats.get("content_chars", len(content)),
                                 reasoning_chars=stats.get("reasoning_chars", len(reasoning)),
                                 active=not completed, started_at=started_at,
                                 elapsed_seconds=round(time.monotonic() - started, 1), metrics=stats)
 
         live("", "", False)
-        answer = model.complete(instruction, text, budget, on_update=live)
+        try:
+            answer = model.complete(instruction, text, budget, on_update=live)
+        except Exception:
+            # The stream need not emit a final callback on failure, cancellation or shutdown.
+            # Flush the last useful bounded text, retaining the original processing error.
+            if self.runtime.live_output and self.preview_payload is not None:
+                fields = {key: self.preview_payload[key] for key in (
+                    "content", "reasoning", "content_chars", "reasoning_chars", "started_at", "elapsed_seconds")
+                    if key in self.preview_payload}
+                try:
+                    self._write_preview(stage, force=True, **fields, active=False, metrics=dict(model.current_metrics))
+                except OSError as exc:
+                    failure("preview_checkpoint_failed", exc, job_id=self.job_id)
+            raise
         # Public metrics contain counts only; detailed source values stay local.
         check = reliability.audit(answer, self.evidence, source_pages)
         # Retain historical recall counters for benchmark/API compatibility.

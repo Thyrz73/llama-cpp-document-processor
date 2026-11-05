@@ -90,6 +90,8 @@ Both endpoints reuse the existing same-origin POST protection and the applicatio
 
 Live output keeps only the latest pass, with bounded content and reasoning. The `reasoning` field is empty unless `?include_reasoning=true` is supplied. Only emitted reasoning is available; it may be incomplete. Disabling live output leaves generation streaming enabled.
 
+The live route reads the process-local preview cache first, then the compatible `live_preview.json` checkpoint. In the current shared Flask/worker process, memory updates at the existing 0.8-second stream cadence. Disk is written at generation start/end, phase/pass transitions and every 20 seconds while text or reasoning is active. A separate reader process sees those checkpoints; the route never caches disk reads. Failed/cancelled generations preserve the latest published partial output as inactive. Restart recovery and retries reject previous-attempt output as a current stream. The checkpoint's internal attempt identifier is omitted from the public JSON; persistent pipeline artifacts are unchanged.
+
 Metrics accept `?limit=200&before=<step-id>`: limit is 1–500, steps are newest first, and `next_before` identifies the next page. Responses include up to 100 attempts, queue/execution durations, step reuse/failure status and available backend measurements.
 
 Unknown token/timing values remain null or absent. First-event/content latency includes transport and backend waiting. `length` is a failure; `[DONE]` without an explicit finish reason is accepted as `done_without_reason`. There are no automatic generation retries or continuations. Numeric/page-reference checks count warnings, not semantic correctness.
