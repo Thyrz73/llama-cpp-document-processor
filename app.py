@@ -222,19 +222,34 @@ class ModelClient(BackendClient):
                          read_system_prompt() if prompt is None else prompt, LIVE_PREVIEW_CHARS)
 
     def inspect(self, *, cached=None):
-        """Share properties with diagnostics, checking the model identity at each job start."""
+        """Read capabilities for display, allowing the shared TTL cache."""
+        return self._inspect_capabilities(for_identity=False)
+
+    def inspect_identity(self):
+        """Verify a new attempt's identity without using UI cache entries."""
+        return self._inspect_capabilities(for_identity=True)
+
+    def _inspect_capabilities(self, *, for_identity):
+        """Serialize observations and publish fresh identity checks to the UI cache."""
         self.check_cancelled()
         while not _capability_lock.acquire(timeout=0.2):
             self.check_cancelled()
         try:
             self.check_cancelled()
-            previous = cached_capabilities(self)
+            previous = None if for_identity else cached_capabilities(self)
             if previous is not None and previous.get("status") == "unavailable":
                 self.capabilities = previous
                 self.model_name = None
                 return previous
             model_name = _capability_cache.get("model_name") if previous is not None else None
-            value = super().inspect(cached=(model_name, previous) if previous is not None else None)
+            if for_identity:
+                try:
+                    value = super().inspect_identity()
+                except ModelError:
+                    remember_capabilities(self.capabilities, self)
+                    raise
+            else:
+                value = super().inspect(cached=(model_name, previous) if previous is not None else None)
             if previous is None or self.model_name != model_name or value != previous:
                 remember_capabilities(value, self)
             return value

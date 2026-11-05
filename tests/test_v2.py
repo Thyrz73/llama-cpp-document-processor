@@ -24,8 +24,11 @@ class FakeModel(app.ModelClient):
 
     def inspect(self):
         self.capabilities = {"context_tokens": 8192, "model": self.identity,
-                             "template_hash": "template-1", "version": "test"}
+                             "template_hash": "template-1", "version": "test", "sampling": {"temperature": 0.2}}
         return self.capabilities
+
+    def inspect_identity(self):
+        return self.inspect()
 
     def model(self):
         return self.identity
@@ -253,7 +256,7 @@ class V2Tests(unittest.TestCase):
         snapshot = app.store.load_config(identifier)
         runner = Worker(app.store, lambda job_id, check: self.run_job(job_id, 1))
         # Exercise the real inspection fallback with cancellation during optional /props.
-        with patch.object(FakeModel, "inspect", app.ModelClient.inspect), \
+        with patch.object(FakeModel, "inspect_identity", app.ModelClient.inspect_identity), \
              patch.object(FakeModel, "json_request", side_effect=Cancelled()), \
              patch.object(FakeModel, "complete") as complete, \
              patch.object(worker, "record_failure") as failure:

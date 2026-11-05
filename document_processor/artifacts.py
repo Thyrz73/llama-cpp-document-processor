@@ -37,10 +37,13 @@ class Artifacts:
             raise ProcessingError("artifacts_incompatible", "Artifact manifest is incompatible with this job.")
 
     def bind_identity(self, identity):
-        """Refuse known model/template changes before reusing generated notes."""
+        """Refuse changed or unverifiable identities before reusing existing artifacts."""
         previous = self.manifest.get("identity")
-        if previous and any(previous.get(key) is not None and identity.get(key) != previous[key]
-                            for key in previous):
+        required = ("model_id_hash", "template_hash", "engine_sampling_hash")
+        unverified = bool(self.manifest["artifacts"]) and any(
+            (previous or {}).get(key) is None or identity.get(key) is None for key in required)
+        if unverified or (previous and any(previous.get(key) is not None and identity.get(key) != previous[key]
+                                          for key in previous)):
             raise ProcessingError("identity_changed", "The model or template changed. Start a new analysis.")
         self.manifest["identity"] = identity
         atomic_json(self.path, self.manifest)

@@ -87,7 +87,8 @@ class ModelAdapter(BaseAdapter):
         if path.endswith("/models"):
             result = {"data": [{"id": "unicode-test"}]}
         elif path.endswith("/props"):
-            result = {"default_generation_settings": {"n_ctx": 16384}, "chat_template": "é«template»"}
+            result = {"default_generation_settings": {"n_ctx": 16384, "params": {"temperature": 0.2}},
+                      "chat_template": "é«template»"}
         elif path.endswith("/tokenize"):
             result = {"tokens": list(range(len(payload["content"].split())))}
         else:

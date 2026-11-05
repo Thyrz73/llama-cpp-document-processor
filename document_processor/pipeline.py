@@ -174,7 +174,7 @@ class JobRun:
     def _prepare(self):
         """Inspect the backend and refuse to reuse notes written by another model."""
         self._phase("preparing", "Preparing document", 2)
-        capabilities = self.model.inspect()
+        capabilities = self.model.inspect_identity()
         event("backend_checked", job_id=self.job_id, status=capabilities.get("status", "unknown"))
         self.recorder.provenance(capabilities)
         # A name is only a weak identity. Unknown fields remain unknown in diagnostics.

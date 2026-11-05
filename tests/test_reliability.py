@@ -283,8 +283,12 @@ class WordModel(app.ModelClient):
     final_output = 'École (A) : −12,9 % (−2,6 MWh) [Page 2].\nConclusion : l’intervention a entraîné la baisse. [Page 4]'
 
     def inspect(self):
-        self.capabilities = {'model': 'fake-quality', 'context_tokens': 16384, 'template_hash': 'fake'}
+        self.capabilities = {'model': 'fake-quality', 'context_tokens': 16384, 'template_hash': 'fake',
+                             'sampling': {'temperature': 0.2}}
         return self.capabilities
+
+    def inspect_identity(self):
+        return self.inspect()
 
     def model(self):
         return 'fake-quality'

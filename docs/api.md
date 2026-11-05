@@ -22,7 +22,7 @@ There is no authentication or per-user isolation. Browser POSTs from another ori
 | `GET /api/jobs/<id>/metrics` | Attempts, step records and summary counts |
 | `GET /api/profiles` | Profiles, environment defaults and cached backend capabilities |
 | `POST /api/config/preview` | JSON options; returns preliminary configuration without creating a job |
-| `GET /api/diagnostics` | Read-only backend inspection, cached for 30 seconds and shared with job start-up inspections; no inference |
+| `GET /api/diagnostics` | Read-only backend inspection, cached for 30 seconds (5 seconds for failures/unknown context); no inference |
 
 Missing jobs return 404. Report access returns 409 unless the job is done and 404 if the file is missing or outside its authorized directory. Empty reports download as empty Markdown and show a message in the reader. Downloads keep `text/markdown; charset=utf-8` and set attachment `filename` and UTF-8 `filename*` parameters. The internal filename remains `rapport_final.md`.
 
@@ -54,9 +54,11 @@ Options:
 
 Reasoning policies are `inherit`, `on` or `off`; on/off requires an administrator-configured adapter. Context ceilings, endpoints, credentials and concurrency cannot be set per job. Unsupported options and invalid values return 400.
 
-Preview accepts the options object directly as JSON. Profiles, preview and creation use the same cached capabilities without probing the backend. Successful observations with a known context expire after 30 seconds; failures and unknown contexts expire after 5 seconds. Reads do not extend expiration. Diagnostics reuse unexpired observations. Each job checks the full model ID before reusing cached properties; a changed ID triggers a fresh properties inspection. The full prompt is checked against context limits before generation.
+Preview accepts the options object directly as JSON. Profiles, preview and creation use the same cached capabilities without probing the backend. Successful observations with a known context expire after 30 seconds; failures and unknown contexts expire after 5 seconds. Reads do not extend expiration. Diagnostics reuse unexpired observations. These TTL observations are for display and preliminary validation, never artifact compatibility. The full prompt is checked against context limits before generation.
 
-The cache is private, in memory, and scoped to the backend URL and credentials. Failed or malformed job requests, tokenization or generation invalidate it; cancellation and configuration validation do not. Context stays unknown after an unavailable or invalid response. Changes to context/template/settings under the same model ID are detected at TTL expiration, so diagnostics can be stale for up to the applicable TTL. No background polling or disk persistence is used.
+The cache is private, in memory, and scoped to the backend URL and credentials. Failed or malformed job requests, tokenization or generation invalidate it; cancellation and configuration validation do not. Context stays unknown after an unavailable or invalid response. Diagnostics can be stale for up to the applicable TTL. No background polling or disk persistence is used.
+
+Every analysis attempt separately verifies `/v1/models` and `/props` afresh, before binding or reusing artifacts. This observation supplies the attempt's client and refreshes the display cache without a second inspection. A changed identity refuses reuse with `identity_changed`. Reuse also requires known model, template and engine-sampling hashes in both the existing manifest and the fresh observation; unknown fields are never upgraded to make old artifacts compatible. Historical snapshots and manifests remain unchanged on refusal. A backend with limited properties can still run a new analysis, but its artifacts cannot be reused if these identity fields are unverifiable. The backend must remain stable throughout an attempt; there is no continuous identity monitoring.
 
 ## Progress, retries and cancellation
 

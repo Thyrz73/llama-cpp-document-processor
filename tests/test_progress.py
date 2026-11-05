@@ -219,7 +219,7 @@ class ProgressTests(unittest.TestCase):
                      patch.object(runner._wakeup, "wait", side_effect=StopWorker):
                     model = model_class.return_value
                     model.tokenize.return_value = 10
-                    model.inspect.return_value = {"context_tokens": 8192, "model": "test"}
+                    model.inspect_identity.return_value = {"context_tokens": 8192, "model": "test"}
                     model.model.return_value = "test"
                     model.fits.return_value = (True, 10, "estimated_template", 384)
                     model.current_metrics = {}

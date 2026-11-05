@@ -193,6 +193,19 @@ class ModelClient:
         cached optionally supplies (full model ID, sanitized properties) from
         an unexpired cache. Always recheck the model ID before reusing them.
         """
+        return self._inspect(cached=cached)
+
+    def inspect_identity(self):
+        """Read the model and properties afresh before an attempt can reuse artifacts.
+
+        Never accept a capability-cache hint here. Model failures propagate
+        without a second request; optional properties can remain unknown,
+        in which case the artifact compatibility check must refuse reuse.
+        """
+        return self._inspect(for_identity=True)
+
+    def _inspect(self, *, cached=None, for_identity=False):
+        """Collect observations for either diagnostics or attempt identity validation."""
         result: dict[str, Any] = {"status": "unavailable", "context_tokens": None, "slots": None,
                   "model": None, "template_hash": None, "version": None,
                   "sampling": {},
@@ -203,6 +216,8 @@ class ModelClient:
             result["status"] = "available"
         except ModelError:
             self.capabilities = result
+            if for_identity:
+                raise
             return result
         if cached is not None and cached[0] == self.model_name and cached[1].get("status") == "available":
             self.capabilities = copy.deepcopy(cached[1])
@@ -215,9 +230,12 @@ class ModelClient:
                 result["context_tokens"] = context
             parameters = settings.get("params", {}) if isinstance(settings, dict) else {}
             if isinstance(parameters, dict):
-                result["sampling"] = {key: parameters[key] for key in
-                    ("temperature", "top_p", "top_k", "min_p", "repeat_penalty")
-                    if numeric(parameters.get(key)) is not None}
+                names = ("temperature", "top_p", "top_k", "min_p", "repeat_penalty")
+                result["sampling"] = {key: parameters[key] for key in names
+                                      if numeric(parameters.get(key)) is not None}
+                # Display may omit invalid values; identity must not hash a partial observation.
+                if for_identity and any(key in parameters and numeric(parameters[key]) is None for key in names):
+                    result["sampling"] = {}
             slots = props.get("total_slots")
             if type(slots) is int and slots > 0:
                 result["slots"] = slots
