@@ -2,12 +2,14 @@
 
 import tempfile
 import unittest
+from dataclasses import replace
 from html.parser import HTMLParser
 from pathlib import Path
 from unittest.mock import patch
 
 import app
 from document_processor import jobs, prompts, reports
+from document_processor.application import create_app
 from document_processor.jobs import JobStore
 
 
@@ -73,20 +75,22 @@ class ReportTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         directory = Path(self.tmp.name)
-        patched = patch.object(app, "store", JobStore(directory))
-        patched.start()
-        self.addCleanup(patched.stop)
-        app.store.initialize()
-        self.client = app.app.test_client()
+        self.store = JobStore(directory)
+        self.addCleanup(self.store.close)
+        self.store.initialize()
+        self.application = create_app(
+            replace(app.SETTINGS, data_dir=directory), self.store
+        )
+        self.client = self.application.test_client()
         self.job_id = "0123456789abcdef" * 2
-        with app.store.connect() as con:
+        with self.store.connect() as con:
             con.execute(
                 """INSERT INTO jobs
                 (id, filename, question, status, created_at, updated_at)
                 VALUES (?, 'example.pdf', 'Analyze', 'done', ?, ?)""",
                 (self.job_id, jobs.utcnow(), jobs.utcnow()),
             )
-        self.directory = app.store.job_dir(self.job_id)
+        self.directory = self.store.job_dir(self.job_id)
         self.directory.mkdir(parents=True)
 
     def test_markdown_attachment_headers_filename_and_utf8_content(self):
@@ -109,7 +113,7 @@ class ReportTests(unittest.TestCase):
         """Reject unfinished jobs with HTTP 409."""
         for status in ("queued", "running", "failed"):
             with self.subTest(status=status):
-                app.store.update_job(self.job_id, status=status)
+                self.store.update_job(self.job_id, status=status)
                 self.assertEqual(
                     self.client.get(f"/api/jobs/{self.job_id}/report").status_code, 409
                 )
@@ -162,7 +166,7 @@ class ReportTests(unittest.TestCase):
             self.client.get(f"/api/jobs/{self.job_id}/report/view").status_code, 200
         )
         self.assertEqual(
-            app.store.get_job(self.job_id)["report_name"],
+            self.store.get_job(self.job_id)["report_name"],
             "Etude_des_batiments_rapport.md",
         )
         self.assertEqual(
@@ -218,11 +222,11 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(response.status_code, 404)
         self.assertIn("Rapport introuvable", response.get_data(as_text=True))
         self.write_report("# Old report")
-        app.store.update_job(self.job_id, status="running")
+        self.store.update_job(self.job_id, status="running")
         self.assertEqual(
             self.client.get(f"/api/jobs/{self.job_id}/report/view").status_code, 409
         )
-        app.store.update_job(self.job_id, status="done")
+        self.store.update_job(self.job_id, status="done")
         for path in (
             "not-an-id/report",
             "not-an-id/report/view",

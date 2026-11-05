@@ -18,12 +18,12 @@
         >
           <a
             class="report-button button-secondary"
-            href="{{ url_for('index') }}"
+            href="{{ url_for('system.index') }}"
             >{{ t('Back to analyses') }}</a
           >
           {% if available %}<a
             class="report-button report-download"
-            href="{{ url_for('report', job_id=job_id) }}"
+            href="{{ url_for('reports.report', job_id=job_id) }}"
             download
             >{{ t('Download') }}</a
           >{% endif %}

@@ -173,7 +173,10 @@ class ErrorCatalogTests(unittest.TestCase):
     """Every public error code is translated, and every translated code is still emitted."""
 
     def test_emitted_codes_and_translations_match(self):
-        sources = [ROOT / "app.py", *sorted((ROOT / "document_processor").glob("*.py"))]
+        sources = [
+            ROOT / "app.py",
+            *sorted((ROOT / "document_processor").rglob("*.py")),
+        ]
         text = {path: path.read_text(encoding="utf-8") for path in sources}
         emitted = set()
         for _path, source in text.items():
@@ -186,15 +189,24 @@ class ErrorCatalogTests(unittest.TestCase):
             emitted |= set(
                 re.findall(r"jsonify\([^\n]*?error_code=\"([a-z_]+)\"", source)
             )
-        # Route helpers in app.py also return API dictionaries with explicit codes,
-        # and api_error reports each registered HTTP status as http_<status>.
+        # Route helpers may return dictionaries; public HTTP errors come from the
+        # installed application handlers, independently of module organization.
         emitted |= set(
-            re.findall(r"\"error_code\": \"([a-z_]+)\"", text[ROOT / "app.py"])
+            re.findall(
+                r'"error_code": "([a-z_]+)"',
+                "\n".join(
+                    source
+                    for path, source in text.items()
+                    if path == ROOT / "app.py"
+                    or path.is_relative_to(ROOT / "document_processor/web")
+                ),
+            )
         )
-        statuses = set(
-            re.findall(r"@app\.errorhandler\((\d{3})\)", text[ROOT / "app.py"])
-        )
-        emitted |= {f"http_{status}" for status in statuses}
+        emitted |= {
+            f"http_{status}"
+            for status in (400, 404, 409, 500)
+            if status in app.app.error_handler_spec[None]
+        }
         catalog = json.loads(
             (ROOT / "static/translations.json").read_text(encoding="utf-8")
         )

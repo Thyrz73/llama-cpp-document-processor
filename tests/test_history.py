@@ -5,11 +5,13 @@ import sqlite3
 import tempfile
 import unittest
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
 import app
 from document_processor import jobs
+from document_processor.application import create_app
 from document_processor.jobs import JobStore
 
 
@@ -18,16 +20,18 @@ class HistoryDeletionTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.data = Path(self.tmp.name)
-        changed = patch.object(app, "store", JobStore(self.data))
-        changed.start()
-        self.addCleanup(changed.stop)
-        app.store.initialize()
-        self.client = app.app.test_client()
+        self.store = JobStore(self.data)
+        self.addCleanup(self.store.close)
+        self.store.initialize()
+        self.application = create_app(
+            replace(app.SETTINGS, data_dir=self.data), self.store
+        )
+        self.client = self.application.test_client()
         self.identifier = "a" * 32
         self.directory = self.add_job(self.identifier)
 
     def add_job(self, identifier, status="done"):
-        with app.store.connect() as con:
+        with self.store.connect() as con:
             con.execute(
                 "INSERT INTO jobs (id,filename,question,status,created_at,updated_at) VALUES (?,?,?,?,?,?)",
                 (
@@ -39,7 +43,7 @@ class HistoryDeletionTests(unittest.TestCase):
                     jobs.utcnow(),
                 ),
             )
-        directory = app.store.job_dir(identifier)
+        directory = self.store.job_dir(identifier)
         directory.mkdir(parents=True)
         (directory / "rapport_final.md").write_text("# Report", encoding="utf-8")
         return directory
@@ -50,7 +54,7 @@ class HistoryDeletionTests(unittest.TestCase):
         )
 
     def test_individual_removes_record_files_and_dependent_metrics(self):
-        with app.store.connect() as con:
+        with self.store.connect() as con:
             con.execute(
                 "INSERT INTO job_configs VALUES (?, '{}', 'hash', ?)",
                 (self.identifier, jobs.utcnow()),
@@ -72,7 +76,7 @@ class HistoryDeletionTests(unittest.TestCase):
         self.assertIsNone(response.json["warning_code"])
         self.assertFalse(self.directory.exists())
         self.assertTrue(other.exists())
-        with app.store.connect() as con:
+        with self.store.connect() as con:
             for table in ("job_configs", "job_runs", "job_steps"):
                 self.assertEqual(
                     con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0], 0
@@ -95,13 +99,13 @@ class HistoryDeletionTests(unittest.TestCase):
 
     def test_queued_running_unknown_and_finishing_jobs_are_protected(self):
         for status in ("queued", "running", "unknown"):
-            app.store.update_job(self.identifier, status=status)
+            self.store.update_job(self.identifier, status=status)
             response = self.delete()
             self.assertEqual(response.status_code, 409)
             self.assertEqual(response.json["error_code"], "delete_active")
             self.assertTrue(self.directory.exists())
-        app.store.update_job(self.identifier, status="done")
-        with app.store.connect() as con:
+        self.store.update_job(self.identifier, status="done")
+        with self.store.connect() as con:
             con.execute(
                 "INSERT INTO job_runs (job_id,started_at,status) VALUES (?,?,'running')",
                 (self.identifier, jobs.utcnow()),
@@ -154,7 +158,7 @@ class HistoryDeletionTests(unittest.TestCase):
             self.assertEqual(
                 self.client.post("/api/jobs/delete", json=payload).status_code, 400
             )
-            self.assertIsNotNone(app.store.get_job(self.identifier))
+            self.assertIsNotNone(self.store.get_job(self.identifier))
         response = self.client.post(
             "/api/jobs/delete", data="{" + " " * 8200, content_type="application/json"
         )
@@ -171,7 +175,7 @@ class HistoryDeletionTests(unittest.TestCase):
 
     def test_sqlite_failure_keeps_record_and_files_and_batch_continues(self):
         self.add_job("b" * 32)
-        with app.store.connect() as con:
+        with self.store.connect() as con:
             con.execute(
                 "CREATE TRIGGER reject_delete BEFORE DELETE ON jobs WHEN OLD.id='"
                 + self.identifier
@@ -183,12 +187,12 @@ class HistoryDeletionTests(unittest.TestCase):
         self.assertEqual(response.status_code, 207)
         self.assertEqual(response.json["results"][0]["error_code"], "delete_database")
         self.assertTrue(response.json["results"][1]["deleted"])
-        self.assertIsNotNone(app.store.get_job(self.identifier))
+        self.assertIsNotNone(self.store.get_job(self.identifier))
         self.assertTrue((self.directory / "rapport_final.md").exists())
 
     def test_cleanup_happens_only_after_commit_and_failure_is_explicit(self):
         def fail_cleanup(directory):
-            with sqlite3.connect(app.store.db_path) as con:
+            with sqlite3.connect(self.store.db_path) as con:
                 self.assertIsNone(
                     con.execute(
                         "SELECT id FROM jobs WHERE id=?", (self.identifier,)
@@ -205,7 +209,7 @@ class HistoryDeletionTests(unittest.TestCase):
         self.assertTrue(self.directory.exists())
 
     def test_commit_failure_rolls_back_without_touching_files(self):
-        original = app.store.connect
+        original = self.store.connect
 
         @contextmanager
         def failing_commit():
@@ -213,11 +217,11 @@ class HistoryDeletionTests(unittest.TestCase):
                 yield con
                 raise sqlite3.OperationalError("simulated commit failure")
 
-        with patch.object(app.store, "connect", failing_commit):
+        with patch.object(self.store, "connect", failing_commit):
             response = self.delete()
         self.assertEqual(response.status_code, 500)
         self.assertEqual(response.json["error_code"], "delete_database")
-        self.assertIsNotNone(app.store.get_job(self.identifier))
+        self.assertIsNotNone(self.store.get_job(self.identifier))
         self.assertTrue((self.directory / "rapport_final.md").exists())
 
     def test_partial_file_cleanup_is_reported_after_durable_deletion(self):
@@ -232,14 +236,14 @@ class HistoryDeletionTests(unittest.TestCase):
             response = self.delete()
         self.assertTrue(response.json["deleted"])
         self.assertEqual(response.json["warning_code"], "delete_files_failed")
-        self.assertIsNone(app.store.get_job(self.identifier))
+        self.assertIsNone(self.store.get_job(self.identifier))
         self.assertFalse((self.directory / "rapport_final.md").exists())
 
     def test_mounts_and_unsafe_platform_cleanup_are_retained(self):
         with patch.object(Path, "is_mount", return_value=True):
             self.assertEqual(self.delete().json["warning_code"], "delete_files_unsafe")
         self.assertTrue((self.directory / "rapport_final.md").exists())
-        with app.store.connect() as con:
+        with self.store.connect() as con:
             con.execute(
                 "INSERT INTO jobs (id,filename,question,status,created_at,updated_at) VALUES (?, 'test.pdf', 'Analyze', 'done', ?, ?)",
                 (self.identifier, jobs.utcnow(), jobs.utcnow()),
@@ -293,4 +297,4 @@ class HistoryDeletionTests(unittest.TestCase):
                 ).status_code,
                 403,
             )
-        self.assertIsNotNone(app.store.get_job(self.identifier))
+        self.assertIsNotNone(self.store.get_job(self.identifier))

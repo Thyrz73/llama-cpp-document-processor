@@ -42,31 +42,46 @@ def js_imports(path):
     ]
 
 
+def module_name(path):
+    relative = path.relative_to(PACKAGE).with_suffix("")
+    parts = list(relative.parts)
+    if parts[-1] == "__init__" and len(parts) > 1:
+        parts.pop()
+    return ".".join(parts)
+
+
 def imported_modules(path):
-    """Return the names of app.py and package modules imported by one source file."""
+    """Resolve dependencies throughout the package, including route subpackages."""
+    modules = {module_name(candidate) for candidate in PACKAGE.rglob("*.py")}
+    current = path.relative_to(PACKAGE).parent.parts
     names = set()
     for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
         if isinstance(node, ast.Import):
-            names.update(alias.name.split(".")[0] for alias in node.names)
+            for alias in node.names:
+                if alias.name == "app":
+                    names.add("app")
+                elif alias.name.startswith("document_processor."):
+                    names.add(alias.name.removeprefix("document_processor."))
         elif isinstance(node, ast.ImportFrom):
-            if node.level == 0 and node.module:
-                parts = node.module.split(".")
-                names.add(
-                    parts[1]
-                    if parts[0] == PACKAGE.name and len(parts) > 1
-                    else parts[0]
+            if node.level:
+                parent = current[: len(current) - node.level + 1]
+                base = ".".join(
+                    part for part in (".".join(parent), node.module) if part
                 )
-                if node.module == PACKAGE.name:
-                    names.update(alias.name for alias in node.names)
-            elif node.level == 1:
-                # "from .x import y" imports module x; "from . import x, y" imports modules x and y.
-                names.update(
-                    [node.module.split(".")[0]]
-                    if node.module
-                    else [alias.name for alias in node.names]
-                )
-    modules = {path.stem for path in PACKAGE.glob("*.py")}
-    return {name for name in names if name in modules or name == "app"}
+            elif node.module == "app":
+                names.add("app")
+                continue
+            elif node.module == "document_processor":
+                base = ""
+            elif (node.module or "").startswith("document_processor."):
+                base = node.module.removeprefix("document_processor.")
+            else:
+                continue
+            names.add(base)
+            names.update(
+                ".".join(filter(None, (base, alias.name))) for alias in node.names
+            )
+    return names & (modules | {"app"})
 
 
 def find_cycle(graph):
@@ -97,7 +112,7 @@ def find_cycle(graph):
 class ArchitectureTests(unittest.TestCase):
     def setUp(self):
         self.graph = {
-            path.stem: imported_modules(path) for path in PACKAGE.glob("*.py")
+            module_name(path): imported_modules(path) for path in PACKAGE.rglob("*.py")
         }
 
     def test_package_never_imports_the_web_app(self):

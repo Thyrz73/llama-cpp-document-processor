@@ -5,16 +5,15 @@ How the code is organized, how a job moves through it and where to make common c
 ## Overview
 
 ```text
-Browser ──HTTP──▶ app.py (Flask routes) ──▶ jobs.JobStore ──▶ data/jobs.sqlite3 + data/jobs/<id>/
-                       │ wake / cancel
-                       ▼
-                  worker.Worker (one background thread)
-                       │ runs one job at a time
-                       ▼
-                  pipeline.JobRun ──▶ model_client ──HTTP──▶ llama.cpp
-                       ├── extraction   PDF text, OCR, sections
-                       ├── artifacts    verified reuse of finished steps
-                       └── reliability  mechanical citation and number checks
+app.py ──▶ lifecycle.run_server() ──▶ Waitress + Worker + SQLite shutdown
+   └─────▶ application.create_app() / compatibility wiring
+                        │
+Browser ──HTTP──▶ web.system / web.jobs / web.reports
+                        │ app.extensions["document_processor"]
+                        ▼
+                     Services ──▶ JobStore ──▶ SQLite + job files
+                        ├───────▶ CapabilityCache + DeploymentModelClient
+                        └───────▶ Worker ──▶ pipeline.JobRun ──▶ llama.cpp
 ```
 
 There is one process, one worker thread and a few web threads. SQLite holds the queue and every job record; each job also has a private directory for its PDF, intermediate results and report.
@@ -23,7 +22,16 @@ There is one process, one worker thread and a few web threads. SQLite holds the 
 
 | File | Responsibility |
 | --- | --- |
-| `app.py` | Flask routes, startup and the deployment-settings compatibility boundary. Only HTTP handling and wiring. |
+| `app.py` | Default application and Waitress entry point; installs the legacy compatibility exports. |
+| `document_processor/application.py` | `create_app(settings, store, client_factory, *, worker)`: Flask setup, assets, blueprints and private failure logging. |
+| `document_processor/services.py` | Application-owned settings, store, worker, client construction, snapshots and pipeline wiring. |
+| `document_processor/backend.py` | `DeploymentModelClient` and one backend-keyed TTL cache/inspection lock per application. |
+| `document_processor/web/system.py` | Page, health, profiles, configuration preview and read-only diagnostics. |
+| `document_processor/web/jobs.py` | Uploads, job status/metrics/live, retry, cancellation and history deletion. |
+| `document_processor/web/reports.py` | Validated report paths, streaming downloads and the bounded Markdown viewer. |
+| `document_processor/web/hooks.py` | Cross-origin write rejection, no-store/nosniff headers and stable public errors. |
+| `document_processor/lifecycle.py` | Startup validation, database initialization, Waitress, SIGTERM and ordered worker/SQLite shutdown. |
+| `document_processor/compat.py` | Explicit adapters for old `import app` tests; never used by independently created apps. |
 | `document_processor/settings.py` | Immutable deployment scalars and paths, loaded explicitly by `Settings.from_env()`; fresh job defaults. |
 | `document_processor/environment.py` | Parses environment variables; errors name the variable. |
 | `document_processor/config.py` | Turns job options into an immutable, validated configuration snapshot. |
@@ -53,14 +61,26 @@ Importing `document_processor.settings` performs no environment reads, file acce
 
 Validation keeps its existing two stages: `from_env()` applies `environment.py` parsing and individual environment bounds in their original order; `config.resolve()` checks job limits and cross-budget consistency when the server starts and when jobs/configurations are resolved. Relative paths, unstripped keys, request/step timeout fallback and the 1,000–50,000 live-preview clamp retain their previous semantics. The Flask request limit remains the upload MiB limit plus 65,536 bytes for multipart data.
 
-`app.SETTINGS` is the initial process snapshot. As a temporary compatibility boundary, the existing uppercase `app` globals are still initialized from it, and `app.deployment_settings()` explicitly copies their current values into a `Settings` object. This keeps existing monkeypatches effective without rereading the environment or mutating `SETTINGS`. Process initialization (store, Flask request limit and listening port) still uses the initial values. New callers can pass `settings=` to `app.runtime_defaults()`, `app.new_snapshot()`, `app.read_system_prompt()` and `app.ModelClient()`; tests can use `dataclasses.replace()` to create an override. Keep legacy globals and their mapping confined to `app.py` until callers no longer depend on those patches. No-argument prompt/default hooks remain usable by existing tests.
+`app.SETTINGS` is the initial process snapshot of the compatibility entry point. `compat.py` temporarily exports the original uppercase globals and no-argument hooks through `app.py`; `app.deployment_settings()` explicitly reads those names without rereading the environment. Existing monkeypatches apply only to this default app. `app.ModelClient` is a compatibility constructor for `LegacyDeploymentClient`; production factory instances construct the distinctly named `DeploymentModelClient`. Code importing the reusable backend adapter still uses `model_client.ModelClient`. The step-11 `settings=` hooks remain available on the compatibility functions. New fixtures should inject settings, stores and clients through `create_app()` instead of adding more global patches.
 
 Only the system prompt's **path** belongs to `Settings`. `read_system_prompt()` reads its current UTF-8 content for a new snapshot (or a client without a saved prompt); editing the file affects new jobs, while existing jobs and retries keep their saved text. Missing, unreadable and empty prompts retain their existing errors. Neither parsing settings nor building default dictionaries reads or validates prompt contents.
+
+## Factory, dependencies and lifecycle
+
+`create_app(settings, store=None, client_factory=None, *, worker=None)` constructs an isolated application with the same asset roots, upload limit, routes and protections. `settings` is explicit and immutable. A missing store is constructed from `settings.data_dir`; a missing worker is constructed for that store. Construction never initializes SQLite, creates an HTTP client, starts a thread, reads the private prompt or contacts llama.cpp. Importing the factory never imports `app.py` or reads deployment environment values. Importing `app` creates its compatibility app but starts no worker/network activity.
+
+The single service object is available as `application.extensions["document_processor"]`; request handlers retrieve it from the current Flask application. `Services` owns the store, worker and backend cache, and provides `new_snapshot()` and `analyze_job()` for work outside a request context. `client_factory(config)` is optional: it replaces model construction for pipeline work and read-only diagnostics. Diagnostics pass an empty `system_prompt` and never read the private file. `worker` can be a test double implementing the same wake/cancel/lifecycle methods. Each factory call creates its own store/worker by default and always owns a distinct capability cache/lock. Callers may explicitly inject shared collaborators; independently created apps do not observe compatibility-global patches.
+
+Tests initialize their injected store explicitly, call `application.test_client()`, then close the store in cleanup. The migrated history/report suites and `test_application.py` show this pattern. The worker is not started as part of a request or request-context setup/teardown. There is deliberately no per-request SQLite close: connections remain owned/reused by their thread, and preview/public-configuration caches retain their established lifetimes.
+
+`python app.py` alone calls `lifecycle.run_server()`: validate job defaults, initialize/recover the database, install SIGTERM, start the worker and serve Waitress on `0.0.0.0` with the configured port and four threads. Shutdown requests cooperative worker stop before closing/checkpointing the main thread's SQLite connection; the worker still closes its own connection. Merely creating/importing an app does none of these startup steps. Joint-budget and schema errors retain their messages and exit behavior.
+
+Blueprints namespace internal Flask endpoints (`system.index`, `jobs.create_job`, `reports.report`, etc.); HTTP paths and methods are unchanged. Report templates use those names and generate the same URLs. Logs remove the namespace when reporting endpoint names, preserving the existing public log fields. CSP, download streaming/headers, report-view i18n, cookie behavior, path checks and public error handlers remain application-wide or with their owning route group.
 
 ## Life of a job
 
 1. **Upload.** `POST /api/jobs` first calls `config.resolve()`, which combines administrator defaults, the chosen profile and overrides into a configuration snapshot. The snapshot also stores the system prompt and task templates. The route then checks the request and the PDF, saves the file and adds its hash to the snapshot. `JobStore.create_job()` saves the job as `queued`, and the route wakes the worker.
-2. **Claim.** `Worker.run_forever()` claims the oldest queued job (`JobStore.claim_next_job()`) and calls `app.analyze_job()`, which builds a `pipeline.Runtime` with the store, the model client factory and the worker's cancellation check.
+2. **Claim.** `Worker.run_forever()` claims the oldest queued job (`JobStore.claim_next_job()`) and calls `Services.analyze_job()` (also exposed as `app.analyze_job` for compatibility), which builds a `pipeline.Runtime` with the store, the model client factory and the worker's cancellation check.
 3. **Analysis.** `JobRun.execute()` prepares the backend, extracts the text, splits it into sections, writes notes per section, merges them until they fit the final prompt, writes the final report and saves it. The extracted text, sections, notes, merges and final text are saved as artifacts, so a retry reuses finished work.
 4. **Progress.** Each phase updates the job row. When live output is enabled, previews update memory and periodically checkpoint `live_preview.json`. The browser polls `GET /api/jobs` every 6 seconds while jobs are active. An open live panel for a queued/running job schedules its next `GET /api/jobs/<id>/live` 1.7 seconds after the previous request settles. Model-pass `active=false` does not stop polling a running job. Terminal jobs get one final preview; opening historical output and changing channels remain one-off loads. Closing the panel, hiding the tab or stopping/resetting the UI cancels its timeout; late responses cannot restart an old UI.
 5. **End.** The job becomes `done`, `failed` (with a translated error code) or `cancelled`. Failed and cancelled jobs can be retried with the same snapshot, up to `MAX_JOB_ATTEMPTS` attempts in total.
@@ -69,7 +89,7 @@ Only the system prompt's **path** belongs to `Settings`. `read_system_prompt()` 
 
 `ModelError` and `Cancelled` both inherit from `ProcessingError` (`RuntimeError`), but cancellation is not a backend failure. Optional backend inspection fallbacks catch `ModelError` and let `Cancelled` propagate. The stream reader passes cancellation to its consumer, and the pipeline and worker record it as `cancelled`, including during report saving. `ConfigurationError` remains a `ValueError` with its existing public code and HTTP 400 response.
 
-Backend diagnostics use an in-memory capability cache in `app.py`: 30 seconds for success with a known context, 5 seconds otherwise. `inspect()` allows TTL observations for display; `inspect_identity()` always reads `/v1/models` and `/props` afresh at the beginning of each attempt, before artifact compatibility checks. Its result is reused within the attempt and supplies the UI cache. A lock serializes inspections; jobs can cancel while waiting for it. Backend failures invalidate observations; callers receive copies, and cache reads never renew expiration. Profiles, preview and creation only read the cache and retain `engine_context_unknown` when no valid context is known. Tests in `test_capabilities.py` and `test_backend_identity.py` simulate time and HTTP responses without a real backend.
+Backend diagnostics use the application-owned `CapabilityCache` in `backend.py`: 30 seconds for success with a known context, 5 seconds otherwise. `inspect()` allows TTL observations for display; `inspect_identity()` always reads `/v1/models` and `/props` afresh at the beginning of each attempt, before artifact compatibility checks. Its result is reused within the attempt and supplies the UI cache. A lock serializes inspections; jobs can cancel while waiting for it. Backend failures invalidate observations; callers receive copies, and cache reads never renew expiration. Profiles, preview and creation only read the cache and retain `engine_context_unknown` when no valid context is known. Tests in `test_capabilities.py` and `test_backend_identity.py` simulate time and HTTP responses without a real backend.
 
 Existing artifacts require known model, template and engine-sampling hashes in both their manifest and the fresh identity. A mismatch or unverifiable identity raises the existing `identity_changed` error before any artifact read, without rewriting the manifest or snapshot. Limited-property backends can run a new analysis, but cannot reuse artifacts with unknown identity fields. The version field remains optional and is compared when recorded previously.
 
@@ -118,12 +138,12 @@ The application targets small machines. The defaults are 512 MB of memory and 0.
 
 | Change | Where | Checked by |
 | --- | --- | --- |
-| Add a setting | Add a field and parse it in `Settings.from_env()` with `environment.*`; update the temporary exports/adapter in `app.py`, `compose.yaml`, `.env.example` and the README table | Extend `tests/test_settings.py` and the `names` table of `tests/test_environment.py`, which compares code and Compose defaults |
+| Add a setting | Add a field and parse it in `Settings.from_env()` with `environment.*`; update the temporary exports/adapter in `compat.py`, `compose.yaml`, `.env.example` and the README table | Extend `tests/test_settings.py` and the `names` table of `tests/test_environment.py`, which compares code and Compose defaults |
 | Change the database schema | Append a function to `database.MIGRATIONS`; never edit a released one | `tests/test_database.py` |
 | Add an error | `raise ProcessingError("my_code", "Message.")`, then add `error.my_code` to both languages | `tests/test_errors.py` |
 | Change a task prompt | `prompts.TEMPLATES`, and increase `PROMPT_VERSION` | Existing jobs keep their saved prompts |
 | Change a profile | `profiles.PROFILES`, increase `PROFILE_VERSION`, then update the README table | `tests/test_v2.py` |
-| Add an API route | A route in `app.py` that calls `JobStore` methods, then document it in [api.md](api.md) | Route tests in `tests/` |
+| Add an API route | A route in the relevant `web` blueprint that calls application services/`JobStore` methods, then document it in [api.md](api.md) | Route tests in `tests/` |
 | Change the interface | The module of the [Browser interface](#browser-interface) concerned; add new text to both languages of `static/translations.json` | `tests/test_polling.js` |
 
 ## Tests
@@ -134,6 +154,7 @@ Run the commands from the README's Development section. Python tests use tempora
 - `test_progress.py`: job states and progress, restart recovery and the worker loop.
 - `test_public_configs.py`: bounded public-only configuration caching, fingerprint changes, invalidation, concurrent list reads and active jobs outside the visible history.
 - `test_database.py`, `test_worker_shutdown.py`: migrations, connection reuse/ownership, rollback, concurrent checkpoints, bounded shutdown, SQLite backup and WAL recovery after abrupt process exit.
+- `test_application.py`: per-app store/worker/cache isolation, route/method inventory, injected clients and workers, JSON/security/upload/live/report contracts, side-effect-free import and explicit lifecycle order.
 - `test_settings.py`: deployment defaults/overrides, validation stages, immutable values, isolated defaults, import behavior, compatibility globals, explicit injection and editable prompts.
 - `test_architecture.py`, `test_errors.py`, `test_environment.py`, `test_dependencies.py`: guards against import cycles, untranslated errors, configuration drift and diverging dependency locks. `test_environment.py` checks real HTTP shutdown after a completed job, plus the application SIGTERM path during a simulated worker transaction. Single-file checks apply to these quiescent test scenarios, not every production stop.
 - `test_polling.js`: the interface modules against a simulated browser: polling, rendering, live output, settings and history, run with Node.js.

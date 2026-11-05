@@ -262,8 +262,8 @@ import os, runpy, signal, threading
 import waitress
 
 def serve(app, **kwargs):
-    context = app.view_functions['health'].__globals__
-    store, worker = context['store'], context['worker']
+    services = app.extensions['document_processor']
+    store, worker = services.store, services.worker
     entered = threading.Event()
     def run(job_id, check):
         store.update_job(job_id, progress_percent=25)
