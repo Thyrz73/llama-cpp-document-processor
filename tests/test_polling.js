@@ -23,17 +23,17 @@ async function runPollingTests(template, translations={en:{},fr:{}}) {
  const descendants=node=>node.children.flatMap(child=>[child,...descendants(child)]);
  // Create a fresh environment with controlled DOM, requests, and timers.
  // These tests start neither a real browser nor an HTTP server.
- function setup(withSettings=false,storage=new Map()) {
+ function setup(withSettings=false,storage=new Map(),systemDark=false) {
   class Element {
    // Initialize a minimal DOM node and properties used by the scenarios.
-   // classList provides no-op methods so CSS calls are accepted.
-   constructor(tag){this.tag=tag;this.children=[];this.handlers={};this.style={};this.dataset={};this.attributes={};this.scrollTop=0;this.scrollHeight=200;this.clientHeight=100;this.classList={add(){},remove(){},toggle(){}};this.replacements=0;this.value='';this.options=[]}
+   // Keep parent links so detached controls and hidden ancestors behave like DOM nodes.
+   constructor(tag){this.tag=tag;this.children=[];this.parentElement=null;this.handlers={};this.style={};this.dataset={};this.attributes={};this.scrollTop=0;this.scrollHeight=200;this.clientHeight=100;this.classList={add(){},remove(){},toggle(){}};this.replacements=0;this.value='';this.options=[]}
    // Append child nodes to the current node.
-   append(...children){this.children.push(...children)}
+   append(...children){for(const child of children){if(child.parentElement){const siblings=child.parentElement.children;siblings.splice(siblings.indexOf(child),1)}child.parentElement=this;this.children.push(child)}}
    // Replace children and count simulated DOM rebuilds.
-   replaceChildren(...children){this.children=children;this.replacements++}
+   replaceChildren(...children){for(const child of this.children)child.parentElement=null;this.children=[];this.append(...children);this.replacements++}
    // Assign plain text and remove children, as the DOM does.
-   set textContent(value){this.text=value;this.children=[]}
+   set textContent(value){this.text=value;for(const child of this.children)child.parentElement=null;this.children=[]}
    // Read assigned text, or an empty string when none exists.
    get textContent(){return this.text||''}
    // Store an attribute after converting its value to text.
@@ -42,7 +42,9 @@ async function runPollingTests(template, translations={en:{},fr:{}}) {
    addEventListener(type,fn){(this.handlers[type]??=[]).push(fn)}
    // Recursively find Live-channel buttons among the children.
    querySelectorAll(selector){const key=selector.slice(6,-1).replace(/-([a-z])/g,(_,letter)=>letter.toUpperCase());return this.children.flatMap(c=>[...(c.dataset[key]!==undefined?[c]:[]),...c.querySelectorAll(selector)])}
-   focus(){document.activeElement=this}
+   get isConnected(){for(let node=this;node;node=node.parentElement)if(node===document.documentElement||Object.values(elements).includes(node))return true;return false}
+   closest(selector){if(selector!=='[hidden]')throw Error('Unsupported ancestor selector '+selector);for(let node=this;node;node=node.parentElement)if(node.hidden)return node;return null}
+   focus(){if(this.isConnected&&!this.disabled&&!this.closest('[hidden]'))document.activeElement=this}
    showModal(){this.open=true}
    close(){this.open=false}
    // Accept form reset without additional simulation.
@@ -68,16 +70,18 @@ async function runPollingTests(template, translations={en:{},fr:{}}) {
   // Register a simulated timer and return its ID without starting it.
   const timer=(fn,delay,interval)=>{timers.set(++timerId,{fn,delay,interval});return timerId};
   const requests=[];
+  const systemTheme={matches:systemDark,handlers:[],addEventListener(type,fn){this.handlers.push(fn)}};
   // Keep each request pending until the scenario resolves it.
   const fetch=(url,options)=>new Promise((resolve,reject)=>requests.push({url,options,resolve,reject}));
   // Install the simulated browser, run the page's inline scripts, then start
   // the interface as main.js does. start() resets the state shared by the modules.
-  Object.assign(globalThis,{document,localStorage:{getItem(){return null},setItem(){}},matchMedia:()=>({matches:false,addEventListener(){}}),fetch,
+  Object.assign(globalThis,{document,localStorage:{getItem(key){return storage.has(String(key))?String(storage.get(String(key))):null},setItem(key,value){storage.set(String(key),String(value))},removeItem(key){storage.delete(String(key))},clear(){storage.clear()}},matchMedia:()=>systemTheme,fetch,
    setTimeout:(fn,delay)=>timer(fn,delay,false),clearTimeout:id=>timers.delete(id),setInterval:(fn,delay)=>timer(fn,delay,true),
    FormData:class {constructor(){this.values=new Map()}set(k,v){this.values.set(k,v)}get(k){return this.values.get(k)}},
    // The interface never blocks with alert(): a call fails the scenario.
    alert:message=>{throw Error(message)}});
   for(const code of inlineScripts)new Function(code)();
+  const earlyTheme=document.documentElement.dataset.theme;
   start();
   const api={refresh:jobs.refresh,toggleLive:jobs.toggleLive,loadLive:live.loadLive,retry:jobs.retry,cancelJob:jobs.cancelJob,
    selectedOptions:settings.selectedOptions,previewConfig:settings.previewConfig,schedulePreview:settings.schedulePreview,
@@ -94,12 +98,29 @@ async function runPollingTests(template, translations={en:{},fr:{}}) {
   const click=()=>elements.refresh.handlers.click[0]({type:'click'});
   // Simulate form submission and return its processing promise.
   const upload=()=>elements.uploadForm.handlers.submit[0]({preventDefault(){},target:elements.uploadForm});
-  return {api,elements,document,requests,respond,polls,tick,visible,click,upload,article:()=>elements.jobs.children.flatMap(section=>section.children.flatMap(node=>node.children)).find(node=>node.tag==='article')};
+  return {api,elements,document,requests,respond,polls,tick,visible,click,upload,systemTheme,earlyTheme,article:()=>elements.jobs.children.flatMap(section=>section.children.flatMap(node=>node.children)).find(node=>node.tag==='article')};
  }
  const results=[];
  // Run scenario fn and record its name only after it succeeds. The modules
  // share one state, so the scenario's last continuations finish first.
  async function test(name,fn){await fn();await flush();results.push(name)}
+
+ await test('browser storage uses the supplied Map and browser string semantics',async()=>{
+  const storage=new Map([['saved','initial']]);setup(false,storage);
+  assert(localStorage.getItem('saved')==='initial'&&localStorage.getItem('missing')===null,'Read saved and absent keys');
+  localStorage.setItem(12,34);assert(storage.get('12')==='34'&&localStorage.getItem(12)==='34','String keys and values');
+  storage.set('saved','updated');assert(localStorage.getItem('saved')==='updated','Use the supplied Map by reference');
+  localStorage.removeItem(12);assert(!storage.has('12'),'Remove from the same Map');
+  localStorage.clear();assert(storage.size===0,'Clear the same Map');
+ });
+ await test('simulated DOM moves nodes and tracks hidden ancestors and disconnection',async()=>{
+  const h=setup(),first=h.document.createElement('div'),second=h.document.createElement('div'),child=h.document.createElement('button');
+  first.append(child);second.append(child);h.elements.jobs.append(second);
+  assert(first.children.length===0&&second.children.length===1&&child.parentElement===second,'Append moves rather than duplicates nodes');
+  assert(child.isConnected,'Connected through its parent');second.hidden=true;
+  assert(child.closest('[hidden]')===second,'Find a hidden ancestor');
+  second.replaceChildren();assert(!child.isConnected&&child.parentElement===null,'Replacing children detaches them');
+ });
 
  await test('theme defaults to light and remembers explicit choices across visits',async()=>{
   for(const initial of [null,'system','invalid','light','dark']){
