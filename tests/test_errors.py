@@ -174,25 +174,32 @@ class CapabilityCacheTests(unittest.TestCase):
                 self.addCleanup(client.session.close)
                 previous = client.capabilities
                 cached = dict(app._capability_cache)
-                client.cancel_check = lambda: True
-                # A cached model skips /v1/models; cancellation is then checked before /props.
-                if path == "/props":
-                    client.model_name = "test-model"
-                with patch.object(client.session, "request") as request, self.assertRaises(Cancelled) as raised:
+                client.cancel_check = lambda: path == "/v1/models"
+
+                def model_response(*args, **kwargs):
+                    client.cancel_check = lambda: True
+                    response = requests.Response()
+                    response.status_code = 200
+                    response._content = b'{"data": [{"id": "test-model"}]}'
+                    response._content_consumed = True
+                    return response
+
+                with patch.object(client.session, "request", side_effect=model_response) as request, self.assertRaises(Cancelled) as raised:
                     client.inspect()
                 self.assertEqual(raised.exception.code, "cancelled")
-                request.assert_not_called()
+                self.assertEqual(request.call_count, 0 if path == "/v1/models" else 1)
                 self.assertIs(client.capabilities, previous)
                 self.assertEqual(app._capability_cache, cached)
 
     def test_backend_failures_still_return_sanitized_inspection_fallbacks(self):
         for path in ("/v1/models", "/props"):
-            with self.subTest(path=path):
+            with self.subTest(path=path), patch.object(app, "_capability_cache", {"value": None, "expires": 0}):
                 client = app.ModelClient()
                 self.addCleanup(client.session.close)
-                if path == "/props":
-                    client.model_name = "test-model"
-                with patch.object(client.session, "request", side_effect=requests.ConnectionError("PRIVATE_REMOTE_BODY")):
+                with patch.object(client, "model", wraps=client.model) as model, \
+                     patch.object(client.session, "request", side_effect=requests.ConnectionError("PRIVATE_REMOTE_BODY")):
+                    if path == "/props":
+                        model.return_value = "test-model"
                     result = client.inspect()
                 self.assertEqual(result["status"], "unavailable" if path == "/v1/models" else "available")
                 if path == "/props":

@@ -54,7 +54,9 @@ Options:
 
 Reasoning policies are `inherit`, `on` or `off`; on/off requires an administrator-configured adapter. Context ceilings, endpoints, credentials and concurrency cannot be set per job. Unsupported options and invalid values return 400.
 
-Preview accepts the options object directly as JSON. Both preview and creation use cached capabilities without probing the backend; the cache is refreshed by diagnostics and by each job's start-up inspection. The full prompt is checked against context limits before generation.
+Preview accepts the options object directly as JSON. Profiles, preview and creation use the same cached capabilities without probing the backend. Successful observations with a known context expire after 30 seconds; failures and unknown contexts expire after 5 seconds. Reads do not extend expiration. Diagnostics reuse unexpired observations. Each job checks the full model ID before reusing cached properties; a changed ID triggers a fresh properties inspection. The full prompt is checked against context limits before generation.
+
+The cache is private, in memory, and scoped to the backend URL and credentials. Failed or malformed job requests, tokenization or generation invalidate it; cancellation and configuration validation do not. Context stays unknown after an unavailable or invalid response. Changes to context/template/settings under the same model ID are detected at TTL expiration, so diagnostics can be stale for up to the applicable TTL. No background polling or disk persistence is used.
 
 ## Progress, retries and cancellation
 

@@ -5,6 +5,7 @@ into the answer and the model's reasoning, and live previews keep only a
 bounded tail of each.
 """
 
+import copy
 import hashlib
 import json
 import math
@@ -183,23 +184,29 @@ class ModelClient:
         except (requests.RequestException, ValueError):
             raise ModelError("backend_unavailable", "The model backend is unavailable or returned invalid data.") from None
 
-    def inspect(self):
+    def inspect(self, *, cached=None):
         """Return sanitized server properties without generating anything.
 
         The model comes from /v1/models; the context size, slots, template
         hash, version and default sampling come from the optional /props.
         Unavailable properties are reported in the result; cancellation propagates.
+        cached optionally supplies (full model ID, sanitized properties) from
+        an unexpired cache. Always recheck the model ID before reusing them.
         """
         result: dict[str, Any] = {"status": "unavailable", "context_tokens": None, "slots": None,
                   "model": None, "template_hash": None, "version": None,
                   "sampling": {},
                   "source": "backend", "observed_at": time.time()}
         try:
+            self.model_name = None
             result["model"] = self.model().replace("\\", "/").split("/")[-1][:120]
             result["status"] = "available"
         except ModelError:
             self.capabilities = result
             return result
+        if cached is not None and cached[0] == self.model_name and cached[1].get("status") == "available":
+            self.capabilities = copy.deepcopy(cached[1])
+            return self.capabilities
         try:
             props = self.json_request("GET", "/props", timeout=5)
             settings = props.get("default_generation_settings") or {}
@@ -257,7 +264,8 @@ class ModelClient:
             return self.model_name
         payload = self.json_request("GET", "/v1/models", timeout=5)
         items = payload.get("data", []) if isinstance(payload, dict) else []
-        if not items or not isinstance(items[0], dict) or not isinstance(items[0].get("id"), str):
+        if (not isinstance(items, list) or not items or not isinstance(items[0], dict) or not isinstance(items[0].get("id"), str)
+                or not items[0]["id"].strip()):
             raise ModelError("missing_model", "No model returned by /v1/models.")
         self.model_name = items[0]["id"]
         return self.model_name

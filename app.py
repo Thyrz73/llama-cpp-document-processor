@@ -14,6 +14,8 @@ the API with Waitress; importing the module starts neither.
 """
 from __future__ import annotations
 
+import copy
+import hashlib
 import json
 import logging
 import os
@@ -36,6 +38,7 @@ from werkzeug.exceptions import Conflict, NotFound, RequestEntityTooLarge
 from document_processor import config as job_config
 from document_processor import environment, pipeline, profiles, prompts, reports
 from document_processor.database import SchemaVersionError
+from document_processor.errors import ModelError
 from document_processor.files import file_hash
 from document_processor.jobs import PREVIEW_FILE, REPORT_FILE, SOURCE_FILE, InvalidJobPath, JobStore, is_job_id
 from document_processor.model_client import ModelClient as BackendClient
@@ -169,23 +172,44 @@ def new_snapshot(options, capabilities=None):
 _capability_cache: dict[str, Any] = {"value": None, "expires": 0}
 _capability_lock = threading.Lock()
 CAPABILITY_CACHE_SECONDS = 30
+CAPABILITY_FAILURE_CACHE_SECONDS = 5
 
 
-def cached_capabilities():
-    """Return the backend inspection made less than CAPABILITY_CACHE_SECONDS ago, or None.
+def capability_backend(client=None):
+    """Identify the configured backend privately, without retaining another credential copy."""
+    base = LLAMA_BASE if client is None else client.base_url
+    authorization = (f"Bearer {KEY}" if KEY else "") if client is None else client.session.headers.get("Authorization", "")
+    return base.rstrip("/"), hashlib.sha256(authorization.encode("utf-8")).digest()
 
-    This never contacts the backend.
+
+def cached_capabilities(client=None):
+    """Return an unexpired inspection for this backend, without network I/O.
+
+    Complete successes live for 30 seconds; failures and unknown contexts
+    live for 5 seconds. Reads never extend the original expiration.
     """
-    if time.monotonic() < _capability_cache["expires"]:
-        return _capability_cache["value"]
+    cached = _capability_cache
+    if cached.get("backend") == capability_backend(client) and time.monotonic() < cached["expires"]:
+        return copy.deepcopy(cached["value"])
     return None
 
 
-def remember_capabilities(value):
-    """Cache a backend inspection for CAPABILITY_CACHE_SECONDS."""
-    # Readers check the expiry first, so publish the value before extending it.
-    _capability_cache["value"] = value
-    _capability_cache["expires"] = time.monotonic() + CAPABILITY_CACHE_SECONDS
+def remember_capabilities(value, client=None):
+    """Publish one complete cache entry; callers serialize inspections with the lock."""
+    global _capability_cache
+    context = value.get("context_tokens")
+    healthy = value.get("status") == "available" and type(context) is int and context > 0
+    ttl = CAPABILITY_CACHE_SECONDS if healthy else CAPABILITY_FAILURE_CACHE_SECONDS
+    _capability_cache = {"value": copy.deepcopy(value), "expires": time.monotonic() + ttl,
+                         "backend": capability_backend(client),
+                         "model_name": client.model_name if client is not None else None}
+
+
+def invalidate_capabilities(client):
+    """Discard observations after a backend failure, leaving cancellation independent."""
+    global _capability_cache
+    if _capability_cache.get("backend") == capability_backend(client):
+        _capability_cache = {"value": None, "expires": 0}
 
 
 class ModelClient(BackendClient):
@@ -197,11 +221,49 @@ class ModelClient(BackendClient):
         super().__init__(LLAMA_BASE, KEY, settings,
                          read_system_prompt() if prompt is None else prompt, LIVE_PREVIEW_CHARS)
 
-    def inspect(self):
-        """Inspect the backend and cache the result for form validation and diagnostics."""
-        value = super().inspect()
-        remember_capabilities(value)
-        return value
+    def inspect(self, *, cached=None):
+        """Share properties with diagnostics, checking the model identity at each job start."""
+        self.check_cancelled()
+        while not _capability_lock.acquire(timeout=0.2):
+            self.check_cancelled()
+        try:
+            self.check_cancelled()
+            previous = cached_capabilities(self)
+            if previous is not None and previous.get("status") == "unavailable":
+                self.capabilities = previous
+                self.model_name = None
+                return previous
+            model_name = _capability_cache.get("model_name") if previous is not None else None
+            value = super().inspect(cached=(model_name, previous) if previous is not None else None)
+            if previous is None or self.model_name != model_name or value != previous:
+                remember_capabilities(value, self)
+            return value
+        finally:
+            _capability_lock.release()
+
+    def json_request(self, *args, **kwargs):
+        """Invalidate cached properties on failed or malformed backend requests."""
+        try:
+            return super().json_request(*args, **kwargs)
+        except ModelError:
+            invalidate_capabilities(self)
+            raise
+
+    def generate(self, *args, **kwargs):
+        """Do not retain capabilities after a generation fails at the backend."""
+        try:
+            return super().generate(*args, **kwargs)
+        except ModelError:
+            invalidate_capabilities(self)
+            raise
+
+    def tokenize(self, text):
+        """Discard capabilities if tokenization fails before generation starts."""
+        try:
+            return super().tokenize(text)
+        except ModelError:
+            invalidate_capabilities(self)
+            raise
 
 
 # Background analysis ----------------------------------------------------------
@@ -249,9 +311,14 @@ def health():
 @app.get("/api/profiles")
 def profile_info():
     """Return the profiles, the default job configuration and the cached backend capabilities."""
+    capabilities = cached_capabilities()
+    defaults = job_config.resolve(runtime_defaults())
+    context = (capabilities or {}).get("context_tokens")
+    if type(context) is int and context > 0:
+        defaults["warnings"].remove("engine_context_unknown")
     return jsonify(profiles=profiles.catalog(),
-                   defaults=job_config.public_config(job_config.resolve(runtime_defaults())),
-                   capabilities=cached_capabilities(),
+                   defaults=job_config.public_config(defaults),
+                   capabilities=capabilities,
                    thinking_supported=runtime_defaults()["thinking_adapter"] != "unsupported")
 
 
@@ -263,9 +330,10 @@ def config_preview():
     options = request.get_json()
     if not isinstance(options, dict):
         raise job_config.ConfigurationError("invalid_options", "Options must be a JSON object.")
-    config = job_config.resolve(runtime_defaults(), options, cached_capabilities())
+    capabilities = cached_capabilities()
+    config = job_config.resolve(runtime_defaults(), options, capabilities)
     return jsonify(configuration=job_config.public_config(config),
-                   capabilities=cached_capabilities(), validation="preliminary")
+                   capabilities=capabilities, validation="preliminary")
 
 
 @app.get("/api/diagnostics")
@@ -284,7 +352,7 @@ def diagnostics():
                 event("backend_checked", status=value.get("status", "unknown"), source="diagnostics")
             finally:
                 client.session.close()
-            remember_capabilities(value)
+            remember_capabilities(value, client)
     process_rss_kib = None
     try:
         matched = re.search(r"^VmRSS:\s+(\d+)", Path("/proc/self/status").read_text(encoding="utf-8"), re.M)

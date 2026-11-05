@@ -57,6 +57,8 @@ There is one process, one worker thread and a few web threads. SQLite holds the 
 
 `ModelError` and `Cancelled` both inherit from `ProcessingError` (`RuntimeError`), but cancellation is not a backend failure. Optional backend inspection fallbacks catch `ModelError` and let `Cancelled` propagate. The stream reader passes cancellation to its consumer, and the pipeline and worker record it as `cancelled`, including during report saving. `ConfigurationError` remains a `ValueError` with its existing public code and HTTP 400 response.
 
+Backend diagnostics and job startup share an in-memory capability cache in `app.py`: 30 seconds for success with a known context, 5 seconds otherwise. A lock serializes inspections; jobs can cancel while waiting for it. Jobs still read `/v1/models` before reusing properties, so a changed full model ID triggers `/props` immediately. Same-ID property changes are bounded by the TTL. Backend failures invalidate observations; callers receive copies, and reads never renew expiration. Profiles, preview and creation only read the cache and retain `engine_context_unknown` when no valid context is known. Tests in `test_capabilities.py` simulate time and HTTP responses without a real backend.
+
 ## Browser interface
 
 `templates/index.html` loads `static/js/main.js` as an ES module, which calls `start()` in `app.js`. There is no build step: browsers load the modules directly.
