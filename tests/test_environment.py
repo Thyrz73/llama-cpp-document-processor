@@ -62,11 +62,12 @@ class SettingsHelperTests(unittest.TestCase):
             ("0", "X must be between 1 and 65535."),
             ("70000", "X must be between 1 and 65535."),
         ):
-            with self.subTest(value=value), patch.dict(os.environ, {"X": value}):
-                with self.assertRaisesRegex(
-                    environment.SettingsError, re.escape(message)
-                ):
-                    environment.integer("X", 7, maximum=65535)
+            with (
+                self.subTest(value=value),
+                patch.dict(os.environ, {"X": value}),
+                self.assertRaisesRegex(environment.SettingsError, re.escape(message)),
+            ):
+                environment.integer("X", 7, maximum=65535)
         with (
             patch.dict(os.environ, {"X": "-3"}),
             self.assertRaisesRegex(environment.SettingsError, "X must be at least 1."),

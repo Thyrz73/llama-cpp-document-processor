@@ -100,11 +100,15 @@ class MigrationTests(unittest.TestCase):
             raise sqlite3.OperationalError("simulated failure")
 
         expected = [version for version, _ in database.MIGRATIONS]
-        with patch.object(
-            database, "MIGRATIONS", database.MIGRATIONS + ((expected[-1] + 1, broken),)
+        with (
+            patch.object(
+                database,
+                "MIGRATIONS",
+                database.MIGRATIONS + ((expected[-1] + 1, broken),),
+            ),
+            self.assertRaises(sqlite3.OperationalError),
         ):
-            with self.assertRaises(sqlite3.OperationalError):
-                database.initialize(self.path)
+            database.initialize(self.path)
         self.assertEqual(self.versions(), expected)
         self.assertNotIn("half_done", self.columns("jobs"))
 
@@ -164,10 +168,12 @@ class ThreadConnectionsTests(unittest.TestCase):
             self.assertEqual(con.execute("PRAGMA synchronous").fetchone()[0], 2)  # FULL
 
     def test_an_error_rolls_back_and_keeps_the_connection(self):
-        with self.assertRaisesRegex(RuntimeError, "simulated failure"):
-            with self.connections.transaction() as con:
-                con.execute(INSERT_JOB, ("a",))
-                raise RuntimeError("simulated failure")
+        with (
+            self.assertRaisesRegex(RuntimeError, "simulated failure"),
+            self.connections.transaction() as con,
+        ):
+            con.execute(INSERT_JOB, ("a",))
+            raise RuntimeError("simulated failure")
         self.assertEqual(self.job_ids(), [])
         with self.connections.transaction() as again:
             self.assertIs(again, con)
@@ -175,10 +181,12 @@ class ThreadConnectionsTests(unittest.TestCase):
     def test_a_sqlite_error_replaces_the_connection(self):
         with self.connections.transaction() as con:
             con.execute(INSERT_JOB, ("a",))
-        with self.assertRaises(sqlite3.IntegrityError):
-            with self.connections.transaction() as failing:
-                failing.execute(INSERT_JOB, ("b",))
-                failing.execute(INSERT_JOB, ("a",))  # the primary key exists
+        with (
+            self.assertRaises(sqlite3.IntegrityError),
+            self.connections.transaction() as failing,
+        ):
+            failing.execute(INSERT_JOB, ("b",))
+            failing.execute(INSERT_JOB, ("a",))  # the primary key exists
         with self.assertRaises(sqlite3.ProgrammingError):
             failing.execute("SELECT 1")  # closed
         self.assertEqual(self.job_ids(), ["a"])
@@ -203,11 +211,13 @@ class ThreadConnectionsTests(unittest.TestCase):
         self.assertEqual(closed, [True])
 
     def test_transactions_cannot_be_nested(self):
-        with self.assertRaisesRegex(RuntimeError, "cannot be nested"):
-            with self.connections.transaction() as con:
-                con.execute(INSERT_JOB, ("a",))
-                with self.connections.transaction():
-                    pass
+        with (
+            self.assertRaisesRegex(RuntimeError, "cannot be nested"),
+            self.connections.transaction() as con,
+        ):
+            con.execute(INSERT_JOB, ("a",))
+            with self.connections.transaction():
+                pass
         # The refused block left nothing behind: the outer one was rolled back.
         self.assertEqual(self.job_ids(), [])
 
@@ -248,6 +258,7 @@ class ThreadConnectionsTests(unittest.TestCase):
             ((0, -1, -1), "sqlite_checkpoint", logging.DEBUG, "not_wal"),
             (None, "sqlite_checkpoint_incomplete", logging.WARNING, "unavailable"),
         ]
+        # Keep callback signatures; these fixtures are consumed within each iteration.
         for row, name, level, status in cases:
             with self.subTest(row=row):
                 with self.connections.transaction() as con:
@@ -255,7 +266,7 @@ class ThreadConnectionsTests(unittest.TestCase):
 
                 def execute(connection, sql, *args):
                     if sql == "PRAGMA wal_checkpoint(TRUNCATE)":
-                        return SimpleNamespace(fetchone=lambda: row)
+                        return SimpleNamespace(fetchone=lambda: row)  # noqa: B023
                     return real_execute(connection, sql, *args)
 
                 with (

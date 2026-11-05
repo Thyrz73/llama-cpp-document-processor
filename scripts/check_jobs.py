@@ -2,9 +2,9 @@
 
 import argparse
 import json
-from pathlib import Path
 import sqlite3
 import sys
+from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from document_processor.config import fingerprint
@@ -87,4 +87,5 @@ if __name__ == "__main__":
         raise SystemExit(bool(result["integrity_errors"]))
     except (OSError, sqlite3.Error):
         print("Cannot inspect the selected data directory.", file=sys.stderr)
-        raise SystemExit(1)
+        # Preserve the existing implicit exception context for CLI callers.
+        raise SystemExit(1)  # noqa: B904

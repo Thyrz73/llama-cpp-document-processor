@@ -10,10 +10,10 @@ import argparse
 import hashlib
 import json
 import os
-from pathlib import Path
 import statistics
 import sys
 import time
+from pathlib import Path
 
 import requests
 
@@ -254,4 +254,5 @@ if __name__ == "__main__":
             f"Benchmark stopped ({type(exc).__name__}). Inspect local inputs and endpoint availability.",
             file=sys.stderr,
         )
-        raise SystemExit(1)
+        # Preserve the existing implicit exception context for CLI callers.
+        raise SystemExit(1)  # noqa: B904

@@ -20,8 +20,9 @@ import json
 import logging
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 from . import extraction, prompts, reliability
 from .artifacts import Artifacts
@@ -347,6 +348,7 @@ class JobRun:
         """Ask the model for factual notes on each section, in document order."""
         notes = []
         total = len(chunks)
+        # _step invokes these callbacks synchronously before the next iteration.
         for index, chunk in enumerate(chunks):
             self._phase(
                 "section",
@@ -374,10 +376,10 @@ class JobRun:
                 },
                 lambda: self._generate(
                     "section",
-                    instruction,
-                    chunk["text"],
+                    instruction,  # noqa: B023
+                    chunk["text"],  # noqa: B023
                     self.config["analysis_tokens"],
-                    chunk["pages"],
+                    chunk["pages"],  # noqa: B023
                 ),
             )
             check = self._check(name, answer, chunk["pages"], [index])
@@ -444,6 +446,7 @@ class JobRun:
 
         groups = plan_groups(notes, group_fits)
         reduced = []
+        # _step invokes these callbacks synchronously before the next iteration.
         for index, group in enumerate(groups):
             if len(group) == 1:
                 reduced.append(group[0])
@@ -472,9 +475,9 @@ class JobRun:
                 lambda: self._generate(
                     "merge",
                     merge_instruction,
-                    text,
+                    text,  # noqa: B023
                     self.config["merge_tokens"],
-                    source_pages,
+                    source_pages,  # noqa: B023
                 ),
             )
             merged = reliability.merge_note(answer, group)

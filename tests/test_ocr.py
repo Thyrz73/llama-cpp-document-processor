@@ -6,7 +6,9 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+
 import pymupdf
+
 import app
 from document_processor.extraction import extract_pdf
 

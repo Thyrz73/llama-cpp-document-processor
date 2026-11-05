@@ -1,7 +1,7 @@
 """Check streaming failures, optional measurements and silent-prefill cancellation."""
 
-import json
 import itertools
+import json
 import threading
 import time
 import unittest
@@ -389,22 +389,23 @@ class StreamTests(unittest.TestCase):
             )
 
     def test_silent_stream_has_a_real_deadline_and_can_be_cancelled(self):
+        # Keep callback signatures; these fixtures are consumed within each iteration.
         for mode in ("deadline", "cancel"):
             release = threading.Event()
 
             class Silent(Stream):
                 def iter_lines(self, **kwargs):
-                    release.wait(3)
+                    release.wait(3)  # noqa: B023
                     if False:
                         yield None
 
                 def close(self):
-                    release.set()
+                    release.set()  # noqa: B023
 
             client = self.client(step_timeout_seconds=0.05 if mode == "deadline" else 5)
             start = time.monotonic()
             client.cancel_check = lambda: (
-                mode == "cancel" and time.monotonic() - start > 0.05
+                mode == "cancel" and time.monotonic() - start > 0.05  # noqa: B023
             )
             try:
                 with self.assertRaises(Cancelled if mode == "cancel" else ModelError):
@@ -448,11 +449,11 @@ class StreamTests(unittest.TestCase):
             patch.object(
                 client.session, "post", return_value=Stream([delta("Partial")])
             ),
+            self.assertRaises(WorkerStopping),
         ):
-            with self.assertRaises(WorkerStopping):
-                client.complete(
-                    "Analyze", "Source", 100, on_update=lambda *args: stopping.set()
-                )
+            client.complete(
+                "Analyze", "Source", 100, on_update=lambda *args: stopping.set()
+            )
         self.assertEqual(client.current_metrics["stop_category"], "interrupted")
         self.assertEqual(client.current_metrics["content_chars"], len("Partial"))
         self.assertEqual(client.current_metrics["reasoning_chars"], 0)
@@ -487,9 +488,9 @@ class StreamTests(unittest.TestCase):
             patch.object(
                 client.session, "post", return_value=PartialStream([delta("Partial")])
             ),
+            self.assertRaises(Cancelled),
         ):
-            with self.assertRaises(Cancelled):
-                client.complete("Analyze", "Source", 100, on_update=on_update)
+            client.complete("Analyze", "Source", 100, on_update=on_update)
         self.assertEqual(client.current_metrics["error_code"], "cancelled")
         self.assertEqual(client.current_metrics["stop_category"], "cancelled")
         self.assertIsNone(client.last_result)
@@ -502,6 +503,7 @@ class StreamTests(unittest.TestCase):
     def test_next_generation_waits_for_cleanup_before_headers_without_using_its_deadline(
         self,
     ):
+        # Keep callback signatures; these fixtures are consumed within each iteration.
         for mode in ("deadline", "cancel"):
             with (
                 self.subTest(mode=mode),
@@ -518,16 +520,16 @@ class StreamTests(unittest.TestCase):
 
                 class LateResponse(Stream):
                     def __exit__(self, *args):
-                        previous_closed.set()
+                        previous_closed.set()  # noqa: B023
                         return False
 
                     def iter_lines(self, **kwargs):
-                        previous_body_read.set()
+                        previous_body_read.set()  # noqa: B023
                         yield from super().iter_lines(**kwargs)
 
                 def wait_for_headers(*args, **kwargs):
-                    previous_started.set()
-                    if not release_headers.wait(5):
+                    previous_started.set()  # noqa: B023
+                    if not release_headers.wait(5):  # noqa: B023
                         raise RuntimeError("Test response headers were not released")
                     return LateResponse([])
 
@@ -535,30 +537,30 @@ class StreamTests(unittest.TestCase):
                     step_timeout_seconds=0.05 if mode == "deadline" else 5
                 )
                 previous.cancel_check = lambda: (
-                    mode == "cancel" and previous_started.is_set()
+                    mode == "cancel" and previous_started.is_set()  # noqa: B023
                 )
                 following = self.client(step_timeout_seconds=0.2)
 
                 def following_cancel_check():
-                    following_started.set()
+                    following_started.set()  # noqa: B023
                     return False
 
                 following.cancel_check = following_cancel_check
 
                 def next_response(*args, **kwargs):
                     self.assertTrue(
-                        previous_closed.is_set(),
+                        previous_closed.is_set(),  # noqa: B023
                         "Previous HTTP response must close first",
                     )
                     return Stream([delta("Next answer", "stop")])
 
                 def run_following():
                     try:
-                        answers.append(following.complete("Analyze", "Source", 100))
+                        answers.append(following.complete("Analyze", "Source", 100))  # noqa: B023
                     except Exception as exc:
-                        errors.append(exc)
+                        errors.append(exc)  # noqa: B023
                     finally:
-                        following_finished.set()
+                        following_finished.set()  # noqa: B023
 
                 thread = threading.Thread(target=run_following)
                 with (

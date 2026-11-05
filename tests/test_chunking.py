@@ -21,7 +21,6 @@ from document_processor.errors import (
 from document_processor.model_client import ModelClient
 from document_processor.profiles import PROFILES
 
-
 # Deterministic subword-like boundaries, including whitespace/word merges and Unicode.
 # This is an offline endpoint simulator, not a claim about any llama.cpp vocabulary.
 SUBWORDS = re.compile(
@@ -256,11 +255,12 @@ class ChunkingTests(unittest.TestCase):
                     [{"page": 1, "text": "text"}], self.tokenizer(), budget
                 )
             self.assertEqual(error.exception.code, "chunking_failed")
+        # Keep callback signatures; these fixtures are consumed within each iteration.
         for value in (-1, True, None, 1.5, float("inf"), float("nan"), "10", [], {}):
             with self.subTest(value=value), self.assertRaises(ProcessingError) as error:
                 extraction.make_chunks(
                     [{"page": 1, "text": "text"}],
-                    SimpleNamespace(tokenize=lambda _: value),
+                    SimpleNamespace(tokenize=lambda _: value),  # noqa: B023
                     100,
                 )
             self.assertEqual(error.exception.code, "chunking_failed")

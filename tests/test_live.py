@@ -132,9 +132,9 @@ class LiveTests(unittest.TestCase):
             patch.object(client, "tokenize", return_value=5),
             patch.object(client, "model", return_value="qwen"),
             patch.object(client.session, "post", return_value=FakeStream(events)),
+            self.assertRaisesRegex(RuntimeError, "max_tokens"),
         ):
-            with self.assertRaisesRegex(RuntimeError, "max_tokens"):
-                client.complete("Analyze", "PDF", 100)
+            client.complete("Analyze", "PDF", 100)
 
     def test_existing_jobs_table_is_migrated(self):
         """Migrate the table while preserving legacy jobs.
@@ -145,38 +145,40 @@ class LiveTests(unittest.TestCase):
         """
         import app
 
-        with tempfile.TemporaryDirectory() as tmp:
-            with patch.object(app, "store", JobStore(Path(tmp))):
-                with app.store.connect() as con:
-                    con.execute("""CREATE TABLE jobs (
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.object(app, "store", JobStore(Path(tmp))),
+        ):
+            with app.store.connect() as con:
+                con.execute("""CREATE TABLE jobs (
                         id TEXT PRIMARY KEY, filename TEXT NOT NULL, question TEXT NOT NULL,
                         status TEXT NOT NULL, stage TEXT NOT NULL DEFAULT '',
                         pages INTEGER DEFAULT 0, total_chunks INTEGER DEFAULT 0, done_chunks INTEGER DEFAULT 0,
                         error TEXT DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL
                     )""")
-                    con.execute(
-                        """INSERT INTO jobs
+                con.execute(
+                    """INSERT INTO jobs
                         (id, filename, question, status, stage, created_at, updated_at)
                         VALUES (?, 'example.pdf', 'Analyze', 'done', 'Analysis completed', ?, ?)""",
-                        ("a" * 32, "2025-01-01", "2025-01-01"),
-                    )
-                app.store.initialize()
-                with app.store.connect() as con:
-                    fields = {r["name"] for r in con.execute("PRAGMA table_info(jobs)")}
-                    stored = dict(con.execute("SELECT * FROM jobs").fetchone())
-                self.assertIn("progress_percent", fields)
-                self.assertEqual(stored["progress_percent"], 0)
-                self.assertEqual(stored["updated_at"], "2025-01-01")
-                self.assertEqual(app.store.get_job("a" * 32)["progress_percent"], 100)
-                client = app.app.test_client()
-                self.assertEqual(
-                    client.get("/api/jobs").get_json()["jobs"][0]["progress_percent"],
-                    100,
+                    ("a" * 32, "2025-01-01", "2025-01-01"),
                 )
-                self.assertEqual(
-                    client.get("/api/jobs/" + "a" * 32).get_json()["progress_percent"],
-                    100,
-                )
+            app.store.initialize()
+            with app.store.connect() as con:
+                fields = {r["name"] for r in con.execute("PRAGMA table_info(jobs)")}
+                stored = dict(con.execute("SELECT * FROM jobs").fetchone())
+            self.assertIn("progress_percent", fields)
+            self.assertEqual(stored["progress_percent"], 0)
+            self.assertEqual(stored["updated_at"], "2025-01-01")
+            self.assertEqual(app.store.get_job("a" * 32)["progress_percent"], 100)
+            client = app.app.test_client()
+            self.assertEqual(
+                client.get("/api/jobs").get_json()["jobs"][0]["progress_percent"],
+                100,
+            )
+            self.assertEqual(
+                client.get("/api/jobs/" + "a" * 32).get_json()["progress_percent"],
+                100,
+            )
 
 
 class LegacyPreviewTests(unittest.TestCase):
@@ -751,6 +753,7 @@ class HybridPreviewTests(unittest.TestCase):
         self.assertTrue(self.live()["active"])
 
     def test_generation_failure_cancellation_and_shutdown_flush_partial_text(self):
+        # Keep callback signatures; these fixtures are consumed within each iteration.
         for error in (
             ModelError("stream_error", "Unavailable"),
             Cancelled(),
@@ -765,7 +768,7 @@ class HybridPreviewTests(unittest.TestCase):
                         "output_tokens": 4,
                     }
                     on_update("useful partial text", "reasoning", False)
-                    raise error
+                    raise error  # noqa: B023
 
                 self.model.complete.side_effect = stream
                 with self.assertRaises(type(error)) as raised:

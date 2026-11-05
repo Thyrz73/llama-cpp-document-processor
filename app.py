@@ -27,7 +27,7 @@ import sys
 import threading
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -700,12 +700,13 @@ def job_live(job_id):
     # The last file may have been written before the job completed or failed.
     payload["active"] = bool(payload.get("active") and job["status"] == "running")
     if payload["active"] and payload.get("started_at"):
-        try:
+        # Keep ordinary exception handling; suppress also handles ExceptionGroup.
+        try:  # noqa: SIM105
             payload["elapsed_seconds"] = round(
                 max(
                     0,
                     (
-                        datetime.now(timezone.utc)
+                        datetime.now(UTC)
                         - datetime.fromisoformat(payload["started_at"])
                     ).total_seconds(),
                 ),
@@ -940,15 +941,18 @@ def begin_request():
     """Measure request latency and reject browser writes originating on another site."""
     g.started = time.monotonic()
     origin = request.headers.get("Origin")
-    if request.method == "POST" and origin:
-        if urlsplit(origin).netloc != request.host or urlsplit(origin).scheme not in (
-            "http",
-            "https",
-        ):
-            return jsonify(
-                error="Cross-origin writes are not allowed.",
-                error_code="origin_rejected",
-            ), 403
+    if (
+        request.method == "POST"
+        and origin
+        and (
+            urlsplit(origin).netloc != request.host
+            or urlsplit(origin).scheme not in ("http", "https")
+        )
+    ):
+        return jsonify(
+            error="Cross-origin writes are not allowed.",
+            error_code="origin_rejected",
+        ), 403
 
 
 @app.after_request

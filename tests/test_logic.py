@@ -3,8 +3,8 @@
 import os
 import tempfile
 import unittest
-from unittest.mock import patch
 from pathlib import Path
+from unittest.mock import patch
 
 os.environ["DATA_DIR"] = tempfile.mkdtemp(prefix="pdf-test-")
 os.environ["LLAMA_API_KEY"] = "mock"
@@ -16,7 +16,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import app
 from app import ModelClient
-from document_processor.extraction import split_with_page, make_chunks
+from document_processor.extraction import make_chunks, split_with_page
 from document_processor.files import atomic_text
 from document_processor.prompts import language_instruction
 
@@ -91,9 +91,9 @@ class TestLogic(unittest.TestCase):
                     "json_request",
                     side_effect=AssertionError("unexpected API call"),
                 ),
+                self.assertRaisesRegex(ValueError, "configured context"),
             ):
-                with self.assertRaisesRegex(ValueError, "configured context"):
-                    client.complete("Analyze", "example text", max_tokens=500)
+                client.complete("Analyze", "example text", max_tokens=500)
 
     def test_db(self):
         """Verify that a missing job returns None."""

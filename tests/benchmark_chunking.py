@@ -11,15 +11,16 @@ simulated endpoint requests, not network latency or a real model vocabulary.
 import argparse
 import ast
 import json
-from pathlib import Path
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from test_chunking import SimulatedTokenizer, fixture_pages, subword_count
+
 from document_processor import extraction
 from document_processor.profiles import PROFILES
-from test_chunking import SimulatedTokenizer, fixture_pages, subword_count
 
 
 def reference_chunker(reference):

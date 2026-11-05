@@ -119,12 +119,58 @@ def resolve_report_language(language, question):
         return "fr" if is_french(language) else "en"
     words = set(re.findall(r"[^\W\d_]+", question.casefold()))
     french = set(
-        "analysez analyser résume résumez résumer résumé synthèse décris décrivez explique expliquez "
-        "le la les des du ce cette ces un une et dans avec pour méthodes résultats conclusions".split()
+        [
+            "analysez",
+            "analyser",
+            "résume",
+            "résumez",
+            "résumer",
+            "résumé",
+            "synthèse",
+            "décris",
+            "décrivez",
+            "explique",
+            "expliquez",
+            "le",
+            "la",
+            "les",
+            "des",
+            "du",
+            "ce",
+            "cette",
+            "ces",
+            "un",
+            "une",
+            "et",
+            "dans",
+            "avec",
+            "pour",
+            "méthodes",
+            "résultats",
+            "conclusions",
+        ]
     )
     english = set(
-        "analyze summarize summarise summary describe explain "
-        "the this these a an and in with for methods results conclusions".split()
+        [
+            "analyze",
+            "summarize",
+            "summarise",
+            "summary",
+            "describe",
+            "explain",
+            "the",
+            "this",
+            "these",
+            "a",
+            "an",
+            "and",
+            "in",
+            "with",
+            "for",
+            "methods",
+            "results",
+            "conclusions",
+        ]
     )
     return "fr" if len(words & french) > len(words & english) else "en"
 

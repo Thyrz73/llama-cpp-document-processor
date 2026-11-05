@@ -223,9 +223,9 @@ class CapabilityTests(unittest.TestCase):
             patch.object(
                 client, "stream_lines", return_value=iter([b"data: {invalid"])
             ),
+            self.assertRaises(ModelError) as raised,
         ):
-            with self.assertRaises(ModelError) as raised:
-                client.generate("Analyze", "Source", 10)
+            client.generate("Analyze", "Source", 10)
         self.assertEqual(raised.exception.code, "invalid_stream")
         self.assertIsNone(app.cached_capabilities())
         client.inspect()

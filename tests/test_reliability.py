@@ -1,19 +1,20 @@
 """Deterministic documentary checks: no quality score or real LLM inference."""
 
-from decimal import Decimal
 import io
 import json
-from pathlib import Path
 import tempfile
 import unittest
+from decimal import Decimal
+from pathlib import Path
 from unittest.mock import patch
+
 import pymupdf
 
 import app
-from document_processor import extraction, profiles, prompts, reliability as r
-from document_processor.jobs import JobStore
+from document_processor import extraction, profiles, prompts
+from document_processor import reliability as r
 from document_processor.errors import ModelError
-
+from document_processor.jobs import JobStore
 
 TABLE = """Bâtiment | Janvier–mars 2025 | Janvier–mars 2026 | Variation
 A · École | 12,4 MWh | 10,8 MWh | −12,9 %

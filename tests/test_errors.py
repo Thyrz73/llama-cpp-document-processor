@@ -176,7 +176,7 @@ class ErrorCatalogTests(unittest.TestCase):
         sources = [ROOT / "app.py", *sorted((ROOT / "document_processor").glob("*.py"))]
         text = {path: path.read_text(encoding="utf-8") for path in sources}
         emitted = set()
-        for path, source in text.items():
+        for _path, source in text.items():
             emitted |= set(
                 re.findall(
                     r"(?:ProcessingError|ModelError|ConfigurationError)\(\s*\"([a-z_]+)\"",
@@ -239,16 +239,17 @@ class CapabilityCacheTests(unittest.TestCase):
     def test_inspection_propagates_cancellation_at_both_requests_without_caching_a_fallback(
         self,
     ):
+        # Keep callback signatures; these fixtures are consumed within each iteration.
         for path in ("/v1/models", "/props"):
             with self.subTest(path=path):
                 client = app.ModelClient()
                 self.addCleanup(client.session.close)
                 previous = client.capabilities
                 cached = dict(app._capability_cache)
-                client.cancel_check = lambda: path == "/v1/models"
+                client.cancel_check = lambda: path == "/v1/models"  # noqa: B023
 
                 def model_response(*args, **kwargs):
-                    client.cancel_check = lambda: True
+                    client.cancel_check = lambda: True  # noqa: B023
                     response = requests.Response()
                     response.status_code = 200
                     response._content = b'{"data": [{"id": "test-model"}]}'

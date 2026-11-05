@@ -290,7 +290,7 @@ class ProgressTests(unittest.TestCase):
             ("done", 52, 100),
             ("done", 100, 100),
         ]
-        for index, (status, stored, expected) in enumerate(cases):
+        for index, (status, stored, _expected) in enumerate(cases):
             self.insert_job(f"{index:032x}", status, stored)
         response = self.client.get("/api/jobs")
         self.assertEqual(response.status_code, 200)
@@ -465,6 +465,7 @@ class ProgressTests(unittest.TestCase):
         with StopWorker once the queue is empty.
         """
         job_id = "b" * 32
+        # Keep callback signatures; these fixtures are consumed within each iteration.
         for fail in (False, True):
             with (
                 self.subTest(fail=fail),
@@ -480,8 +481,8 @@ class ProgressTests(unittest.TestCase):
 
                 def record_update(identifier, **values):
                     """Apply values and record progress."""
-                    update(identifier, **values)
-                    progress.append(self.stored_job(identifier)["progress_percent"])
+                    update(identifier, **values)  # noqa: B023
+                    progress.append(self.stored_job(identifier)["progress_percent"])  # noqa: B023
 
                 def extract(path, settings, progress):
                     """Simulate one page and call progress."""

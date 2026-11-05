@@ -8,18 +8,19 @@ not HTTP latency; insertion samples use the real create_job transaction.
 
 import json
 import logging
-from pathlib import Path
 import sqlite3
 import statistics
 import sys
 import tempfile
 import time
+from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from test_database_indexes import capture_queries, plans, populate
+
 from document_processor import database
 from document_processor.jobs import JobStore
-from test_database_indexes import capture_queries, plans, populate
 
 
 def named_queries(statements):

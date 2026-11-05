@@ -6,3 +6,6 @@
 
 # chore: improve code file format (Prettier style for the interface, CSS and docs)
 3f4030a9bc7b6a826f87bb92a19c5f7916a33120
+
+# style(python): apply ruff formatting
+059a0d5693bc88aaa7aca9c8881a41e218dbeada

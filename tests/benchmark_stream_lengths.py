@@ -9,16 +9,17 @@ The iterator instrumentation measures accounting work, not model/network latency
 import argparse
 import ast
 import json
-from pathlib import Path
 import subprocess
 import sys
 import time
+from pathlib import Path
 from types import MethodType
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from document_processor import model_client
 from test_stream_metrics import CountingParts
+
+from document_processor import model_client
 
 
 def benchmark(reference):
@@ -53,6 +54,7 @@ def benchmark(reference):
     previous_splitter = namespace["ThinkingSplitter"]
     for count in (1000, 10000):
         expected = None
+        # Keep callback signatures; these fixtures are consumed within each iteration.
         for variant in ("reference", "working_tree"):
             base = (
                 previous_splitter
@@ -65,7 +67,7 @@ def benchmark(reference):
                 def __init__(self, **kwargs):
                     super().__init__(**kwargs)
                     self.content_parts = CountingParts()
-                    instances.append(self)
+                    instances.append(self)  # noqa: B023
 
             client = model_client.ModelClient("http://unused.invalid", "", {}, "")
             client.fits = lambda *args: (True, 10, "estimated_template", 384)
@@ -75,9 +77,10 @@ def benchmark(reference):
             )
 
             def lines(payload):
-                for _ in range(count):
-                    client.check_cancelled()
-                    yield line
+                # Keep callback signatures; these fixtures are consumed within each iteration.
+                for _ in range(count):  # noqa: B023
+                    client.check_cancelled()  # noqa: B023
+                    yield line  # noqa: B023
                 yield "data: [DONE]"
 
             client.stream_lines = lines

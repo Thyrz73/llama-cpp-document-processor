@@ -10,7 +10,7 @@ import json
 import math
 import re
 
-from .profiles import PROFILES, PROFILE_VERSION
+from .profiles import PROFILE_VERSION, PROFILES
 
 
 class ConfigurationError(ValueError):

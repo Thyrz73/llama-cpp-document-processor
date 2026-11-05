@@ -141,6 +141,7 @@ class EncodingBoundaryTests(unittest.TestCase):
 
     def test_simulated_pdf_readers_preserve_exact_unicode(self):
         for reader in ("pymupdf", "pypdf"):
+            # Keep callback signatures; these fixtures are consumed within each iteration.
             for text in (FRENCH, ENGLISH, MULTILINGUAL):
                 with self.subTest(reader=reader, text=text):
                     document = MagicMock()
@@ -151,7 +152,7 @@ class EncodingBoundaryTests(unittest.TestCase):
                         text if reader == "pymupdf" else ""
                     )
                     fallback = SimpleNamespace(
-                        pages=[SimpleNamespace(extract_text=lambda: text)]
+                        pages=[SimpleNamespace(extract_text=lambda: text)]  # noqa: B023
                     )
                     with (
                         patch.object(extraction.pymupdf, "open", return_value=document),
@@ -186,13 +187,15 @@ class EncodingBoundaryTests(unittest.TestCase):
                 self.assertEqual(
                     extraction.ocr_page(page, 1, SETTINGS), text, "OCR byte boundary"
                 )
-        with patch.object(
-            extraction.subprocess,
-            "run",
-            return_value=SimpleNamespace(returncode=0, stdout=b"\xff"),
+        with (
+            patch.object(
+                extraction.subprocess,
+                "run",
+                return_value=SimpleNamespace(returncode=0, stdout=b"\xff"),
+            ),
+            self.assertRaises(ProcessingError) as error,
         ):
-            with self.assertRaises(ProcessingError) as error:
-                extraction.ocr_page(page, 1, SETTINGS)
+            extraction.ocr_page(page, 1, SETTINGS)
         self.assertEqual(error.exception.code, "invalid_ocr_encoding")
 
     def test_request_json_and_prompt_preserve_unicode(self):
@@ -227,19 +230,22 @@ class EncodingBoundaryTests(unittest.TestCase):
                     self.assertEqual(
                         client.json_request("GET", "/test"), {"text": MULTILINGUAL}
                     )
-        with patch.object(
-            client.session,
-            "request",
-            return_value=response_for(b'{"text":"\xff"}', "application/json"),
+        with (
+            patch.object(
+                client.session,
+                "request",
+                return_value=response_for(b'{"text":"\xff"}', "application/json"),
+            ),
+            self.assertRaises(ModelError) as error,
         ):
-            with self.assertRaises(ModelError) as error:
-                client.json_request("GET", "/test")
+            client.json_request("GET", "/test")
         self.assertEqual(error.exception.code, "backend_unavailable")
 
     def test_sse_utf8_split_network_bytes_and_both_reasoning_channels(self):
         for text in (FRENCH, ENGLISH, MULTILINGUAL):
             for channel in ("separated", "tags"):
                 for size in (1, 2, 3, 7, 64):
+                    # Keep callback signatures; these fixtures are consumed within each iteration.
                     for content_type in (
                         "text/event-stream",
                         "text/event-stream; charset=utf-8",
@@ -267,7 +273,7 @@ class EncodingBoundaryTests(unittest.TestCase):
                                     "Analyze",
                                     text,
                                     100,
-                                    on_update=lambda *args: preview.append(args),
+                                    on_update=lambda *args: preview.append(args),  # noqa: B023
                                 )
                             self.assertEqual(
                                 result.content, text, "SSE / answer channel"
@@ -287,9 +293,9 @@ class EncodingBoundaryTests(unittest.TestCase):
             patch.object(client, "tokenize", return_value=10),
             patch.object(client, "model", return_value="test"),
             patch.object(client.session, "post", return_value=response),
+            self.assertRaises(ModelError) as error,
         ):
-            with self.assertRaises(ModelError) as error:
-                client.complete("Analyze", "Source", 100)
+            client.complete("Analyze", "Source", 100)
         self.assertEqual(error.exception.code, "invalid_stream_encoding")
         self.assertIsNone(client.last_result)
 

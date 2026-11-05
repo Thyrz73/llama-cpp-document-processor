@@ -13,6 +13,7 @@ import requests
 
 # This module also prepares the isolated app import environment.
 import test_encoding as encoding
+
 import app
 from document_processor import extraction
 from document_processor.artifacts import Artifacts
@@ -136,13 +137,15 @@ class BackendIdentityTests(unittest.TestCase):
         before = self.artifacts(identifier)
         snapshot = app.store.load_config(identifier)
         generations = len(self.adapter.completions)
-        with patch.object(
-            Artifacts,
-            "read",
-            side_effect=AssertionError("No reuse before identity validation"),
-        ) as read:
-            with self.assertRaises(exception) as raised:
-                self.run_attempt(identifier)
+        with (
+            patch.object(
+                Artifacts,
+                "read",
+                side_effect=AssertionError("No reuse before identity validation"),
+            ) as read,
+            self.assertRaises(exception) as raised,
+        ):
+            self.run_attempt(identifier)
         self.assertEqual(raised.exception.code, code)
         self.assertNotIn("PRIVATE", str(raised.exception))
         read.assert_not_called()

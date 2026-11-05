@@ -16,8 +16,12 @@ os.environ.setdefault(
     str(Path(__file__).resolve().parents[1] / "config/system_prompt.example.txt"),
 )
 
-from document_processor import pipeline, reliability as r
+from document_processor import pipeline
+from document_processor import reliability as r
 from document_processor.artifacts import Artifacts
+
+# Preserve fixture initialization after the application dependencies.
+# isort: split
 import test_reliability as fixtures
 
 ANSWER = (

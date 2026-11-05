@@ -18,7 +18,7 @@ import logging
 import sqlite3
 import threading
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from .observability import event
 
@@ -38,7 +38,8 @@ class _Connection(sqlite3.Connection):
     """
 
     def __del__(self):
-        try:
+        # Avoid a new context-manager dependency during interpreter teardown.
+        try:  # noqa: SIM105
             self.close()
         except Exception:
             pass  # dropped by another thread than the one that opened it: SQLite still frees it
@@ -283,7 +284,7 @@ def initialize(path):
                 "INSERT INTO schema_migrations VALUES (?, ?)",
                 (
                     version,
-                    datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+                    datetime.now(UTC).isoformat(timespec="milliseconds"),
                 ),
             )
         event("schema_migrated", version=version, status="applied")

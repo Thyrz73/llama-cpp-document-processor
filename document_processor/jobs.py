@@ -17,7 +17,7 @@ import stat
 import threading
 import time
 from collections import OrderedDict
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from . import database
@@ -81,12 +81,12 @@ def is_job_id(value):
 
 def utcnow():
     """Return the current UTC time to the second, as stored in job rows."""
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def now():
     """Return the current UTC time to the millisecond, for measurements and previews."""
-    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+    return datetime.now(UTC).isoformat(timespec="milliseconds")
 
 
 class InvalidJobPath(LookupError):
@@ -260,7 +260,8 @@ class JobStore:
         Present every ``done`` job at 100 percent, even if an older database
         still stores zero. This normalization does not rewrite the SQLite row.
         """
-        job = {key: row[key] for key in row.keys() if key in PUBLIC_COLUMNS}
+        # sqlite3.Row iterates over values; keys() is required for column names.
+        job = {key: row[key] for key in row.keys() if key in PUBLIC_COLUMNS}  # noqa: SIM118
         job["phase_args"] = json.loads(job.get("phase_args") or "{}")
         # The migration also initialized older completed jobs to 0 percent.
         if job["status"] == "done":
@@ -296,45 +297,47 @@ class JobStore:
         """
         # Serialize cache fills with invalidation, including concurrent HTTP readers.
         # Only fingerprints are read on hits: private snapshot text never leaves SQLite.
-        with self._public_config_lock:
-            with self.connect() as con:
-                rows = con.execute(
-                    "SELECT jobs.*, job_configs.fingerprint AS config_fingerprint FROM jobs "
-                    "LEFT JOIN job_configs ON job_configs.job_id=jobs.id "
-                    "ORDER BY jobs.created_at DESC, jobs.id DESC LIMIT ?",
-                    (limit,),
-                ).fetchall()
-                has_active = con.execute(
-                    "SELECT EXISTS(SELECT 1 FROM jobs WHERE status IN ('queued', 'running'))"
-                ).fetchone()[0]
-                configs = {}
-                missing = []
-                for row in rows:
-                    key = (row["id"], row["config_fingerprint"])
-                    if key[1] is None:
-                        continue  # Legacy job: do not cache the absence of a snapshot.
-                    cached = self._public_configs.get(key)
-                    if cached is None:
-                        missing.append(row["id"])
-                    else:
-                        self._public_configs.move_to_end(key)
-                        configs[row["id"]] = copy.deepcopy(cached)
-                if missing:
-                    placeholders = ",".join("?" for _ in missing)
-                    for row in con.execute(
-                        "SELECT job_id, fingerprint, snapshot FROM job_configs "
-                        f"WHERE job_id IN ({placeholders})",
-                        missing,
-                    ):
-                        public = public_config(
-                            json.loads(row["snapshot"]), row["fingerprint"]
-                        )
-                        key = (row["job_id"], row["fingerprint"])
-                        self._public_configs[key] = copy.deepcopy(public)
-                        self._public_configs.move_to_end(key)
-                        configs[row["job_id"]] = public
-                        while len(self._public_configs) > PUBLIC_CONFIG_CACHE_SIZE:
-                            self._public_configs.popitem(last=False)
+        with (
+            self._public_config_lock,
+            self.connect() as con,
+        ):
+            rows = con.execute(
+                "SELECT jobs.*, job_configs.fingerprint AS config_fingerprint FROM jobs "
+                "LEFT JOIN job_configs ON job_configs.job_id=jobs.id "
+                "ORDER BY jobs.created_at DESC, jobs.id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+            has_active = con.execute(
+                "SELECT EXISTS(SELECT 1 FROM jobs WHERE status IN ('queued', 'running'))"
+            ).fetchone()[0]
+            configs = {}
+            missing = []
+            for row in rows:
+                key = (row["id"], row["config_fingerprint"])
+                if key[1] is None:
+                    continue  # Legacy job: do not cache the absence of a snapshot.
+                cached = self._public_configs.get(key)
+                if cached is None:
+                    missing.append(row["id"])
+                else:
+                    self._public_configs.move_to_end(key)
+                    configs[row["id"]] = copy.deepcopy(cached)
+            if missing:
+                placeholders = ",".join("?" for _ in missing)
+                for row in con.execute(
+                    "SELECT job_id, fingerprint, snapshot FROM job_configs "
+                    f"WHERE job_id IN ({placeholders})",
+                    missing,
+                ):
+                    public = public_config(
+                        json.loads(row["snapshot"]), row["fingerprint"]
+                    )
+                    key = (row["job_id"], row["fingerprint"])
+                    self._public_configs[key] = copy.deepcopy(public)
+                    self._public_configs.move_to_end(key)
+                    configs[row["job_id"]] = public
+                    while len(self._public_configs) > PUBLIC_CONFIG_CACHE_SIZE:
+                        self._public_configs.popitem(last=False)
         jobs = [self.serialize(row) for row in rows]
         for job in jobs:
             if job["id"] in configs:
@@ -597,9 +600,7 @@ class Recorder:
         try:
             queue_ms = max(
                 0,
-                (
-                    datetime.now(timezone.utc) - datetime.fromisoformat(queued_at)
-                ).total_seconds()
+                (datetime.now(UTC) - datetime.fromisoformat(queued_at)).total_seconds()
                 * 1000,
             )
         except (ValueError, TypeError):

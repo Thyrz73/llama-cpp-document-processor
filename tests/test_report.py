@@ -289,13 +289,15 @@ class ReportTests(unittest.TestCase):
                 "Etude_geotechnique_du_site_a_rapport.md",
                 response.headers["Content-Disposition"],
             )
-        with patch.object(
-            reports,
-            "report_filename",
-            side_effect=AssertionError("Name computed twice"),
+        with (
+            patch.object(
+                reports,
+                "report_filename",
+                side_effect=AssertionError("Name computed twice"),
+            ),
+            self.client.get(f"/api/jobs/{self.job_id}/report") as response,
         ):
-            with self.client.get(f"/api/jobs/{self.job_id}/report") as response:
-                self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.status_code, 200)
         (self.directory / "rapport_final.md").unlink()
         self.assertFalse(
             self.client.get("/api/jobs").json["jobs"][0]["report_available"]

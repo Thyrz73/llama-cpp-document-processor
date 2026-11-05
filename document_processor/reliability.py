@@ -8,11 +8,11 @@ layouts are not checked. Source evidence is given to the model as data,
 never as instructions.
 """
 
+import re
+import unicodedata
 from collections import deque
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, localcontext
-import re
-import unicodedata
 
 from .config import fingerprint
 from .prompts import is_french
@@ -511,7 +511,9 @@ def numeric_checks(answer, evidence, input_pages, *, prepared=None):
         normalized_line = _normalized(line)
         candidates = [
             item
-            for item, entity in zip(evidence["comparisons"], prepared.entities)
+            for item, entity in zip(
+                evidence["comparisons"], prepared.entities, strict=False
+            )
             if item["page"] in input_pages
             and _entity_in_line(item["entity"], line, entity, normalized_line)
         ]

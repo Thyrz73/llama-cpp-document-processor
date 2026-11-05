@@ -1,11 +1,11 @@
 """Migration and actual JobStore query plans, using disposable synthetic history."""
 
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
 import json
 import sqlite3
 import tempfile
 import unittest
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from unittest.mock import patch
 
 from document_processor import database
@@ -20,7 +20,7 @@ INDEXES = {
 
 def populate(store, count):
     """Create deterministic ties and old active jobs at the end of physical insertion order."""
-    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    base = datetime(2026, 1, 1, tzinfo=UTC)
     config = {
         "profile": "low",
         "max_attempts": 3,
@@ -157,11 +157,13 @@ class JobIndexTests(unittest.TestCase):
             con.execute("CREATE INDEX jobs_by_created ON jobs(created_at, id)")
             raise sqlite3.OperationalError("Simulated index migration failure")
 
-        with patch.object(
-            database, "MIGRATIONS", database.MIGRATIONS[:3] + ((4, broken),)
+        with (
+            patch.object(
+                database, "MIGRATIONS", database.MIGRATIONS[:3] + ((4, broken),)
+            ),
+            self.assertRaises(sqlite3.OperationalError),
         ):
-            with self.assertRaises(sqlite3.OperationalError):
-                database.initialize(self.store.db_path)
+            database.initialize(self.store.db_path)
         with self.store.connect() as con:
             self.assertNotIn(
                 "jobs_by_created",

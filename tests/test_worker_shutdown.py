@@ -97,6 +97,7 @@ class WorkerShutdownTests(unittest.TestCase):
     def test_shutdown_during_transaction_commits_or_rolls_back_before_owner_closes(
         self,
     ):
+        # Keep callback signatures; these fixtures are consumed within each iteration.
         for rollback in (False, True):
             with self.subTest(rollback=rollback):
                 identifier = self.create(10 if rollback else 20)
@@ -109,10 +110,10 @@ class WorkerShutdownTests(unittest.TestCase):
                         con.execute(
                             "UPDATE jobs SET progress_percent=41 WHERE id=?", (job_id,)
                         )
-                        entered.set()
-                        if not runner._stopping.wait(3):
+                        entered.set()  # noqa: B023
+                        if not runner._stopping.wait(3):  # noqa: B023
                             raise RuntimeError("Shutdown was not requested")
-                        if rollback:
+                        if rollback:  # noqa: B023
                             check(job_id)
                     check(job_id)
 
