@@ -84,6 +84,7 @@ class ThinkingSplitter:
         self.pending = ""
         self.inside_think = initial_thinking
         self.reasoning_limit = reasoning_limit
+        self.content_chars = 0
         self.reasoning_chars = 0
 
     @property
@@ -97,13 +98,14 @@ class ThinkingSplitter:
         return "".join(self.reasoning_parts)
 
     def append(self, text):
-        """Add text to the current channel; reasoning_chars counts all reasoning received."""
+        """Count emitted characters once, including pending text flushed by finish()."""
         if self.inside_think:
             self.reasoning_chars += len(text)
             self.reasoning_parts.append(text)
             if self.reasoning_limit is not None:
                 self.reasoning_parts = [self.reasoning[-self.reasoning_limit:]] if self.reasoning_limit else []
         else:
+            self.content_chars += len(text)
             self.content_parts.append(text)
 
     def feed(self, fragment):
@@ -444,7 +446,7 @@ class ModelClient:
             if on_update is None or (not force and time.monotonic() - latest < 0.8):
                 return
             latest = time.monotonic()
-            metrics["content_chars"] = sum(map(len, splitter.content_parts))
+            metrics["content_chars"] = splitter.content_chars
             metrics["reasoning_chars"] = reasoning_chars + splitter.reasoning_chars
             on_update(splitter.content, (splitter.reasoning + reasoning)[-self.preview_limit:], completed)
 
@@ -509,10 +511,13 @@ class ModelClient:
                         reasoning = (reasoning + part)[-self.preview_limit:]
                     if choice.get("finish_reason"):
                         finish_reason = choice["finish_reason"]
-                if sum(map(len, splitter.content_parts)) > 4_000_000:
+                if splitter.content_chars > 4_000_000:
                     raise ModelError("output_too_large", "The generated response exceeded the safety limit.")
                 publish()
             splitter.finish()
+            # A trailing partial tag is ordinary text once finish() flushes it.
+            if splitter.content_chars > 4_000_000:
+                raise ModelError("output_too_large", "The generated response exceeded the safety limit.")
             metrics["finish_reason"] = finish_reason if finish_reason in ("stop", "length", "content_filter", "tool_calls") else None
             if finish_reason == "length":
                 raise ModelError("output_limit", "Model response hit max_tokens or the context limit; start a new job with adjusted budgets.")
@@ -537,7 +542,7 @@ class ModelClient:
             raise
         finally:
             metrics["request_ms"] = (time.monotonic() - started) * 1000
-            metrics["content_chars"] = sum(map(len, splitter.content_parts))
+            metrics["content_chars"] = splitter.content_chars
             metrics["reasoning_chars"] = reasoning_chars + splitter.reasoning_chars
 
     def complete(self, instruction, content, max_tokens, *, on_update=None):

@@ -1,6 +1,7 @@
 """Check streaming failures, optional measurements and silent-prefill cancellation."""
 
 import json
+import itertools
 import threading
 import time
 import unittest
@@ -42,6 +43,53 @@ def delta(text, finish=None, reasoning=None):
     return {"choices": [{"delta": {"content": text, "reasoning_content": reasoning}, "finish_reason": finish}]}
 
 
+class CountingParts(list):
+    """Measure visits to stored fragments instead of asserting a wall-clock duration."""
+
+    def __init__(self):
+        super().__init__()
+        self.visits = 0
+
+    def __iter__(self):
+        for part in super().__iter__():
+            self.visits += 1
+            yield part
+
+
+class SplitterCountTests(unittest.TestCase):
+    def test_fragmented_tags_and_unicode_counts_match_emitted_channels(self):
+        text = 'Avant é👩🏽‍🔬 <think>réflexion 中</think>Après<think>suite</think> fin'
+        for width in range(1, 15):
+            for limit in (None, 7):
+                with self.subTest(width=width, limit=limit):
+                    splitter = ThinkingSplitter(reasoning_limit=limit)
+                    for start in range(0, len(text), width):
+                        splitter.feed(text[start:start + width])
+                        self.assertEqual(splitter.content_chars, len(splitter.content))
+                    splitter.finish()
+                    self.assertEqual(splitter.content, 'Avant é👩🏽‍🔬 Après fin')
+                    self.assertEqual(splitter.content_chars, len('Avant é👩🏽‍🔬 Après fin'))
+                    self.assertEqual(splitter.reasoning_chars, len('réflexion 中suite'))
+                    self.assertEqual(splitter.reasoning, 'réflexion 中suite' if limit is None else 'réflexion 中suite'[-limit:])
+
+    def test_initial_reasoning_and_incomplete_tags_are_counted_only_when_emitted(self):
+        for text, initial, content, reasoning in (
+                ('text<thi', False, 'text<thi', ''),
+                ('before<think>work</thi', False, 'before', 'work</thi'),
+                ('work</think>done<th', True, 'done<th', 'work')):
+            with self.subTest(text=text):
+                splitter = ThinkingSplitter(initial_thinking=initial)
+                for character in text:
+                    splitter.feed(character)
+                    self.assertEqual(splitter.content_chars, len(splitter.content))
+                    self.assertEqual(splitter.reasoning_chars, len(splitter.reasoning))
+                splitter.finish()
+                self.assertEqual((splitter.content, splitter.reasoning), (content, reasoning))
+                self.assertEqual((splitter.content_chars, splitter.reasoning_chars), (len(content), len(reasoning)))
+                splitter.finish()
+                self.assertEqual((splitter.content_chars, splitter.reasoning_chars), (len(content), len(reasoning)))
+
+
 class StreamTests(unittest.TestCase):
     def client(self, **overrides):
         """Build a client with explicit fake credentials and a fixed private prompt."""
@@ -80,6 +128,94 @@ class StreamTests(unittest.TestCase):
         self.assertIsNone(client.current_metrics["prefill_ms"])
         self.assertEqual(client.current_metrics["stop_category"], "done_without_reason")
 
+    def test_fragmented_output_lengths_do_not_repeatedly_scan_prior_fragments(self):
+        seen = []
+
+        class TrackedSplitter(ThinkingSplitter):
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+                self.content_parts = CountingParts()
+                seen.append(self)
+
+        count = 5000
+        client = self.client()
+        with patch.object(model_client, "ThinkingSplitter", TrackedSplitter):
+            result = self.complete(client, Stream([delta('é😀')] * count))
+        self.assertEqual(result, 'é😀' * count)
+        self.assertEqual(client.current_metrics["content_chars"], count * 2)
+        self.assertEqual(client.current_metrics["reasoning_chars"], 0)
+        self.assertLessEqual(seen[0].content_parts.visits, count * 2,
+                             "Length accounting must not walk accumulated fragments on every event")
+
+    def test_live_and_final_counts_include_both_reasoning_channels_and_raw_whitespace(self):
+        client = self.client()
+        client.preview_limit = 7
+        events = [delta('<thi'), delta('nk>réf'), delta('lexion</th'), delta('ink> Résultat '),
+                  delta('é ', reasoning='canal '), delta('中文', 'stop', reasoning='séparé')]
+        previews = []
+        clock = itertools.count(1000)
+
+        def update(content, reasoning, done):
+            previews.append((content, reasoning, done, dict(client.current_metrics)))
+
+        with patch.object(client, "tokenize", return_value=10), patch.object(client, "model", return_value="fake"), \
+             patch.object(client.session, "post", return_value=Stream(events)), \
+             patch.object(model_client.time, "monotonic", side_effect=lambda: next(clock)):
+            answer = client.complete("Analyze", "Source", 100, on_update=update)
+        self.assertEqual(answer, 'Résultat é 中文')
+        self.assertEqual(client.current_metrics["content_chars"], len(' Résultat é 中文'))
+        self.assertEqual(client.current_metrics["reasoning_chars"], len('réflexioncanal séparé'))
+        self.assertGreater(len(previews), 2)
+        for content, reasoning, _, metrics in previews:
+            self.assertEqual(metrics["content_chars"], len(content))
+            self.assertLessEqual(len(reasoning), 7)
+            self.assertGreaterEqual(metrics["reasoning_chars"], len(reasoning))
+        self.assertTrue(previews[-1][2])
+        self.assertEqual(previews[-1][3]["content_chars"], client.current_metrics["content_chars"])
+        self.assertEqual(previews[-1][3]["reasoning_chars"], client.current_metrics["reasoning_chars"])
+
+    def test_four_million_character_limit_including_pending_tag_flush(self):
+        for tail, expected_chars, succeeds in (('', 4_000_000, True), ('y', 4_000_001, False),
+                                                ('<thi', 4_000_004, False)):
+            with self.subTest(tail=tail):
+                client = self.client()
+                events = [delta('x' * 400000)] * 10
+                if tail:
+                    events.append(delta(tail))
+                if succeeds:
+                    self.assertEqual(len(self.complete(client, Stream(events))), expected_chars)
+                else:
+                    with self.assertRaises(ModelError) as error:
+                        self.complete(client, Stream(events))
+                    self.assertEqual(error.exception.code, "output_too_large")
+                    self.assertIsNone(client.last_result)
+                self.assertEqual(client.current_metrics["content_chars"], expected_chars)
+                self.assertEqual(client.current_metrics["reasoning_chars"], 0)
+
+    def test_cancellation_after_many_fragments_keeps_last_counts(self):
+        client = self.client()
+        cancelled = threading.Event()
+        client.cancel_check = cancelled.is_set
+        previews = []
+        clock = itertools.count(1000)
+
+        def update(content, reasoning, done):
+            previews.append((content, reasoning, done))
+            if len(content) >= 4096:
+                cancelled.set()
+
+        events = [delta('<think>reason</think>')] + [delta('é' * 256)] * 1000
+        with patch.object(client, "tokenize", return_value=10), patch.object(client, "model", return_value="fake"), \
+             patch.object(client.session, "post", return_value=Stream(events)), \
+             patch.object(model_client.time, "monotonic", side_effect=lambda: next(clock)), \
+             self.assertRaises(Cancelled):
+            client.complete("Analyze", "Source", 100, on_update=update)
+        self.assertEqual(client.current_metrics["content_chars"], len(previews[-1][0]))
+        self.assertEqual(client.current_metrics["reasoning_chars"], len('reason'))
+        self.assertEqual(client.current_metrics["stop_category"], "cancelled")
+        self.assertIsNone(client.last_result)
+        self.assertFalse(previews[-1][2])
+
     def test_malformed_empty_cutoff_and_length_streams_are_not_committed(self):
         cases = [Stream([b"data: {invalid"]), Stream([delta("Partial")], done=False),
                  Stream([delta("", "stop")]), Stream([delta("Partial", "length")]),
@@ -103,6 +239,8 @@ class StreamTests(unittest.TestCase):
     def test_template_opening_is_handled_only_when_explicitly_configured(self):
         client = self.client(initial_thinking=True)
         self.assertEqual(self.complete(client, Stream([delta("reasoning</think>Useful", "stop")])), "Useful")
+        self.assertEqual(client.current_metrics["content_chars"], len("Useful"))
+        self.assertEqual(client.current_metrics["reasoning_chars"], len("reasoning"))
         parser = ThinkingSplitter(initial_thinking=True, reasoning_limit=8)
         parser.feed("a" * 100 + "</think>Facts [Page 2]")
         parser.finish()
@@ -114,6 +252,8 @@ class StreamTests(unittest.TestCase):
         client = self.client(initial_thinking=True)
         self.assertEqual(self.complete(client, Stream([
             delta("", reasoning="already separated"), delta("Useful", "stop")])), "Useful")
+        self.assertEqual(client.current_metrics["content_chars"], len("Useful"))
+        self.assertEqual(client.current_metrics["reasoning_chars"], len("already separated"))
 
     def test_verified_thinking_adapter_sends_stage_specific_option(self):
         client = self.client(thinking_adapter="chat_template", thinking_section="off", thinking_final="on")
@@ -180,6 +320,8 @@ class StreamTests(unittest.TestCase):
             with self.assertRaises(WorkerStopping):
                 client.complete("Analyze", "Source", 100, on_update=lambda *args: stopping.set())
         self.assertEqual(client.current_metrics["stop_category"], "interrupted")
+        self.assertEqual(client.current_metrics["content_chars"], len("Partial"))
+        self.assertEqual(client.current_metrics["reasoning_chars"], 0)
         self.assertNotIn("error_code", client.current_metrics)
         self.assertIsNone(client.last_result)
         self.assertEqual(self.complete(self.client(), Stream([delta("Next answer", "stop")])), "Next answer")
@@ -211,6 +353,8 @@ class StreamTests(unittest.TestCase):
         self.assertEqual(client.current_metrics["stop_category"], "cancelled")
         self.assertIsNone(client.last_result)
         self.assertTrue(closed.wait(1), "Cancellation must close the blocked HTTP response")
+        self.assertEqual(client.current_metrics["content_chars"], len("Partial"))
+        self.assertEqual(client.current_metrics["reasoning_chars"], 0)
 
     def test_next_generation_waits_for_cleanup_before_headers_without_using_its_deadline(self):
         for mode in ("deadline", "cancel"):
