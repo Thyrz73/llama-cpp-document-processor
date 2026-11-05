@@ -44,6 +44,8 @@ MAX_FINAL_NOTES = 4
 # Every merge level must reduce the number of notes, so this limit is only a
 # safety net: 32 levels of groups of 4 already exceed any realistic PDF.
 MAX_MERGE_LEVELS = 32
+# Ordinary extraction updates share one persistence budget (SQLite, preview and logs).
+EXTRACTION_PROGRESS_SECONDS = 1.0
 # Any number in raw text, for the historical "missing numeric items" counter.
 RAW_NUMBER = re.compile(r"(?<!\w)[+-]?\d+(?:[.,]\d+)?")
 
@@ -122,6 +124,8 @@ class JobRun:
         self.preview_path = self.directory / PREVIEW_FILE
         self.calls = 0
         self.last_percent: int | None = None
+        self.extraction_phase: str | None = None
+        self.extraction_persisted_at = float("-inf")
         self.phase_args: dict[str, Any] = {}
         # Last stage label written by _phase(); previews reuse it without a database read.
         self.phase_label = self.job["stage"]
@@ -210,11 +214,24 @@ class JobRun:
         return extracted
 
     def _extraction_progress(self, label):
-        """Turn extraction labels such as "OCR recognition: page 3/10" into phase updates."""
+        """Persist page progress at most once per second, except at phase boundaries.
+
+        Keep every callback cancellable, even when its writes and logs are skipped.
+        The first/last page and every extraction/OCR transition bypass the timer.
+        """
         matched = re.search(r"page (\d+)/(\d+)", label)
         args = {"index": int(matched[1]), "total": int(matched[2])} if matched else {}
-        self._phase("ocr" if label.startswith("OCR") else "extraction", label,
-                    2 + round(5 * args.get("index", 0) / max(1, args.get("total", 1))), **args)
+        code = "ocr" if label.startswith("OCR") else "extraction"
+        current = time.monotonic()
+        last_page = bool(args) and args["index"] == args["total"]
+        if (code == self.extraction_phase and not last_page
+                and current - self.extraction_persisted_at < EXTRACTION_PROGRESS_SECONDS):
+            self.model.check_cancelled()
+            return
+        percent = 2 + round(5 * args.get("index", 0) / max(1, args.get("total", 1)))
+        self._phase(code, label, max(self.last_percent or 0, percent), **args)
+        self.extraction_phase = code
+        self.extraction_persisted_at = current
 
     def _split(self, extracted):
         """Group the pages into sections that fit the section token budget."""

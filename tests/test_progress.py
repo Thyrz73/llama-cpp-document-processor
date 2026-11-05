@@ -1,12 +1,15 @@
 """Test persisted progress and the jobs APIs."""
+import json
 import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import app
-from document_processor import extraction, jobs
+from document_processor import extraction, jobs, pipeline
+from document_processor.errors import Cancelled, ProcessingError, WorkerStopping
+from document_processor.files import file_hash
 from document_processor.jobs import JobStore
 from document_processor.worker import IDLE_SECONDS, Worker
 
@@ -18,6 +21,177 @@ class StopWorker(BaseException):
     ``except Exception`` blocks without turning test shutdown into a job
     failure.
     """
+
+
+class ExtractionProgressTests(unittest.TestCase):
+    """Exercise the real progress path with a fake clock and simulated persistence."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.directory = Path(temporary.name)
+        (self.directory / jobs.SOURCE_FILE).write_bytes(b"%PDF-test")
+        self.store = Mock(spec=JobStore)
+        self.store.job_dir.return_value = self.directory
+        self.store.get_job.return_value = {
+            "question": "Analyze", "stage": "Starting", "created_at": jobs.utcnow()}
+        self.store.load_config.return_value = {
+            "pipeline_version": 2, "source_hash": file_hash(self.directory / jobs.SOURCE_FILE),
+            "max_attempts": 3, "extraction": app.runtime_defaults()["extraction"]}
+        self.store.attempt_count.return_value = 0
+        self.model = Mock(tokenization_calls=0, tokenization_ms=0, tokenization_cache_hits=0)
+        runtime = pipeline.Runtime(self.store, Mock(), Mock(return_value=self.model), Mock(), True, 1000)
+        self.run = pipeline.JobRun("a" * 32, runtime)
+        self.clock = 100.0
+        timer = patch.object(pipeline.time, "monotonic", side_effect=lambda: self.clock)
+        timer.start()
+        self.addCleanup(timer.stop)
+        self.rows = []
+        self.row = {"progress_percent": 0}
+
+        def persist(identifier, **values):
+            self.assertEqual(identifier, self.run.job_id)
+            self.row.update(values)
+            self.rows.append(dict(self.row))
+
+        self.store.update_job.side_effect = persist
+        preview = patch.object(pipeline, "atomic_json")
+        self.preview = preview.start()
+        self.addCleanup(preview.stop)
+        events = patch.object(pipeline, "event")
+        self.events = events.start()
+        self.addCleanup(events.stop)
+
+    def progress(self, index, total=1000, *, ocr=False, elapsed=0):
+        self.clock += elapsed
+        prefix = "OCR recognition" if ocr else "Extracting text"
+        self.run._extraction_progress(f"{prefix}: page {index}/{total}")
+
+    def assert_phase(self, index, total, code="extraction"):
+        self.assertEqual(self.row["phase_code"], code)
+        self.assertEqual(json.loads(self.row["phase_args"]), {"index": index, "total": total})
+        self.assertEqual(self.row["progress_percent"], 2 + round(5 * index / total))
+        preview = self.preview.call_args.args[1]
+        self.assertEqual(preview["phase_code"], code)
+        self.assertEqual(preview["phase_args"], {"index": index, "total": total})
+
+    def test_ordinary_progress_obeys_one_second_boundary_and_keeps_latest_page(self):
+        self.progress(1)
+        self.progress(2, elapsed=0.75)
+        self.progress(3, elapsed=0.125)
+        self.assertEqual(len(self.rows), 1)
+        self.progress(200, elapsed=0.125)
+        self.assertEqual(len(self.rows), 2)
+        self.assert_phase(200, 1000)
+        self.progress(201, elapsed=0.5)
+        self.progress(202, elapsed=0.5)
+        self.assertEqual(len(self.rows), 3)
+        self.assert_phase(202, 1000)
+        self.assertEqual(self.model.check_cancelled.call_count, 6)
+        self.assertEqual(self.preview.call_count, 3)
+        self.assertEqual(self.events.call_count, 3)
+
+    def test_long_extraction_reduces_database_preview_and_log_writes(self):
+        # 1,000 page callbacks over 9.99 simulated seconds: 10 timed writes + the last page.
+        for index in range(1, 1001):
+            self.clock = 100 + (index - 1) / 100
+            self.progress(index)
+        self.assertEqual(self.store.update_job.call_count, 11)
+        self.assertEqual(self.preview.call_count, 11)
+        self.assertEqual(self.events.call_count, 11)
+        self.assertEqual(self.model.check_cancelled.call_count, 1000)
+        for row in self.rows:
+            args = json.loads(row["phase_args"])
+            self.assertEqual(row["progress_percent"], 2 + round(5 * args["index"] / args["total"]))
+        percents = [row["progress_percent"] for row in self.rows]
+        self.assertEqual(percents, sorted(percents))
+        self.assert_phase(1000, 1000)
+
+    def test_short_extractions_always_persist_first_and_last_page(self):
+        for total in (1, 2, 3):
+            with self.subTest(total=total):
+                self.rows.clear()
+                self.run.extraction_phase = None
+                self.run.last_percent = None
+                for index in range(1, total + 1):
+                    self.progress(index, total)
+                self.assertEqual(len(self.rows), min(total, 2))
+                self.assertEqual(json.loads(self.rows[0]["phase_args"])["index"], 1)
+                self.assert_phase(total, total)
+
+    def test_intermittent_ocr_bypasses_and_resets_the_timer(self):
+        self.progress(1, 10)
+        self.progress(2, 10)
+        self.progress(2, 10, ocr=True, elapsed=0.5)
+        self.assert_phase(2, 10, "ocr")
+        self.progress(3, 10, elapsed=0.5)
+        self.assert_phase(3, 10)
+        self.progress(4, 10, elapsed=0.5)
+        self.assertEqual(len(self.rows), 3)
+        self.progress(4, 10, ocr=True)
+        self.assert_phase(4, 10, "ocr")
+        self.progress(5, 10)
+        self.assert_phase(5, 10)
+        self.progress(10, 10)
+        self.progress(10, 10, ocr=True)
+        self.assert_phase(10, 10, "ocr")
+        self.run._phase("chunking", "Splitting document", 7)
+        self.assertEqual([row["phase_code"] for row in self.rows],
+                         ["extraction", "ocr", "extraction", "ocr", "extraction", "extraction", "ocr", "chunking"])
+        percents = [row["progress_percent"] for row in self.rows]
+        self.assertEqual(percents, sorted(percents))
+        self.assertEqual(self.preview.call_count, 8)
+
+    def test_skipped_callbacks_still_propagate_cancellation_and_shutdown(self):
+        self.progress(1)
+        for signal in (Cancelled(), WorkerStopping()):
+            with self.subTest(signal=type(signal).__name__):
+                self.model.check_cancelled.side_effect = signal
+                with self.assertRaises(type(signal)):
+                    self.progress(2)
+                self.assertEqual(len(self.rows), 1)
+                self.assertEqual(self.preview.call_count, 1)
+                self.assertEqual(self.events.call_count, 1)
+
+    def test_worker_terminal_states_bypass_extraction_throttle(self):
+        self.progress(1)
+        self.progress(2)
+        runner = Worker(self.store, Mock(side_effect=ProcessingError("ocr_failed", "OCR failed.")))
+        with patch("document_processor.worker.failure"):
+            runner.run_claimed(self.run.job_id)
+        self.assertEqual(self.row["phase_code"], "failed")
+        self.assertEqual(self.row["error_code"], "ocr_failed")
+        runner.run_job.side_effect = Cancelled()
+        runner.run_claimed(self.run.job_id)
+        self.assertEqual(self.row["phase_code"], "cancelled")
+        self.assertEqual(len(self.rows), 3)
+
+    def test_real_extractor_keeps_all_page_and_ocr_callbacks(self):
+        text = "Measurements and conclusions with enough readable words for extraction. " * 3
+        document = Mock()
+        document.__enter__ = Mock(return_value=document)
+        document.__exit__ = Mock(return_value=False)
+        document.__len__ = Mock(return_value=4)
+        document.__getitem__ = Mock(side_effect=[Mock(get_text=Mock(return_value=value))
+                                                for value in (text, "", text, "")])
+        document.needs_pass = False
+        reader = Mock()
+        reader.pages = [Mock(extract_text=Mock(return_value="")) for _ in range(4)]
+        with patch.object(extraction.pymupdf, "open", return_value=document), \
+             patch.object(extraction, "PdfReader", return_value=reader), \
+             patch.object(extraction, "ocr_page", return_value=text), \
+             patch.object(self.run, "_extraction_progress", wraps=self.run._extraction_progress) as callback:
+            result = self.run._extract()
+        self.assertEqual(callback.call_count, 6)
+        self.assertEqual(self.model.check_cancelled.call_count, 8)  # callbacks + _step entry/exit
+        self.assertEqual(result["ocr_pages"], [2, 4])
+        self.assertEqual(result["page_count"], 4)
+        self.assertEqual(self.row["pages"], 4)
+        self.assert_phase(4, 4, "ocr")
+        self.assertEqual([row["phase_code"] for row in self.rows[:-1]],
+                         ["extraction", "ocr", "extraction", "extraction", "ocr"])
+        self.run._phase("chunking", "Splitting document", 7)
+        self.assertEqual(self.row["phase_code"], "chunking")
 
 
 class ProgressTests(unittest.TestCase):
