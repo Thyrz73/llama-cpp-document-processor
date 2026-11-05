@@ -347,6 +347,9 @@ class JobRun:
             event("report_saved", job_id=self.job_id, stage="saving", filename=name,
                   bytes=report_path.stat().st_size)
             self.recorder.end(handle, "done")
+        except Cancelled:
+            self.recorder.end(handle, "cancelled", {"error_code": "cancelled"})
+            raise
         except Exception:
             self.recorder.end(handle, "failed", {"error_code": "report_save_failed"})
             raise

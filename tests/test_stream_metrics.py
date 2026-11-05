@@ -150,6 +150,48 @@ class StreamTests(unittest.TestCase):
             finally:
                 release.set()
 
+    def test_cancellation_from_reader_is_not_reported_as_a_backend_failure(self):
+        class CancelledStream(Stream):
+            def iter_lines(self, **kwargs):
+                yield ("data: " + json.dumps(delta("Partial"))).encode()
+                raise Cancelled()
+
+        client = self.client()
+        with self.assertRaises(Cancelled):
+            self.complete(client, CancelledStream([]))
+        self.assertEqual(client.current_metrics["error_code"], "cancelled")
+        self.assertEqual(client.current_metrics["stop_category"], "cancelled")
+        self.assertIsNone(client.last_result)
+        self.assertEqual(self.complete(self.client(), Stream([delta("Next answer", "stop")])), "Next answer")
+
+    def test_cancellation_after_partial_output_closes_the_stream_without_a_result(self):
+        client = self.client()
+        cancelled, closed = threading.Event(), threading.Event()
+
+        class PartialStream(Stream):
+            def iter_lines(self, **kwargs):
+                yield ("data: " + json.dumps(delta("Partial"))).encode()
+                closed.wait(3)
+                yield b"data: [DONE]"
+
+            def close(self):
+                closed.set()
+
+        def on_update(content, reasoning, completed):
+            if content:
+                cancelled.set()
+
+        client.cancel_check = cancelled.is_set
+        with patch.object(client, "tokenize", return_value=10), \
+             patch.object(client, "model", return_value="fake"), \
+             patch.object(client.session, "post", return_value=PartialStream([delta("Partial")])):
+            with self.assertRaises(Cancelled):
+                client.complete("Analyze", "Source", 100, on_update=on_update)
+        self.assertEqual(client.current_metrics["error_code"], "cancelled")
+        self.assertEqual(client.current_metrics["stop_category"], "cancelled")
+        self.assertIsNone(client.last_result)
+        self.assertTrue(closed.wait(1), "Cancellation must close the blocked HTTP response")
+
     def test_next_generation_waits_for_cleanup_before_headers_without_using_its_deadline(self):
         for mode in ("deadline", "cancel"):
             with self.subTest(mode=mode), patch.object(model_client, "_stream_gate", threading.Lock()):

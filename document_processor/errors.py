@@ -17,8 +17,12 @@ class ModelError(ProcessingError):
     """Report a model backend or generation failure without remote response bodies."""
 
 
-class Cancelled(ModelError):
-    """Signal cooperative cancellation without committing an incomplete artifact."""
+class Cancelled(ProcessingError):
+    """Signal cooperative cancellation without committing an incomplete artifact.
+
+    Keep it separate from ModelError so optional backend fallbacks cannot
+    turn cancellation into an unavailable capability or a generation failure.
+    """
 
     def __init__(self):
         super().__init__("cancelled", "Analysis cancelled.")

@@ -195,6 +195,68 @@ class V2Tests(unittest.TestCase):
         with self.client.get(f"/api/jobs/{identifier}/report") as response:
             self.assertEqual(response.status_code, 200)
 
+    def test_inspection_cancellation_stops_the_pipeline_and_worker_without_generation(self):
+        identifier = self.create({"profile": "low"})
+        snapshot = app.store.load_config(identifier)
+        runner = Worker(app.store, lambda job_id, check: self.run_job(job_id, 1))
+        # Exercise the real inspection fallback with cancellation during optional /props.
+        with patch.object(FakeModel, "inspect", app.ModelClient.inspect), \
+             patch.object(FakeModel, "json_request", side_effect=Cancelled()), \
+             patch.object(FakeModel, "complete") as complete, \
+             patch.object(worker, "record_failure") as failure:
+            runner.run_claimed(identifier)
+        complete.assert_not_called()
+        failure.assert_not_called()
+        stored = app.store.get_job(identifier)
+        self.assertEqual((stored["status"], stored["error_code"], stored["error"]), ("cancelled", "cancelled", ""))
+        metrics = self.client.get(f"/api/jobs/{identifier}/metrics").get_json()
+        self.assertEqual(metrics["runs"][0]["status"], "cancelled")
+        self.assertEqual(metrics["steps"], [])
+        self.assertEqual(app.store.load_config(identifier), snapshot)
+        self.assertIsNone(app.cached_capabilities())
+        self.assertFalse((app.store.job_dir(identifier) / "rapport_final.md").exists())
+
+    def test_cancelled_generation_keeps_completed_artifacts_reusable_on_retry(self):
+        identifier = self.create({"profile": "low"})
+        snapshot = app.store.load_config(identifier)
+        runner = Worker(app.store, lambda job_id, check: self.run_job(job_id, 1))
+        with patch.object(FakeModel, "complete", side_effect=Cancelled()):
+            runner.run_claimed(identifier)
+        self.assertEqual(app.store.get_job(identifier)["status"], "cancelled")
+        metrics = self.client.get(f"/api/jobs/{identifier}/metrics").get_json()
+        section = next(step for step in metrics["steps"] if step["stage"] == "section")
+        self.assertEqual((section["status"], section["metrics"]["error_code"]), ("cancelled", "cancelled"))
+        directory = app.store.job_dir(identifier)
+        self.assertEqual(list(directory.glob("artifacts/*/analysis_0000.md")), [])
+        self.assertFalse((directory / "rapport_final.md").exists())
+        self.assertEqual(self.client.post(f"/api/jobs/{identifier}/retry").status_code, 200)
+        self.run_job(identifier, 1)
+        self.assertEqual(app.store.get_job(identifier)["status"], "done")
+        metrics = self.client.get(f"/api/jobs/{identifier}/metrics").get_json()
+        self.assertEqual([run["status"] for run in metrics["runs"]], ["done", "cancelled"])
+        self.assertGreaterEqual(metrics["summary"]["reused_steps"], 2)
+        self.assertEqual(app.store.load_config(identifier), snapshot)
+
+    def test_cancellation_during_report_save_is_recorded_as_cancelled(self):
+        identifier = self.create({"profile": "low"})
+        original = pipeline.report_filename
+
+        def cancel_before_publication(*args):
+            name = original(*args)
+            app.store.update_job(identifier, cancel_requested=1)
+            return name
+
+        runner = Worker(app.store, lambda job_id, check: self.run_job(job_id, 1))
+        with patch.object(pipeline, "report_filename", side_effect=cancel_before_publication):
+            runner.run_claimed(identifier)
+        stored = app.store.get_job(identifier)
+        self.assertEqual((stored["status"], stored["error_code"], stored["error"]), ("cancelled", "cancelled", ""))
+        metrics = self.client.get(f"/api/jobs/{identifier}/metrics").get_json()
+        self.assertEqual(metrics["runs"][0]["status"], "cancelled")
+        saving = next(step for step in metrics["steps"] if step["stage"] == "saving")
+        self.assertEqual((saving["status"], saving["metrics"]["error_code"]), ("cancelled", "cancelled"))
+        self.assertEqual(self.client.get(f"/api/jobs/{identifier}/report").status_code, 409)
+
     def test_tampered_artifact_is_recomputed(self):
         identifier = self.create()
         self.run_job(identifier, 1)

@@ -9,15 +9,29 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pymupdf
+import requests
 
 import app
 from document_processor import extraction, jobs
 from document_processor.config import ConfigurationError
-from document_processor.errors import ModelError, ProcessingError
+from document_processor.errors import Cancelled, ModelError, ProcessingError
 from document_processor.jobs import JobStore
-from document_processor.worker import record_failure
+from document_processor.worker import Worker, record_failure
 
 ROOT = Path(app.__file__).parent
+
+
+class ErrorHierarchyTests(unittest.TestCase):
+    def test_cancellation_is_a_public_processing_signal_separate_from_backend_errors(self):
+        cancelled = Cancelled()
+        self.assertIsInstance(cancelled, ProcessingError)
+        self.assertIsInstance(cancelled, RuntimeError)
+        self.assertNotIsInstance(cancelled, ModelError)
+        self.assertEqual(cancelled.args, ("Analysis cancelled.",))
+        self.assertEqual(json.loads(json.dumps({"error_code": cancelled.code, "error": str(cancelled)})),
+                         {"error_code": "cancelled", "error": "Analysis cancelled."})
+        self.assertIsInstance(ModelError("backend_unavailable", "Unavailable."), ProcessingError)
+        self.assertIsInstance(ConfigurationError("invalid_options", "Invalid."), ValueError)
 
 
 class ExtractionErrorTests(unittest.TestCase):
@@ -96,6 +110,21 @@ class FailedJobTests(unittest.TestCase):
         self.assertEqual(job["error_code"], "analysis_failed")
         self.assertNotIn("secret", job["error"])
 
+    def test_backend_request_failure_remains_a_failed_job_with_a_safe_public_code(self):
+        identifier = self.job()
+        client = app.BackendClient("http://localhost", "", app.runtime_defaults(), "")
+        self.addCleanup(client.session.close)
+        runner = Worker(app.store, lambda job_id, check: client.model())
+        with patch.object(client.session, "request", side_effect=requests.ConnectionError("PRIVATE_REMOTE_BODY")), \
+             self.assertLogs(app.log, level="ERROR") as logs:
+            runner.run_claimed(identifier)
+        response = app.app.test_client().get(f"/api/jobs/{identifier}")
+        self.assertEqual(response.status_code, 200)
+        job = response.get_json()
+        self.assertEqual((job["status"], job["error_code"]), ("failed", "backend_unavailable"))
+        self.assertEqual(job["error"], "The model backend is unavailable or returned invalid data.")
+        self.assertNotIn("PRIVATE_REMOTE_BODY", response.get_data(as_text=True) + " ".join(logs.output))
+
 
 class ErrorCatalogTests(unittest.TestCase):
     """Every public error code is translated, and every translated code is still emitted."""
@@ -137,6 +166,51 @@ class CapabilityCacheTests(unittest.TestCase):
         response = self.client.post("/api/config/preview", json={"profile": "low"})
         self.assertEqual(response.status_code, 200, response.get_json())
         return response.get_json()["configuration"]["warnings"]
+
+    def test_inspection_propagates_cancellation_at_both_requests_without_caching_a_fallback(self):
+        for path in ("/v1/models", "/props"):
+            with self.subTest(path=path):
+                client = app.ModelClient()
+                self.addCleanup(client.session.close)
+                previous = client.capabilities
+                cached = dict(app._capability_cache)
+                client.cancel_check = lambda: True
+                # A cached model skips /v1/models; cancellation is then checked before /props.
+                if path == "/props":
+                    client.model_name = "test-model"
+                with patch.object(client.session, "request") as request, self.assertRaises(Cancelled) as raised:
+                    client.inspect()
+                self.assertEqual(raised.exception.code, "cancelled")
+                request.assert_not_called()
+                self.assertIs(client.capabilities, previous)
+                self.assertEqual(app._capability_cache, cached)
+
+    def test_backend_failures_still_return_sanitized_inspection_fallbacks(self):
+        for path in ("/v1/models", "/props"):
+            with self.subTest(path=path):
+                client = app.ModelClient()
+                self.addCleanup(client.session.close)
+                if path == "/props":
+                    client.model_name = "test-model"
+                with patch.object(client.session, "request", side_effect=requests.ConnectionError("PRIVATE_REMOTE_BODY")):
+                    result = client.inspect()
+                self.assertEqual(result["status"], "unavailable" if path == "/v1/models" else "available")
+                if path == "/props":
+                    self.assertEqual(result["properties"], "unsupported_or_unavailable")
+                self.assertEqual(app.cached_capabilities(), result)
+                self.assertNotIn("PRIVATE_REMOTE_BODY", json.dumps(result))
+
+    def test_validation_errors_keep_http_400_and_safe_codes_and_messages(self):
+        cases = [({"profile": "PRIVATE_INVALID_VALUE"}, "invalid_profile", "Unknown performance profile."),
+                 ({"overrides": {"analysis_tokens": -1}}, "invalid_budget", "Invalid analysis_tokens budget.")]
+        with patch("requests.Session.request", side_effect=AssertionError("No backend request")):
+            for options, code, message in cases:
+                with self.subTest(code=code):
+                    preview = self.client.post("/api/config/preview", json=options)
+                    upload = self.client.post("/api/jobs", data={"options": json.dumps(options)})
+                    for response in (preview, upload):
+                        self.assertEqual(response.status_code, 400)
+                        self.assertEqual(response.get_json(), {"error_code": code, "error": message})
 
     def test_job_inspection_is_shared_with_configuration_preview(self):
         self.assertIn("engine_context_unknown", self.warnings())

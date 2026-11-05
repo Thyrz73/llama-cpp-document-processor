@@ -55,6 +55,8 @@ There is one process, one worker thread and a few web threads. SQLite holds the 
 
 `POST /api/jobs/<id>/cancel` records the request in SQLite, then signals the running job in memory. The job checks for it at each phase change, tokenizer call and streamed token, and every 0.2 seconds while it waits for the model. After a restart, `JobStore.initialize()` requeues interrupted jobs and completes pending cancellations.
 
+`ModelError` and `Cancelled` both inherit from `ProcessingError` (`RuntimeError`), but cancellation is not a backend failure. Optional backend inspection fallbacks catch `ModelError` and let `Cancelled` propagate. The stream reader passes cancellation to its consumer, and the pipeline and worker record it as `cancelled`, including during report saving. `ConfigurationError` remains a `ValueError` with its existing public code and HTTP 400 response.
+
 ## Browser interface
 
 `templates/index.html` loads `static/js/main.js` as an ES module, which calls `start()` in `app.js`. There is no build step: browsers load the modules directly.

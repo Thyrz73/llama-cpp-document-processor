@@ -188,7 +188,7 @@ class ModelClient:
 
         The model comes from /v1/models; the context size, slots, template
         hash, version and default sampling come from the optional /props.
-        Unavailable properties are reported in the result, never raised.
+        Unavailable properties are reported in the result; cancellation propagates.
         """
         result: dict[str, Any] = {"status": "unavailable", "context_tokens": None, "slots": None,
                   "model": None, "template_hash": None, "version": None,
@@ -350,6 +350,8 @@ class ModelClient:
                             raise ModelError("invalid_stream", "A streaming event exceeded the size limit.")
                         emit("line", line)
                 emit("end", None)
+            except Cancelled:
+                emit("cancelled", None)
             except Exception:
                 emit("error", None)
             finally:
@@ -373,6 +375,8 @@ class ModelClient:
                     continue
                 if kind == "end":
                     return
+                if kind == "cancelled":
+                    raise Cancelled()
                 if kind == "error":
                     raise ModelError("stream_error", "The model stream failed or disconnected.")
                 yield value
