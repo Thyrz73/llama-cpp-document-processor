@@ -12,6 +12,8 @@ Finished analyses can be deleted one at a time or selected in bulk from the disp
 
 The interface initially selects `low`, automatic report language and standard detail. Interface language and theme are saved in the browser; changing them does not translate existing reports. Automatic report language follows the request, not the interface language.
 
+For new analyses, headers, extraction notices and mechanical warnings use a private `effective_report_language` (`fr` or `en`) saved with the configuration. Explicit French/English choices win. With `auto`, a small local heuristic compares distinct common French and English request words; ties or unrecognized requests use English. It examines the request only, not the PDF, and can misclassify short or mixed requests; choose an explicit language when needed. The generation prompt still asks the model to follow the request. Retries reuse the saved choice; older snapshots without this field keep their original rendering (English for `auto`).
+
 ## Reports
 
 Reports use a deterministic descriptive download name such as `Consommation_energetique_des_batiments_2025-2026_rapport.md`, derived from an existing Markdown heading. Generic headings are skipped; the fallback is `<original PDF stem>_rapport.md`. Names use portable ASCII and stay within 100 characters. No model call or PDF reanalysis is needed. The internal `rapport_final.md` path stays unchanged, and older reports remain supported: their names are computed and saved on first view or download, and listing history never reads Markdown contents.

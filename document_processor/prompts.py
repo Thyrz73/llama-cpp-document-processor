@@ -1,5 +1,7 @@
 """Versioned task templates; snapshots retain these strings for safe retries."""
 
+import re
+
 PROMPT_VERSION = 4
 TEMPLATES = {
     "section": (
@@ -99,13 +101,36 @@ def is_french(language):
     return language.lower() in ("fr", "french", "français")
 
 
+def resolve_report_language(language, question):
+    """Choose fr/en for deterministic text of a new job, using only its request.
+
+    Explicit settings take precedence. For auto, compare distinct common
+    French and English request words; ties and unrecognized requests use en.
+    This is a small heuristic, not PDF language detection. Save the result
+    in the snapshot so retries never need to run the heuristic again.
+    """
+    if language != "auto":
+        return "fr" if is_french(language) else "en"
+    words = set(re.findall(r"[^\W\d_]+", question.casefold()))
+    french = set("analysez analyser résume résumez résumer résumé synthèse décris décrivez explique expliquez "
+                 "le la les des du ce cette ces un une et dans avec pour méthodes résultats conclusions".split())
+    english = set("analyze summarize summarise summary describe explain "
+                  "the this these a an and in with for methods results conclusions".split())
+    return "fr" if len(words & french) > len(words & english) else "en"
+
+
+def deterministic_language(config):
+    """Read the saved text language, retaining historical behavior for old snapshots."""
+    return config.get("effective_report_language", config["report_language"])
+
+
 def report_header(config, filename, pages, chunks, missing, ocr_pages):
     """Return the Markdown header of the report, in the report language.
 
     It gives the PDF name, the page and section counts, and the pages that
     needed OCR or still lack usable text.
     """
-    french = is_french(config["report_language"])
+    french = is_french(deterministic_language(config))
     title, page_label, chunk_label = (("Analyse de", "Pages PDF", "sections analysées")
                                      if french else ("Analysis of", "PDF pages", "analyzed chunks"))
     # A filename is untrusted text even though the browser renders it safely.

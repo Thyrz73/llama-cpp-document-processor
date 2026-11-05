@@ -338,7 +338,8 @@ class JobRun:
                 archive = self.directory / "previous_reports"
                 archive.mkdir(exist_ok=True)
                 atomic_text(archive / (file_hash(report_path) + ".md"), report_path.read_text(encoding="utf-8"))
-            report_text = header + final + "\n" + reliability.report_warnings(self.quality, self.config["report_language"])
+            report_text = header + final + "\n" + reliability.report_warnings(
+                self.quality, prompts.deterministic_language(self.config))
             atomic_text(report_path, report_text)
             name = report_filename(final, self.job["filename"])
             self.model.check_cancelled()

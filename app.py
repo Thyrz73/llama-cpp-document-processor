@@ -380,6 +380,7 @@ def create_job():
         return jsonify(error="Select a PDF file", error_code="invalid_pdf"), 400
     if not question.strip() or len(question) > MAX_QUESTION_CHARS:
         return jsonify(error=f"Instructions required (maximum {MAX_QUESTION_CHARS} characters)", error_code="invalid_question"), 400
+    config["effective_report_language"] = prompts.resolve_report_language(config["report_language"], question)
     filename = uploaded.filename.replace("\\", "/").split("/")[-1][:120]
     if not filename.lower().endswith(".pdf"):
         return jsonify(error="Only .pdf files are accepted", error_code="invalid_pdf"), 400

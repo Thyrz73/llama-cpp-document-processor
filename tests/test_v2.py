@@ -8,9 +8,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 import app
-from document_processor import config, extraction, pipeline, worker
+from document_processor import config, extraction, pipeline, prompts, worker
 from document_processor.errors import Cancelled, ModelError, ProcessingError
-from document_processor.files import atomic_json
+from document_processor.files import atomic_json, file_hash
 from document_processor.jobs import JobStore
 from document_processor.worker import Worker
 
@@ -66,9 +66,9 @@ class V2Tests(unittest.TestCase):
         self.client = app.app.test_client()
         FakeModel.calls, FakeModel.identity, FakeModel.fail_stage = [], "test-model", None
 
-    def create(self, options=None):
+    def create(self, options=None, question="Summarize"):
         """Use the actual historical multipart endpoint, adding options only when supplied."""
-        data = {"file": (io.BytesIO(b"%PDF-test document"), "example.pdf"), "question": "Summarize"}
+        data = {"file": (io.BytesIO(b"%PDF-test document"), "example.pdf"), "question": question}
         if options is not None:
             data["options"] = json.dumps(options)
         response = self.client.post("/api/jobs", data=data)
@@ -176,6 +176,59 @@ class V2Tests(unittest.TestCase):
         live = self.client.get(f"/api/jobs/{identifier}/live").json
         self.assertIn("25 °C", live["content"])
         self.assertFalse(live["active"])
+
+    def test_new_reports_share_one_saved_language_for_headers_and_warnings(self):
+        cases = [("auto", "Résumez les résultats et les méthodes.", "fr"),
+                 ("auto", "Summarize the results and methods.", "en"),
+                 ("auto", "PDF 2026", "en"),
+                 ("fr", "Summarize the results.", "fr"),
+                 ("en", "Résumez les résultats.", "en")]
+        for preference, question, effective in cases:
+            with self.subTest(preference=preference, question=question):
+                identifier = self.create({"profile": "low", "report_language": preference}, question)
+                saved = app.store.load_config(identifier)
+                self.assertEqual(saved["report_language"], preference)
+                self.assertEqual(saved["effective_report_language"], effective)
+                self.assertNotIn("effective_report_language", config.public_config(saved))
+                if preference == "auto":
+                    self.assertIn("same language as the user's request", prompts.instruction(saved, "final", question))
+                with patch.object(FakeModel, "complete", return_value="Report [Page 999]."):
+                    self.run_job(identifier, 1)
+                report = (app.store.job_dir(identifier) / "rapport_final.md").read_text(encoding="utf-8")
+                self.assertTrue(report.startswith("# Analyse de" if effective == "fr" else "# Analysis of"))
+                self.assertIn("page PDF inexistante" if effective == "fr" else "nonexistent PDF page", report)
+
+    def test_retry_keeps_saved_auto_language_without_resolving_it_again(self):
+        identifier = self.create({"profile": "low", "report_language": "auto"}, "Résumez les résultats.")
+        self.run_job(identifier, 1)
+        saved = app.store.load_config(identifier)
+        report_path = app.store.job_dir(identifier) / "rapport_final.md"
+        original = report_path.read_bytes()
+        app.store.update_job(identifier, status="failed")
+        with patch.object(app, "OUTPUT_LANGUAGE", "en"), \
+             patch.object(prompts, "resolve_report_language", side_effect=AssertionError("Do not resolve retries")):
+            self.assertEqual(self.client.post(f"/api/jobs/{identifier}/retry").status_code, 200)
+            self.run_job(identifier, 1)
+        self.assertEqual(app.store.load_config(identifier), saved)
+        self.assertEqual(report_path.read_bytes(), original)
+
+    def test_old_snapshots_remain_readable_and_keep_their_report_language(self):
+        for index, preference in enumerate(("auto", "fr", "en"), 1):
+            with self.subTest(preference=preference):
+                identifier = f"{index:032x}"
+                directory = app.store.job_dir(identifier)
+                directory.mkdir(parents=True)
+                source = directory / "source.pdf"
+                source.write_bytes(b"%PDF-legacy")
+                saved = app.new_snapshot({"profile": "low", "report_language": preference})
+                saved["source_hash"] = file_hash(source)
+                self.assertNotIn("effective_report_language", saved)
+                app.store.create_job(identifier, "old.pdf", "Résumez les résultats.", 1, saved)
+                with patch.object(prompts, "resolve_report_language", side_effect=AssertionError("Keep old snapshots")):
+                    self.run_job(identifier, 1)
+                report = (directory / "rapport_final.md").read_text(encoding="utf-8")
+                self.assertTrue(report.startswith("# Analyse de" if preference == "fr" else "# Analysis of"))
+                self.assertEqual(app.store.load_config(identifier), saved)
 
     def test_retry_reuses_only_verified_steps_and_records_failures(self):
         identifier = self.create({"profile": "low"})

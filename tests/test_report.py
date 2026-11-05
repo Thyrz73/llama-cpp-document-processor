@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import app
-from document_processor import jobs, reports
+from document_processor import jobs, prompts, reports
 from document_processor.jobs import JobStore
 
 
@@ -18,6 +18,31 @@ class Tags(HTMLParser):
 
     def handle_starttag(self, tag, attrs):
         self.tags.append((tag, dict(attrs)))
+
+
+class ReportLanguageTests(unittest.TestCase):
+    def test_auto_uses_request_words_and_defaults_to_english_when_ambiguous(self):
+        cases = [("Résumez les résultats et les méthodes de ce document.", "fr"),
+                 ("Analyse ce document.", "fr"),
+                 ("Analyse this document.", "en"),
+                 ("Summarize the results and methods of this document.", "en"),
+                 ("le the", "en"), ("PDF 2026", "en"), ("中文", "en")]
+        for question, expected in cases:
+            with self.subTest(question=question):
+                self.assertEqual(prompts.resolve_report_language("auto", question), expected)
+
+    def test_explicit_languages_and_existing_french_aliases_take_precedence(self):
+        for language in ("fr", "French", "français"):
+            self.assertEqual(prompts.resolve_report_language(language, "Summarize the results."), "fr")
+        self.assertEqual(prompts.resolve_report_language("en", "Résumez les résultats."), "en")
+
+    def test_header_uses_saved_language_for_missing_text_and_ocr_notices(self):
+        config = {"report_language": "auto", "effective_report_language": "fr"}
+        header = prompts.report_header(config, "study.pdf", 3, 1, [2], [3])
+        for text in ("# Analyse de", "Pages PDF", "Texte insuffisant", "OCR utilisé"):
+            self.assertIn(text, header)
+        # Old auto snapshots keep their historical English rendering.
+        self.assertTrue(prompts.report_header({"report_language": "auto"}, "study.pdf", 3, 1, [], []).startswith("# Analysis of"))
 
 
 class ReportTests(unittest.TestCase):
