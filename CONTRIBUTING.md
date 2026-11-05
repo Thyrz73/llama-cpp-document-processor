@@ -13,8 +13,10 @@ Bug reports, fixes and improvements are welcome. This guide describes the workfl
    .venv/bin/ruff check .
    .venv/bin/mypy
    .venv/bin/python -m unittest discover -s tests
-   node tests/test_polling.js
+   node --test tests/test_polling.js
    ```
+
+   Frontend tests use Node 22’s built-in `node:test` runner and `node:assert/strict`; no npm installation is needed. The suites run sequentially because real interface modules share state and browser globals. Each scenario gets a fresh simulated DOM, explicitly settled requests, manually controlled timers and automatic cleanup of globals. Filter scenarios with `node --test --test-name-pattern="visibility" tests/test_polling.js`.
 
    Apply Python formatting locally with `.venv/bin/ruff format .`. Ruff checks import sorting (`I`), bug-prone constructs (`B`), Python 3.12 modernization (`UP`) and simplifications (`SIM`), in addition to the core rules. Keep any rule exceptions local and explain why they preserve existing behavior.
 

@@ -203,7 +203,7 @@ python3 -m venv .venv
 .venv/bin/ruff check .
 .venv/bin/mypy
 .venv/bin/python -m unittest discover -s tests -v
-node tests/test_polling.js
+node --test tests/test_polling.js
 ```
 
 Python tests use temporary data and simulated model responses; no llama.cpp is needed. One test starts `app.py` on a free local port and stops it with `SIGTERM`. Two tests require real Tesseract: they are skipped locally when it is missing, but never in CI (`CI` set), where a missing Tesseract fails the build. Node.js 22.7 or later is needed only for the frontend tests (CI uses Node.js 22). [CI](.github/workflows/tests.yml) also lints with ruff and type-checks with mypy (settings in [pyproject.toml](pyproject.toml)), checks syntax, an offline benchmark plan, Compose and Docker packaging.

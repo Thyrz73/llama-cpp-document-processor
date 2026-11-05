@@ -1,0 +1,11 @@
+{
+  "name": "llama-cpp-document-processor",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test tests/test_polling.js"
+  }
+}
