@@ -26,3 +26,10 @@ class Cancelled(ProcessingError):
 
     def __init__(self):
         super().__init__("cancelled", "Analysis cancelled.")
+
+
+class WorkerStopping(Exception):
+    """Interrupt an attempt for process shutdown, leaving its job resumable.
+
+    This internal signal is neither a user cancellation nor a public failure.
+    """

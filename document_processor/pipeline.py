@@ -25,7 +25,7 @@ from typing import Any, Callable
 from . import extraction, prompts, reliability
 from .artifacts import Artifacts
 from .config import fingerprint
-from .errors import Cancelled, ProcessingError
+from .errors import Cancelled, ProcessingError, WorkerStopping
 from .files import atomic_json, atomic_text, file_hash
 from .jobs import PREVIEW_FILE, REPORT_FILE, SOURCE_FILE, JobStore, now
 from .model_client import ModelClient
@@ -147,6 +147,9 @@ class JobRun:
             status = "done"
             log.info("job_finished job_id=%s pages=%d chunks=%d calls=%d",
                      self.job_id, extracted["page_count"], len(chunks), self.calls)
+        except WorkerStopping:
+            status = "interrupted"
+            raise
         except Cancelled:
             status = "cancelled"
             raise
@@ -348,6 +351,9 @@ class JobRun:
             event("report_saved", job_id=self.job_id, stage="saving", filename=name,
                   bytes=report_path.stat().st_size)
             self.recorder.end(handle, "done")
+        except WorkerStopping:
+            self.recorder.end(handle, "interrupted", {"stop_category": "interrupted"})
+            raise
         except Cancelled:
             self.recorder.end(handle, "cancelled", {"error_code": "cancelled"})
             raise
@@ -415,6 +421,11 @@ class JobRun:
                                 tokenization_cache_hits=model.tokenization_cache_hits - before_hits)
             self.recorder.end(handle, "done", measurements)
             return result
+        except WorkerStopping:
+            measurements = dict(model.current_metrics) if generation else {}
+            measurements["stop_category"] = "interrupted"
+            self.recorder.end(handle, "interrupted", measurements)
+            raise
         except Exception as exc:
             measurements = dict(model.current_metrics) if generation else {}
             measurements["error_code"] = getattr(exc, "code", "step_failed")

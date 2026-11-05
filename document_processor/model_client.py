@@ -19,7 +19,7 @@ from typing import Any
 import requests
 
 from .config import ConfigurationError
-from .errors import Cancelled, ModelError
+from .errors import Cancelled, ModelError, WorkerStopping
 
 
 @dataclass
@@ -528,6 +528,9 @@ class ModelClient:
             publish(force=True)
             self.last_result = CompletionResult(answer, metrics)
             return self.last_result
+        except WorkerStopping:
+            metrics["stop_category"] = "interrupted"
+            raise
         except Exception as exc:
             metrics["error_code"] = getattr(exc, "code", "context_or_generation_error")
             metrics["stop_category"] = "cancelled" if isinstance(exc, Cancelled) else "error"

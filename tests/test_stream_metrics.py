@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import app
 from document_processor import model_client
-from document_processor.errors import Cancelled, ModelError
+from document_processor.errors import Cancelled, ModelError, WorkerStopping
 from document_processor.model_client import ThinkingSplitter, collect_metrics
 
 
@@ -161,6 +161,26 @@ class StreamTests(unittest.TestCase):
             self.complete(client, CancelledStream([]))
         self.assertEqual(client.current_metrics["error_code"], "cancelled")
         self.assertEqual(client.current_metrics["stop_category"], "cancelled")
+        self.assertIsNone(client.last_result)
+        self.assertEqual(self.complete(self.client(), Stream([delta("Next answer", "stop")])), "Next answer")
+
+    def test_worker_shutdown_during_partial_stream_is_interrupted_without_public_failure(self):
+        stopping = threading.Event()
+        client = self.client()
+
+        def check():
+            if stopping.is_set():
+                raise WorkerStopping()
+            return False
+
+        client.cancel_check = check
+        with patch.object(client, "tokenize", return_value=10), \
+             patch.object(client, "model", return_value="fake"), \
+             patch.object(client.session, "post", return_value=Stream([delta("Partial")])):
+            with self.assertRaises(WorkerStopping):
+                client.complete("Analyze", "Source", 100, on_update=lambda *args: stopping.set())
+        self.assertEqual(client.current_metrics["stop_category"], "interrupted")
+        self.assertNotIn("error_code", client.current_metrics)
         self.assertIsNone(client.last_result)
         self.assertEqual(self.complete(self.client(), Stream([delta("Next answer", "stop")])), "Next answer")
 

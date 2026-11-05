@@ -13,7 +13,11 @@ tar -czf "../document-processor-backup-$(date +%Y%m%d-%H%M%S).tar.gz" \
   .env config/system_prompt.txt data
 ```
 
-Keep the old source revision or image and Compose files for rollback. A stopped copy of `data/` must include SQLite and any WAL/SHM files. Do not make a raw copy of a live database.
+Keep the old source revision or image and Compose files for rollback. Confirm that all processor instances and other writers have actually stopped before making this raw copy. Preserve the complete `data/` directory, including any `jobs.sqlite3-wal` and `jobs.sqlite3-shm` files. Do not delete these files manually or assume that `jobs.sqlite3` alone is complete merely because SIGTERM was sent.
+
+Shutdown waits up to 5 seconds for the worker, then attempts one checkpoint with a 1-second lock timeout. `sqlite_checkpoint_incomplete` reports busy/incomplete outcomes and frame counts; `sqlite_checkpoint_failed` reports SQLite exceptions without their private messages. `worker_shutdown_timeout` means an operation did not cooperate within the worker wait. In these cases, keep the WAL: SQLite recovers committed changes at the next open. `synchronous=NORMAL` still permits loss of recent commits on power failure; these shutdown changes do not strengthen that durability guarantee.
+
+For a coherent database-only backup while SQLite is active, use its [online backup mechanism](https://docs.python.org/3/library/sqlite3.html#sqlite3.Connection.backup), such as `source.backup(target)` with explicitly closed source and destination connections. It includes committed WAL data. This does not atomically snapshot PDFs, reports and manifests alongside the database; stop processing for a complete application backup. A raw copy of live DB/WAL files is not a substitute for this mechanism. See also [SQLite checkpoint results](https://www.sqlite.org/pragma.html#pragma_wal_checkpoint) and [WAL persistence](https://www.sqlite.org/wal.html#the_wal_file).
 
 Update the source from the intended branch, then:
 

@@ -5,11 +5,12 @@ queued job, runs it and records how it ended. A single worker keeps memory
 and CPU use predictable on small machines.
 """
 
+import logging
 import threading
 import time
 
 from .config import ConfigurationError
-from .errors import Cancelled, ProcessingError
+from .errors import Cancelled, ProcessingError, WorkerStopping
 from .observability import event, failure, job_context
 
 # How long the worker sleeps when the queue looks empty. Creating, retrying
@@ -18,6 +19,8 @@ IDLE_SECONDS = 6
 # A running job rereads its cancellation flag from SQLite at most this often;
 # requests made through the API reach it immediately (see notify_cancelled).
 CANCEL_RECHECK_SECONDS = 1.0
+# Leave time for the main-thread checkpoint within the usual container stop grace.
+SHUTDOWN_TIMEOUT_SECONDS = 5.0
 
 
 def record_failure(store, job_id, exc):
@@ -50,16 +53,34 @@ class Worker:
         self.store = store
         self.run_job = run_job
         self._wakeup = threading.Event()
+        self._stopping = threading.Event()
+        self._thread: threading.Thread | None = None
         # Only the running job has a signal; cancel requests set it.
         self._signals: dict[str, _CancelSignal] = {}
 
     def start(self):
         """Run the queue in a daemon thread.
 
-        The thread stops with the process; a job cut short is requeued by
-        JobStore.initialize() at the next start.
+        stop() requests cooperative shutdown and waits for a bounded interval.
+        A non-cooperative operation cannot hold the process open indefinitely;
+        JobStore.initialize() recovers any interrupted job at the next start.
         """
-        threading.Thread(target=self.run_forever, name="pdf-worker", daemon=True).start()
+        if self._thread is not None:
+            raise RuntimeError("Worker has already been started.")
+        self._thread = threading.Thread(target=self.run_forever, name="pdf-worker", daemon=True)
+        self._thread.start()
+
+    def stop(self, timeout=SHUTDOWN_TIMEOUT_SECONDS):
+        """Request shutdown and wait at most timeout seconds; never close another thread's connection."""
+        self._stopping.set()
+        self.wake()
+        thread = self._thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=timeout)
+        stopped = thread is None or not thread.is_alive()
+        event("worker_stopped" if stopped else "worker_shutdown_timeout",
+              logging.INFO if stopped else logging.WARNING, status="stopped" if stopped else "pending")
+        return stopped
 
     def wake(self):
         """Look at the queue now instead of after the idle wait."""
@@ -80,6 +101,8 @@ class Worker:
         once per CANCEL_RECHECK_SECONDS so any other recorded request is
         still honored. Jobs not run by this worker always read SQLite.
         """
+        if self._stopping.is_set():
+            raise WorkerStopping()
         signal = self._signals.get(job_id)
         if signal is None:
             return self.store.read_cancellation(job_id)
@@ -92,24 +115,29 @@ class Worker:
         return signal.event.is_set()
 
     def run_forever(self):
-        """Process the queue until the process exits.
+        """Process the queue until shutdown, then close the connection on its owning thread.
 
-        This loop is endless on purpose. After each job it immediately looks
+        After each job it immediately looks
         for the next one; when the queue is empty it sleeps until wake() or
         IDLE_SECONDS. Errors are logged and never stop the loop, and a wake()
         that arrives during a job is not lost because the queue is checked
         again before sleeping.
         """
-        while True:
-            try:
-                job_id = self.store.claim_next_job()
-                if job_id:
-                    self.run_claimed(job_id)
-                    continue
-            except Exception as exc:
-                failure("worker_database_error", exc)
-            self._wakeup.wait(timeout=IDLE_SECONDS)
-            self._wakeup.clear()
+        try:
+            while not self._stopping.is_set():
+                try:
+                    job_id = self.store.claim_next_job()
+                    if self._stopping.is_set():
+                        break
+                    if job_id:
+                        self.run_claimed(job_id)
+                        continue
+                except Exception as exc:
+                    failure("worker_database_error", exc)
+                self._wakeup.wait(timeout=IDLE_SECONDS)
+                self._wakeup.clear()
+        finally:
+            self.store.close(checkpoint=False)
 
     def run_claimed(self, job_id):
         """Run a job already marked ``running`` and record how it ended."""
@@ -118,6 +146,8 @@ class Worker:
         with job_context(job_id):
             try:
                 self.run_job(job_id, self.cancellation_requested)
+            except WorkerStopping:
+                event("worker_job_interrupted", job_id=job_id, status="interrupted")
             except Cancelled:
                 self.store.update_job(job_id, status="cancelled", stage="Cancelled", phase_code="cancelled",
                                       error="", error_code="cancelled")

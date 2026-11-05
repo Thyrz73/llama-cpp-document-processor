@@ -163,6 +163,57 @@ class ShutdownTests(unittest.TestCase):
             with closing(sqlite3.connect(copy)) as con:
                 self.assertEqual(con.execute("SELECT status FROM jobs").fetchall(), [("failed",)])
 
+    @unittest.skipUnless(os.name == "posix", "SIGTERM is a POSIX signal")
+    def test_sigterm_during_worker_transaction_waits_for_commit_before_main_checkpoint(self):
+        script = """
+import os, runpy, signal, threading
+import waitress
+
+def serve(app, **kwargs):
+    context = app.view_functions['health'].__globals__
+    store, worker = context['store'], context['worker']
+    entered = threading.Event()
+    def run(job_id, check):
+        store.update_job(job_id, progress_percent=25)
+        with store.connect() as con:
+            con.execute('UPDATE jobs SET progress_percent=41 WHERE id=?', (job_id,))
+            entered.set()
+            if not worker._stopping.wait(3):
+                raise RuntimeError('Test did not request shutdown')
+        check(job_id)
+    worker.run_job = run
+    store.create_job('a' * 32, 'test.pdf', 'Summarize', 1, {'max_attempts': 3})
+    worker.wake()
+    if not entered.wait(3):
+        raise RuntimeError('Worker did not start the test transaction')
+    os.kill(os.getpid(), signal.SIGTERM)
+
+waitress.serve = serve
+runpy.run_path('app.py', run_name='__main__')
+"""
+        with tempfile.TemporaryDirectory(prefix="shutdown-transaction-test-") as data:
+            env = {key: value for key, value in os.environ.items() if key not in COMPOSE_DEFAULTS}
+            env.update(DATA_DIR=data, SYSTEM_PROMPT_FILE=str(ROOT / "config/system_prompt.example.txt"))
+            started = time.monotonic()
+            result = subprocess.run([sys.executable, "-c", script], cwd=ROOT, env=env,
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertLess(time.monotonic() - started, 8)
+            self.assertIn('worker_stopped=true', result.stderr)
+            self.assertNotIn("worker_shutdown_timeout", result.stderr)
+            copy = Path(data) / "copy.sqlite3"
+            shutil.copy(Path(data) / "jobs.sqlite3", copy)
+            with closing(sqlite3.connect(copy)) as con:
+                self.assertEqual(con.execute("SELECT status,progress_percent,cancel_requested FROM jobs").fetchall(),
+                                 [("running", 41, 0)])
+            from document_processor.jobs import JobStore
+            store = JobStore(data)
+            try:
+                store.initialize()
+                self.assertEqual(store.get_job("a" * 32)["status"], "queued")
+            finally:
+                store.close()
+
 
 if __name__ == "__main__":
     unittest.main()

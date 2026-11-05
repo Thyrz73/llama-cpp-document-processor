@@ -748,12 +748,13 @@ if __name__ == "__main__":
         store.initialize()
     except SchemaVersionError as exc:
         raise SystemExit(f"Database error: {exc}") from None
-    worker.start()
-    log.info("processor_started port=%s", APP_PORT)
-    # docker stop sends SIGTERM. Make it a normal exit: waitress stops, then the database is closed cleanly.
+    # SIGTERM also interrupts a running job cooperatively, without cancelling it permanently.
     signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(0))
     try:
+        worker.start()
+        log.info("processor_started port=%s", APP_PORT)
         serve(app, host="0.0.0.0", port=APP_PORT, threads=4)
     finally:
+        stopped = worker.stop()
         store.close()
-        event("processor_stopped", status="stopped")
+        event("processor_stopped", status="stopped", worker_stopped=stopped)

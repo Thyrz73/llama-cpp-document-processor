@@ -71,12 +71,14 @@ class JobStore:
         """
         return self._connections.transaction()
 
-    def close(self):
-        """Fold the write-ahead log into the database file and close this thread's connection.
+    def close(self, *, checkpoint=True):
+        """Close only the caller's connection, optionally attempting a WAL checkpoint.
 
-        Call it from the main thread when the process stops (see ThreadConnections.close).
+        The worker uses checkpoint=False; the main thread makes the final
+        attempt after waiting for it. Preserve WAL files if a checkpoint is
+        incomplete or other writers may still commit (see ThreadConnections.close).
         """
-        self._connections.close()
+        self._connections.close(checkpoint=checkpoint)
 
     def initialize(self):
         """Create the data directory and schema, then recover jobs cut short by a restart."""

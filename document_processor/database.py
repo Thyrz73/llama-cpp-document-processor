@@ -22,6 +22,8 @@ from datetime import datetime, timezone
 
 from .observability import event
 
+CHECKPOINT_TIMEOUT_MS = 1000
+
 
 class SchemaVersionError(RuntimeError):
     """The database was upgraded by a newer version of the application."""
@@ -115,21 +117,35 @@ class ThreadConnections:
         finally:
             local.busy = False
 
-    def close(self):
-        """Fold the write-ahead log into the database file, then close this thread's connection.
+    def close(self, *, checkpoint=True):
+        """Close this thread's connection, optionally attempting a bounded checkpoint.
 
-        Call it when the process stops, so that the database file alone holds
-        every committed change. The connection of another thread may stay
-        open: an idle one does not prevent the folding. If it fails, the next
-        start recovers the log anyway.
+        Other threads keep their own connections. A busy or failed checkpoint
+        leaves committed changes recoverable through the WAL; it is never a
+        promise that the database file alone is a complete backup. The worker
+        skips this attempt and lets the main thread checkpoint after joining it.
         """
+        if getattr(self._local, "busy", False):
+            raise RuntimeError("Cannot close a connection during a database transaction.")
         con, self._local.connection = getattr(self._local, "connection", None), None
         if con is None:
             return
         try:
-            # A thread that is writing only delays the folding: do not hold up the shutdown.
-            con.execute("PRAGMA busy_timeout=1000")
-            con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            if checkpoint:
+                con.execute(f"PRAGMA busy_timeout={CHECKPOINT_TIMEOUT_MS}")
+                row = con.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+                if row is None:
+                    event("sqlite_checkpoint_incomplete", logging.WARNING, status="unavailable")
+                else:
+                    busy, frames, copied = row
+                    if busy or frames != copied:
+                        event("sqlite_checkpoint_incomplete", logging.WARNING,
+                              status="busy" if busy else "incomplete", busy=busy,
+                              wal_frames=frames, checkpointed_frames=copied)
+                    else:
+                        event("sqlite_checkpoint", logging.DEBUG,
+                              status="not_wal" if frames == -1 else "complete",
+                              wal_frames=frames, checkpointed_frames=copied)
         except sqlite3.Error as exc:
             event("sqlite_checkpoint_failed", logging.WARNING, error_type=type(exc).__name__)
         finally:

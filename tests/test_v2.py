@@ -3,13 +3,14 @@
 import io
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 import app
 from document_processor import config, extraction, pipeline, prompts, worker
-from document_processor.errors import Cancelled, ModelError, ProcessingError
+from document_processor.errors import Cancelled, ModelError, ProcessingError, WorkerStopping
 from document_processor.files import atomic_json, file_hash
 from document_processor.jobs import JobStore
 from document_processor.worker import Worker
@@ -293,6 +294,44 @@ class V2Tests(unittest.TestCase):
         self.assertGreaterEqual(metrics["summary"]["reused_steps"], 2)
         self.assertEqual(app.store.load_config(identifier), snapshot)
 
+    def test_worker_shutdown_interrupts_attempt_without_cancelling_job_and_restart_resumes(self):
+        identifier = self.create({"profile": "low"})
+        snapshot = app.store.load_config(identifier)
+        entered = threading.Event()
+        runner = Worker(app.store, app.analyze_job)
+
+        class ShutdownModel(FakeModel):
+            def complete(model, *args, **kwargs):
+                entered.set()
+                if not runner._stopping.wait(3):
+                    raise RuntimeError("Test shutdown was not requested")
+                model.check_cancelled()
+                return super().complete(*args, **kwargs)
+
+        with patch.object(app, "ModelClient", ShutdownModel), \
+             patch.object(extraction, "extract_pdf", return_value=([{"page": 1, "text": "Measurements"}], 1, [], [])), \
+             patch.object(extraction, "make_chunks", return_value=[{"pages": [1], "text": "Measurements"}]):
+            runner.start()
+            try:
+                self.assertTrue(entered.wait(3))
+                self.assertTrue(runner.stop(timeout=2))
+            finally:
+                runner.stop(timeout=2)
+        stored = app.store.get_job(identifier)
+        self.assertEqual((stored["status"], stored["cancel_requested"], stored["error_code"]), ("running", 0, ""))
+        metrics = app.store.metrics(identifier)
+        self.assertEqual(metrics["runs"][0]["status"], "interrupted")
+        section = next(step for step in metrics["steps"] if step["stage"] == "section")
+        self.assertEqual((section["status"], section["metrics"]["stop_category"]), ("interrupted", "interrupted"))
+        self.assertNotIn("error_code", section["metrics"])
+        self.assertEqual(list(app.store.job_dir(identifier).glob("artifacts/*/analysis_0000.md")), [])
+        app.store.initialize()
+        self.assertEqual(app.store.get_job(identifier)["status"], "queued")
+        self.assertEqual(app.store.load_config(identifier), snapshot)
+        self.run_job(identifier, 1)
+        self.assertEqual(app.store.get_job(identifier)["status"], "done")
+        self.assertGreaterEqual(app.store.metrics(identifier)["summary"]["reused_steps"], 2)
+
     def test_cancellation_during_report_save_is_recorded_as_cancelled(self):
         identifier = self.create({"profile": "low"})
         original = pipeline.report_filename
@@ -311,6 +350,18 @@ class V2Tests(unittest.TestCase):
         self.assertEqual(metrics["runs"][0]["status"], "cancelled")
         saving = next(step for step in metrics["steps"] if step["stage"] == "saving")
         self.assertEqual((saving["status"], saving["metrics"]["error_code"]), ("cancelled", "cancelled"))
+        self.assertEqual(self.client.get(f"/api/jobs/{identifier}/report").status_code, 409)
+
+    def test_shutdown_during_report_save_is_interrupted_and_cannot_publish_done(self):
+        identifier = self.create({"profile": "low"})
+        with patch.object(pipeline, "report_filename", side_effect=WorkerStopping()), self.assertRaises(WorkerStopping):
+            self.run_job(identifier, 1)
+        self.assertEqual(app.store.get_job(identifier)["status"], "running")
+        metrics = app.store.metrics(identifier)
+        self.assertEqual(metrics["runs"][0]["status"], "interrupted")
+        saving = next(step for step in metrics["steps"] if step["stage"] == "saving")
+        self.assertEqual((saving["status"], saving["metrics"]["stop_category"]), ("interrupted", "interrupted"))
+        self.assertNotIn("error_code", saving["metrics"])
         self.assertEqual(self.client.get(f"/api/jobs/{identifier}/report").status_code, 409)
 
     def test_tampered_artifact_is_recomputed(self):
