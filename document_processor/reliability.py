@@ -9,6 +9,7 @@ never as instructions.
 """
 
 from collections import deque
+from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, localcontext
 import re
 import unicodedata
@@ -339,29 +340,52 @@ def _normalized(value):
     return ' '.join(re.findall(r"\w+", unicodedata.normalize('NFKC', value).casefold()))
 
 
-def _entity_in_line(entity, line):
+@dataclass(frozen=True)
+class PreparedEvidence:
+    """Attempt-local normalization of an unchanged evidence batch; never persisted."""
+
+    source: dict
+    version: int
+    entities: tuple[str, ...]
+    quotes: tuple[tuple[int, str], ...]
+
+
+def prepare_evidence(evidence, prepared=None):
+    """Prepare NFKC source strings once, retaining original rows and warning order."""
+    if prepared is not None and prepared.source is evidence and prepared.version == VERSION:
+        return prepared
+    items = [(item['page'], item['text']) for item in evidence['reserves']]
+    items += [(item['page'], item['raw']) for item in evidence['comparisons']]
+    return PreparedEvidence(evidence, VERSION,
+                            tuple(_normalized(item['entity']) for item in evidence['comparisons']),
+                            tuple((page, _normalized(text)) for page, text in items))
+
+
+def _entity_in_line(entity, line, normalized=None, candidate=None):
     # Exact label, or an explicitly extracted leading code: A · School / A — School.
-    normalized = _normalized(entity)
-    candidate = _normalized(line)
+    normalized = _normalized(entity) if normalized is None else normalized
+    candidate = _normalized(line) if candidate is None else candidate
     if normalized and re.search(r"(?<!\w)" + re.escape(normalized) + r"(?!\w)", candidate):
         return True
     code = re.match(r"^([A-Za-z0-9]{1,8})\s*[·—–-]\s*\S", entity)
     return bool(code and re.search(r"(?:^\s*[-*]?\s*" + re.escape(code[1]) + r"\s*:|\(" + re.escape(code[1]) + r"\))", line))
 
 
-def numeric_checks(answer, evidence, input_pages):
+def numeric_checks(answer, evidence, input_pages, *, prepared=None):
     """Flag only uniquely scoped, explicitly signed/labelled delta claims.
 
     Multiple records for an entity require exact periods/context in the claim,
     otherwise abstain. A possible mismatch is never an automatic correction.
     """
+    prepared = prepare_evidence(evidence, prepared)
     issues, checked, skipped = [], 0, 0
     for line in answer.splitlines():
         quantities = list(QUANTITY.finditer(line))
         if not quantities:
             continue
-        candidates = [item for item in evidence['comparisons'] if item['page'] in input_pages
-                      and _entity_in_line(item['entity'], line)]
+        normalized_line = _normalized(line)
+        candidates = [item for item, entity in zip(evidence['comparisons'], prepared.entities)
+                      if item['page'] in input_pages and _entity_in_line(item['entity'], line, entity, normalized_line)]
         refs = [int(m[1]) for m in PAGE_REFERENCE.finditer(line)]
         if refs:
             candidates = [item for item in candidates if item['page'] in refs]
@@ -437,10 +461,9 @@ def certainty_checks(answer, evidence, input_pages):
     return issues
 
 
-def quote_checks(answer, evidence, input_pages):
+def quote_checks(answer, evidence, input_pages, *, prepared=None):
     """Locate exact reserve/row quotations only; this does not validate a claim."""
-    items = [(item['page'], item['text']) for item in evidence['reserves']]
-    items += [(item['page'], item['raw']) for item in evidence['comparisons']]
+    prepared = prepare_evidence(evidence, prepared)
     issues = []
     for line in answer.splitlines():
         refs = {int(m[1]) for m in PAGE_REFERENCE.finditer(line)}
@@ -450,7 +473,7 @@ def quote_checks(answer, evidence, input_pages):
             quote = _normalized(next(part for part in match.groups() if part is not None))
             if len(quote) < 30:
                 continue
-            source_pages = {page for page, text in items if quote in _normalized(text)}
+            source_pages = {page for page, text in prepared.quotes if quote in text}
             # A line can cite several claims; abstain if it includes the quote's source.
             if len(source_pages) == 1 and source_pages <= set(input_pages) and refs.isdisjoint(source_pages):
                 issues.append({'code': 'quote_page_mismatch', 'reference': ', '.join(f'[Page {p}]' for p in sorted(refs)),
@@ -458,19 +481,21 @@ def quote_checks(answer, evidence, input_pages):
     return issues
 
 
-def audit(answer, evidence, input_pages):
+def audit(answer, evidence, input_pages, *, prepared=None):
     """Check one generated text against the source evidence.
 
     input_pages are the PDF pages this step received. Return the citation and
     numeric check details; "issues" lists every warning, including certainty
     wording and quotations found on another page.
     """
+    prepared = prepare_evidence(evidence, prepared)
     citations = citation_checks(answer, evidence['pdf_pages'], input_pages,
                                set(evidence['text_pages']) - set(evidence['missing']))
-    numeric = numeric_checks(answer, evidence, set(input_pages))
+    numeric = numeric_checks(answer, evidence, set(input_pages), prepared=prepared)
     return {"version": VERSION, "citations": citations, "numeric": numeric,
             "issues": citations['issues'] + numeric['issues']
-                      + certainty_checks(answer, evidence, input_pages) + quote_checks(answer, evidence, input_pages),
+                      + certainty_checks(answer, evidence, input_pages)
+                      + quote_checks(answer, evidence, input_pages, prepared=prepared),
             "semantic_validation": False}
 
 

@@ -15,6 +15,7 @@ retry reuses finished work instead of calling the model again. Mechanical
 checks (reliability.py) run on every generated text, including reused ones.
 """
 
+import copy
 import json
 import logging
 import re
@@ -135,6 +136,8 @@ class JobRun:
         self.quality: dict[str, Any] = {"version": reliability.VERSION, "steps": {}}
         self.identity: dict[str, Any] | None = None  # set by _prepare()
         self.evidence: dict[str, Any] | None = None  # set by _extract()
+        self._prepared_evidence: reliability.PreparedEvidence | None = None
+        self._generation_audit: tuple[str, tuple[int, ...], int, dict | None, dict] | None = None
 
     def execute(self):
         """Run every step, then record how the attempt ended and close the client."""
@@ -433,6 +436,9 @@ class JobRun:
         model.check_cancelled()
         generation = stage in GENERATION_STAGES
         if generation:
+            # Reused artifacts must be audited in this attempt, even if their text
+            # happens to match a generation from an earlier step.
+            self._generation_audit = None
             model.current_metrics = {}
             # Pre-fix artifacts may contain Latin-1-decoded UTF-8 even when
             # their file hashes are valid. Recompute on an explicit retry;
@@ -473,6 +479,7 @@ class JobRun:
 
     def _generate(self, stage, instruction, text, budget, source_pages):
         """Call the model once within the call budget, publishing bounded previews."""
+        self._generation_audit = None
         if self.calls >= self.config["max_calls"]:
             raise ProcessingError("call_limit", "The job exceeded its generation-call limit.")
         self.calls += 1
@@ -509,7 +516,9 @@ class JobRun:
                     failure("preview_checkpoint_failed", exc, job_id=self.job_id)
             raise
         # Public metrics contain counts only; detailed source values stay local.
-        check = reliability.audit(answer, self.evidence, source_pages)
+        source_pages = tuple(sorted(set(source_pages)))
+        check = self._audit(answer, source_pages)
+        self._generation_audit = (answer, source_pages, reliability.VERSION, self.evidence, check)
         # Retain historical recall counters for benchmark/API compatibility.
         # These raw-string differences are not numerical or citation validation.
         references = set(reliability.PAGE_REFERENCE.findall(text))
@@ -525,13 +534,24 @@ class JobRun:
             "missing_numeric_items": len(numbers - output_numbers)}
         return answer
 
+    def _audit(self, text, source_pages):
+        """Share only normalization of this attempt's unchanged source evidence."""
+        self._prepared_evidence = reliability.prepare_evidence(self.evidence, self._prepared_evidence)
+        return reliability.audit(text, self.evidence, source_pages, prepared=self._prepared_evidence)
+
     def _check(self, name, text, source_pages, sections, evidence_limit=None):
         """Run the reliability checks on a generated text, new or reused, and save the results.
 
         The results, with the pages and sections the step covered, go to
         quality_checks.json rather than into the Markdown text.
         """
-        check = reliability.audit(text, self.evidence, source_pages)
+        source_pages = tuple(sorted(set(source_pages)))
+        pending, self._generation_audit = self._generation_audit, None
+        if (pending is not None and pending[:3] == (text, source_pages, reliability.VERSION)
+                and pending[3] is self.evidence):
+            check = copy.deepcopy(pending[4])
+        else:
+            check = self._audit(text, source_pages)
         check.update(input_pages=sorted(set(source_pages)), source_sections=sorted(set(sections)))
         if evidence_limit is not None:
             check["evidence_prompt_limit"] = evidence_limit
