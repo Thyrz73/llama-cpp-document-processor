@@ -19,7 +19,6 @@ import copy
 import hashlib
 import json
 import logging
-import os
 import re
 import signal
 import sqlite3
@@ -60,58 +59,51 @@ from document_processor.jobs import (
 )
 from document_processor.model_client import ModelClient as BackendClient
 from document_processor.observability import configure_logging, event, failure
+from document_processor.settings import Settings
 from document_processor.worker import Worker
 
-# Read the configuration once when the process starts.
-# Docker Compose passes variables from its .env file to the container.
-# config.resolve() repeats the job-level range checks at startup.
+# Compose supplies the environment; the application does not load .env.
 try:
-    APP_PORT = environment.integer("APP_PORT", 9932, maximum=65535)
-    DATA = Path(os.getenv("DATA_DIR") or "/app/data")
-    LLAMA_BASE = environment.http_url(
-        "LLAMA_BASE_URL", "http://host.docker.internal:8080"
-    )
-    KEY = os.getenv("LLAMA_API_KEY", "")
-    MAX_UPLOAD_MB = environment.integer("MAX_UPLOAD_MB", 20)
-    MAX_PAGES = environment.integer("MAX_PAGES", 120)
-    CHUNK_TOKENS = environment.integer("CHUNK_TOKENS", 3000)
-    CONTEXT_TOKENS = environment.integer("CONTEXT_TOKENS", 16384)
-    OUTPUT_LANGUAGE = os.getenv("OUTPUT_LANGUAGE", "auto").strip() or "auto"
-    ANALYSIS_TOKENS = environment.integer("ANALYSIS_TOKENS", 1000)
-    MERGE_TOKENS = environment.integer("MERGE_TOKENS", 1200)
-    FINAL_TOKENS = environment.integer("FINAL_TOKENS", 1800)
-    REQUEST_TIMEOUT = environment.integer("REQUEST_TIMEOUT_SECONDS", 21600)
-    STEP_TIMEOUT = environment.integer("STEP_TIMEOUT_SECONDS", REQUEST_TIMEOUT)
-    MAX_MODEL_CALLS = environment.integer("MAX_MODEL_CALLS", 500)
-    MAX_JOB_ATTEMPTS = environment.integer("MAX_JOB_ATTEMPTS", 10)
-    LIVE_OUTPUT_ENABLED = environment.flag("LIVE_OUTPUT_ENABLED", True)
-    LIVE_PREVIEW_CHARS = max(
-        1000, min(environment.integer("LIVE_PREVIEW_CHARS", 12000), 50000)
-    )
-    OCR_ENABLED = environment.flag("OCR_ENABLED", True)
-    OCR_LANGUAGES = os.getenv("OCR_LANGUAGES", "").strip() or "eng+fra"
-    OCR_DPI = environment.integer("OCR_DPI", 150)
-    OCR_MAX_PIXELS = environment.integer("OCR_MAX_PIXELS", 5000000)
-    OCR_TIMEOUT = environment.integer("OCR_TIMEOUT_SECONDS", 180)
-    THINKING_ADAPTER = environment.choice(
-        "LLAMA_THINKING_ADAPTER",
-        "unsupported",
-        ("unsupported", "chat_template", "prompt"),
-    )
-    INITIAL_THINKING = environment.flag("LLAMA_INITIAL_THINKING", False)
-    APPLY_TEMPLATE_SUPPORTED = environment.flag("LLAMA_APPLY_TEMPLATE_SUPPORTED", False)
-    USAGE_SUPPORTED = environment.flag("LLAMA_USAGE_SUPPORTED", False)
-    SYSTEM_FILE = Path(
-        os.getenv("SYSTEM_PROMPT_FILE") or "/app/config/system_prompt.txt"
-    )
+    SETTINGS = Settings.from_env()
 except environment.SettingsError as exc:
     raise SystemExit(f"Configuration error: {exc}") from None
+
+# Compatibility exports for callers/tests that still patch app's deployment globals.
+# deployment_settings() is the only bridge back to Settings; no environment is reread.
+APP_PORT = SETTINGS.app_port
+DATA = SETTINGS.data_dir
+LLAMA_BASE = SETTINGS.llama_base_url
+KEY = SETTINGS.api_key
+REQUEST_TIMEOUT = SETTINGS.request_timeout
+STEP_TIMEOUT = SETTINGS.step_timeout
+OCR_TIMEOUT = SETTINGS.ocr_timeout
+SYSTEM_FILE = SETTINGS.system_prompt_file
+MAX_UPLOAD_MB = SETTINGS.max_upload_mb
+MAX_PAGES = SETTINGS.max_pages
+CHUNK_TOKENS = SETTINGS.chunk_tokens
+CONTEXT_TOKENS = SETTINGS.context_tokens
+OUTPUT_LANGUAGE = SETTINGS.output_language
+ANALYSIS_TOKENS = SETTINGS.analysis_tokens
+MERGE_TOKENS = SETTINGS.merge_tokens
+FINAL_TOKENS = SETTINGS.final_tokens
+MAX_MODEL_CALLS = SETTINGS.max_model_calls
+MAX_JOB_ATTEMPTS = SETTINGS.max_job_attempts
+LIVE_OUTPUT_ENABLED = SETTINGS.live_output_enabled
+LIVE_PREVIEW_CHARS = SETTINGS.live_preview_chars
+OCR_ENABLED = SETTINGS.ocr_enabled
+OCR_LANGUAGES = SETTINGS.ocr_languages
+OCR_DPI = SETTINGS.ocr_dpi
+OCR_MAX_PIXELS = SETTINGS.ocr_max_pixels
+THINKING_ADAPTER = SETTINGS.thinking_adapter
+INITIAL_THINKING = SETTINGS.initial_thinking
+APPLY_TEMPLATE_SUPPORTED = SETTINGS.apply_template_supported
+USAGE_SUPPORTED = SETTINGS.usage_supported
 MAX_QUESTION_CHARS = 1500
 
 configure_logging()
 log = logging.getLogger("document-processor")
 # All job records and files live under DATA; see document_processor/jobs.py.
-store = JobStore(DATA)
+store = JobStore(SETTINGS.data_dir)
 
 
 class ProcessorFlask(Flask):
@@ -121,7 +113,7 @@ class ProcessorFlask(Flask):
 
 
 app = ProcessorFlask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_MB * 1024 * 1024 + 65536
+app.config["MAX_CONTENT_LENGTH"] = SETTINGS.max_content_length
 TRANSLATIONS = json.loads(
     (Path(__file__).parent / "static" / "translations.json").read_text(encoding="utf-8")
 )
@@ -155,69 +147,78 @@ def public_job(job):
 # Job configuration and the llama.cpp client -----------------------------------
 
 
-def read_system_prompt():
+def read_system_prompt(settings: Settings | None = None):
     """Read the system prompt file and strip surrounding whitespace.
 
     New jobs save this text in their snapshot; existing jobs keep their copy.
     Raise ConfigurationError when the file is missing or unreadable.
     """
     try:
-        return SYSTEM_FILE.read_text(encoding="utf-8").strip()
+        deployment = deployment_settings() if settings is None else settings
+        return deployment.system_prompt_file.read_text(encoding="utf-8").strip()
     except (OSError, UnicodeError):
         raise job_config.ConfigurationError(
             "missing_prompt", "The system prompt is missing or unreadable."
         ) from None
 
 
-def runtime_defaults():
-    """Return the deployment's default job configuration, read from the environment.
+def deployment_settings() -> Settings:
+    """Adapt the legacy app globals without changing the frozen process snapshot.
 
-    New jobs start from it; existing jobs keep the configuration of their snapshot.
+    Existing monkeypatches remain effective. New code can pass Settings explicitly;
+    keep this compatibility mapping here until callers stop patching the globals.
+    Construction performs no environment/file reads or job-level revalidation.
     """
-    return {
-        "chunk_tokens": CHUNK_TOKENS,
-        "context_tokens": CONTEXT_TOKENS,
-        "analysis_tokens": ANALYSIS_TOKENS,
-        "merge_tokens": MERGE_TOKENS,
-        "final_tokens": FINAL_TOKENS,
-        "report_language": OUTPUT_LANGUAGE,
-        "temperature": 0.2,
-        "top_p": None,
-        "top_k": None,
-        "min_p": None,
-        "thinking_section": "inherit",
-        "thinking_merge": "inherit",
-        "thinking_final": "inherit",
-        "thinking_adapter": THINKING_ADAPTER,
-        "initial_thinking": INITIAL_THINKING,
-        "apply_template": APPLY_TEMPLATE_SUPPORTED,
-        "usage_supported": USAGE_SUPPORTED,
-        "request_timeout": REQUEST_TIMEOUT,
-        "step_timeout_seconds": STEP_TIMEOUT,
-        "max_calls": MAX_MODEL_CALLS,
-        "max_attempts": MAX_JOB_ATTEMPTS,
-        "extraction": {
-            "version": 3,
-            "enabled": OCR_ENABLED,
-            "languages": OCR_LANGUAGES,
-            "dpi": OCR_DPI,
-            "max_pixels": OCR_MAX_PIXELS,
-            "timeout": OCR_TIMEOUT,
-            "max_pages": MAX_PAGES,
-        },
-    }
+    return Settings(
+        app_port=APP_PORT,
+        data_dir=DATA,
+        llama_base_url=LLAMA_BASE,
+        api_key=KEY,
+        request_timeout=REQUEST_TIMEOUT,
+        step_timeout=STEP_TIMEOUT,
+        ocr_timeout=OCR_TIMEOUT,
+        system_prompt_file=SYSTEM_FILE,
+        max_upload_mb=MAX_UPLOAD_MB,
+        max_pages=MAX_PAGES,
+        chunk_tokens=CHUNK_TOKENS,
+        context_tokens=CONTEXT_TOKENS,
+        output_language=OUTPUT_LANGUAGE,
+        analysis_tokens=ANALYSIS_TOKENS,
+        merge_tokens=MERGE_TOKENS,
+        final_tokens=FINAL_TOKENS,
+        max_model_calls=MAX_MODEL_CALLS,
+        max_job_attempts=MAX_JOB_ATTEMPTS,
+        live_output_enabled=LIVE_OUTPUT_ENABLED,
+        live_preview_chars=LIVE_PREVIEW_CHARS,
+        ocr_enabled=OCR_ENABLED,
+        ocr_languages=OCR_LANGUAGES,
+        ocr_dpi=OCR_DPI,
+        ocr_max_pixels=OCR_MAX_PIXELS,
+        thinking_adapter=THINKING_ADAPTER,
+        initial_thinking=INITIAL_THINKING,
+        apply_template_supported=APPLY_TEMPLATE_SUPPORTED,
+        usage_supported=USAGE_SUPPORTED,
+    )
 
 
-def new_snapshot(options, capabilities=None):
+def runtime_defaults(settings: Settings | None = None) -> dict[str, Any]:
+    """Return fresh job defaults from explicit settings or the compatibility bridge."""
+    return (deployment_settings() if settings is None else settings).job_defaults()
+
+
+def new_snapshot(options, capabilities=None, *, settings: Settings | None = None):
     """Resolve options into the configuration snapshot of a new job.
 
     The snapshot includes the current system prompt and task templates, so a
     retry uses the same text even after these files change. Raise
     ConfigurationError for invalid options or an empty system prompt.
     """
-    config = job_config.resolve(runtime_defaults(), options, capabilities)
+    defaults = runtime_defaults() if settings is None else runtime_defaults(settings)
+    config = job_config.resolve(defaults, options, capabilities)
     config.update(
-        system_prompt=read_system_prompt(),
+        system_prompt=(
+            read_system_prompt() if settings is None else read_system_prompt(settings)
+        ),
         templates=dict(prompts.TEMPLATES),
         prompt_version=prompts.PROMPT_VERSION,
     )
@@ -236,12 +237,13 @@ CAPABILITY_FAILURE_CACHE_SECONDS = 5
 
 def capability_backend(client=None):
     """Identify the configured backend privately, without retaining another credential copy."""
-    base = LLAMA_BASE if client is None else client.base_url
-    authorization = (
-        (f"Bearer {KEY}" if KEY else "")
-        if client is None
-        else client.session.headers.get("Authorization", "")
-    )
+    if client is None:
+        settings = deployment_settings()
+        base = settings.llama_base_url
+        authorization = f"Bearer {settings.api_key}" if settings.api_key else ""
+    else:
+        base = client.base_url
+        authorization = client.session.headers.get("Authorization", "")
     return base.rstrip("/"), hashlib.sha256(authorization.encode("utf-8")).digest()
 
 
@@ -286,15 +288,27 @@ def invalidate_capabilities(client):
 class ModelClient(BackendClient):
     """Bind the reusable backend adapter to this application's deployment settings."""
 
-    def __init__(self, config=None):
-        settings = config if config is not None else runtime_defaults()
-        prompt = settings.get("system_prompt")
+    def __init__(self, config=None, *, settings: Settings | None = None):
+        deployment = deployment_settings() if settings is None else settings
+        job_settings = config
+        if job_settings is None:
+            job_settings = (
+                runtime_defaults() if settings is None else runtime_defaults(deployment)
+            )
+        prompt = job_settings.get("system_prompt")
+        if prompt is None:
+            # Keep the no-argument hook used by existing app monkeypatches.
+            prompt = (
+                read_system_prompt()
+                if settings is None
+                else read_system_prompt(deployment)
+            )
         super().__init__(
-            LLAMA_BASE,
-            KEY,
-            settings,
-            read_system_prompt() if prompt is None else prompt,
-            LIVE_PREVIEW_CHARS,
+            deployment.llama_base_url,
+            deployment.api_key,
+            job_settings,
+            prompt,
+            deployment.live_preview_chars,
         )
 
     def inspect(self, *, cached=None):
@@ -370,6 +384,7 @@ def analyze_job(job_id, cancellation_requested=None):
     The worker passes its own cancellation check; without one, every check
     reads SQLite.
     """
+    settings = deployment_settings()
     pipeline.run(
         job_id,
         pipeline.Runtime(
@@ -377,8 +392,8 @@ def analyze_job(job_id, cancellation_requested=None):
             new_snapshot=new_snapshot,
             model_client=ModelClient,
             cancellation_requested=cancellation_requested or store.read_cancellation,
-            live_output=LIVE_OUTPUT_ENABLED,
-            preview_chars=LIVE_PREVIEW_CHARS,
+            live_output=settings.live_output_enabled,
+            preview_chars=settings.live_preview_chars,
         ),
     )
 
@@ -401,7 +416,11 @@ def job_directory(job_id):
 @app.get("/")
 def index():
     """Serve the interface page with its upload limit and translations."""
-    return render_template("index.html", limit=MAX_UPLOAD_MB, translations=TRANSLATIONS)
+    return render_template(
+        "index.html",
+        limit=deployment_settings().max_upload_mb,
+        translations=TRANSLATIONS,
+    )
 
 
 @app.get("/api/health")
@@ -455,7 +474,13 @@ def diagnostics():
         value = cached_capabilities()
         if value is None:
             # Inspection needs no private system prompt and launches no completion.
-            client = BackendClient(LLAMA_BASE, KEY, runtime_defaults(), "")
+            settings = deployment_settings()
+            client = BackendClient(
+                settings.llama_base_url,
+                settings.api_key,
+                runtime_defaults(settings),
+                "",
+            )
             try:
                 value = client.inspect()
                 event(
@@ -480,7 +505,7 @@ def diagnostics():
     return jsonify(
         backend=value,
         application={
-            "context_limit": CONTEXT_TOKENS,
+            "context_limit": deployment_settings().context_tokens,
             "concurrency": 1,
             "process_rss_kib": process_rss_kib,
             "resource_scope": "processor_only",
@@ -611,7 +636,7 @@ def create_job():
     source = directory / SOURCE_FILE
     try:
         uploaded.save(source)
-        if source.stat().st_size > MAX_UPLOAD_MB * 1024 * 1024:
+        if source.stat().st_size > deployment_settings().max_upload_bytes:
             raise RequestEntityTooLarge()
         config["source_hash"] = file_hash(source)
         store.create_job(
@@ -652,13 +677,14 @@ def job_live(job_id):
     if not job:
         abort(404)
     path = job_directory(job_id) / PREVIEW_FILE
-    if not LIVE_OUTPUT_ENABLED:
+    settings = deployment_settings()
+    if not settings.live_output_enabled:
         return jsonify(
             phase=job["stage"],
             content="",
             reasoning="",
             active=False,
-            enabled=LIVE_OUTPUT_ENABLED,
+            enabled=settings.live_output_enabled,
         )
     payload = store.previews.get(job_id)
     if payload is not None and payload.get("_attempt_id") != attempt_id:
@@ -696,7 +722,9 @@ def job_live(job_id):
     payload.pop("_attempt_id", None)
     for field in ("content", "reasoning"):
         value = payload.get(field, "")
-        payload[field] = value[-LIVE_PREVIEW_CHARS:] if isinstance(value, str) else ""
+        payload[field] = (
+            value[-settings.live_preview_chars :] if isinstance(value, str) else ""
+        )
     # The last file may have been written before the job completed or failed.
     payload["active"] = bool(payload.get("active") and job["status"] == "running")
     if payload["active"] and payload.get("started_at"):
@@ -756,7 +784,7 @@ def retry_job(job_id):
             error="Retry uses the original snapshot. Create a new job to change options.",
             error_code="immutable_config",
         ), 400
-    outcome, attempts = store.requeue(job_id, MAX_JOB_ATTEMPTS)
+    outcome, attempts = store.requeue(job_id, deployment_settings().max_job_attempts)
     if outcome == "limit":
         return jsonify(
             error="The retry limit was reached. Create a new analysis.",
@@ -987,7 +1015,8 @@ def too_large(_):
     """
     event("upload_rejected", logging.WARNING, error_code="upload_limit")
     return jsonify(
-        error=f"PDF too large (limit: {MAX_UPLOAD_MB} MiB)", error_code="upload_limit"
+        error=f"PDF too large (limit: {deployment_settings().max_upload_mb} MiB)",
+        error_code="upload_limit",
     ), 413
 
 
@@ -1030,8 +1059,8 @@ if __name__ == "__main__":
     signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(0))
     try:
         worker.start()
-        log.info("processor_started port=%s", APP_PORT)
-        serve(app, host="0.0.0.0", port=APP_PORT, threads=4)
+        log.info("processor_started port=%s", SETTINGS.app_port)
+        serve(app, host="0.0.0.0", port=SETTINGS.app_port, threads=4)
     finally:
         stopped = worker.stop()
         store.close()

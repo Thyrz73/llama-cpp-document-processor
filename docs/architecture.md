@@ -23,8 +23,9 @@ There is one process, one worker thread and a few web threads. SQLite holds the 
 
 | File | Responsibility |
 | --- | --- |
-| `app.py` | Deployment settings, Flask routes and startup. Only HTTP handling and wiring. |
-| `document_processor/environment.py` | Reads environment variables; errors name the variable. |
+| `app.py` | Flask routes, startup and the deployment-settings compatibility boundary. Only HTTP handling and wiring. |
+| `document_processor/settings.py` | Immutable deployment scalars and paths, loaded explicitly by `Settings.from_env()`; fresh job defaults. |
+| `document_processor/environment.py` | Parses environment variables; errors name the variable. |
 | `document_processor/config.py` | Turns job options into an immutable, validated configuration snapshot. |
 | `document_processor/profiles.py` | The `low`…`ultra` token budget profiles. |
 | `document_processor/prompts.py` | Task prompt templates, report header and language helpers. |
@@ -45,6 +46,16 @@ There is one process, one worker thread and a few web threads. SQLite holds the 
 | `static/`, `templates/` | Page template, styles, report viewer script and the English/French `translations.json`. |
 | `scripts/` | `check_jobs.py` (read-only data check) and `benchmark.py`. |
 | `tests/` | `unittest` suites and the Node.js interface tests (`test_polling.js`). |
+
+## Deployment settings
+
+Importing `document_processor.settings` performs no environment reads, file access, logging setup or service initialization. `app.py` calls `Settings.from_env()` once when it loads; Compose supplies `.env` values, and Python never reads `.env` itself. The frozen, slotted dataclass contains only immutable scalars and `Path` values. Credentials, backend URLs and local paths are excluded from its representation. `job_defaults()` returns fresh dictionaries without credentials, backend URLs or paths; public snapshots still pass through `config.public_config()`.
+
+Validation keeps its existing two stages: `from_env()` applies `environment.py` parsing and individual environment bounds in their original order; `config.resolve()` checks job limits and cross-budget consistency when the server starts and when jobs/configurations are resolved. Relative paths, unstripped keys, request/step timeout fallback and the 1,000–50,000 live-preview clamp retain their previous semantics. The Flask request limit remains the upload MiB limit plus 65,536 bytes for multipart data.
+
+`app.SETTINGS` is the initial process snapshot. As a temporary compatibility boundary, the existing uppercase `app` globals are still initialized from it, and `app.deployment_settings()` explicitly copies their current values into a `Settings` object. This keeps existing monkeypatches effective without rereading the environment or mutating `SETTINGS`. Process initialization (store, Flask request limit and listening port) still uses the initial values. New callers can pass `settings=` to `app.runtime_defaults()`, `app.new_snapshot()`, `app.read_system_prompt()` and `app.ModelClient()`; tests can use `dataclasses.replace()` to create an override. Keep legacy globals and their mapping confined to `app.py` until callers no longer depend on those patches. No-argument prompt/default hooks remain usable by existing tests.
+
+Only the system prompt's **path** belongs to `Settings`. `read_system_prompt()` reads its current UTF-8 content for a new snapshot (or a client without a saved prompt); editing the file affects new jobs, while existing jobs and retries keep their saved text. Missing, unreadable and empty prompts retain their existing errors. Neither parsing settings nor building default dictionaries reads or validates prompt contents.
 
 ## Life of a job
 
@@ -107,7 +118,7 @@ The application targets small machines. The defaults are 512 MB of memory and 0.
 
 | Change | Where | Checked by |
 | --- | --- | --- |
-| Add a setting | Read it in `app.py` with `environment.*`, then add it to `compose.yaml`, `.env.example` and the README table | Add it to the `names` table of `tests/test_environment.py`, which compares code and Compose defaults |
+| Add a setting | Add a field and parse it in `Settings.from_env()` with `environment.*`; update the temporary exports/adapter in `app.py`, `compose.yaml`, `.env.example` and the README table | Extend `tests/test_settings.py` and the `names` table of `tests/test_environment.py`, which compares code and Compose defaults |
 | Change the database schema | Append a function to `database.MIGRATIONS`; never edit a released one | `tests/test_database.py` |
 | Add an error | `raise ProcessingError("my_code", "Message.")`, then add `error.my_code` to both languages | `tests/test_errors.py` |
 | Change a task prompt | `prompts.TEMPLATES`, and increase `PROMPT_VERSION` | Existing jobs keep their saved prompts |
@@ -123,5 +134,6 @@ Run the commands from the README's Development section. Python tests use tempora
 - `test_progress.py`: job states and progress, restart recovery and the worker loop.
 - `test_public_configs.py`: bounded public-only configuration caching, fingerprint changes, invalidation, concurrent list reads and active jobs outside the visible history.
 - `test_database.py`, `test_worker_shutdown.py`: migrations, connection reuse/ownership, rollback, concurrent checkpoints, bounded shutdown, SQLite backup and WAL recovery after abrupt process exit.
+- `test_settings.py`: deployment defaults/overrides, validation stages, immutable values, isolated defaults, import behavior, compatibility globals, explicit injection and editable prompts.
 - `test_architecture.py`, `test_errors.py`, `test_environment.py`, `test_dependencies.py`: guards against import cycles, untranslated errors, configuration drift and diverging dependency locks. `test_environment.py` checks real HTTP shutdown after a completed job, plus the application SIGTERM path during a simulated worker transaction. Single-file checks apply to these quiescent test scenarios, not every production stop.
 - `test_polling.js`: the interface modules against a simulated browser: polling, rendering, live output, settings and history, run with Node.js.
