@@ -12,7 +12,10 @@ from urllib.parse import urlsplit
 import requests
 
 os.environ.setdefault("DATA_DIR", tempfile.mkdtemp(prefix="pdf-capability-test-"))
-os.environ.setdefault("SYSTEM_PROMPT_FILE", str(Path(__file__).resolve().parents[1] / "config/system_prompt.example.txt"))
+os.environ.setdefault(
+    "SYSTEM_PROMPT_FILE",
+    str(Path(__file__).resolve().parents[1] / "config/system_prompt.example.txt"),
+)
 
 import app
 from document_processor.config import ConfigurationError
@@ -23,14 +26,19 @@ class CapabilityTests(unittest.TestCase):
     def setUp(self):
         self.now = 100.0
         self.models = {"data": [{"id": "private/model-one"}]}
-        self.props = {"default_generation_settings": {"n_ctx": 16384}, "chat_template": "template-one"}
+        self.props = {
+            "default_generation_settings": {"n_ctx": 16384},
+            "chat_template": "template-one",
+        }
         self.calls = []
         self.unavailable = False
-        for target, name, value in ((app, "_capability_cache", {"value": None, "expires": 0}),
-                                    (app, "_capability_lock", threading.Lock()),
-                                    (app, "read_system_prompt", lambda: "PRIVATE_PROMPT"),
-                                    (app.time, "time", lambda: self.now + 1000),
-                                    (app.time, "monotonic", lambda: self.now)):
+        for target, name, value in (
+            (app, "_capability_cache", {"value": None, "expires": 0}),
+            (app, "_capability_lock", threading.Lock()),
+            (app, "read_system_prompt", lambda: "PRIVATE_PROMPT"),
+            (app.time, "time", lambda: self.now + 1000),
+            (app.time, "monotonic", lambda: self.now),
+        ):
             patcher = patch.object(target, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -46,7 +54,9 @@ class CapabilityTests(unittest.TestCase):
             raise requests.ConnectionError("PRIVATE_BACKEND_ERROR")
         response = requests.Response()
         response.status_code = 200
-        response._content = json.dumps(self.models if path == "/v1/models" else self.props).encode()
+        response._content = json.dumps(
+            self.models if path == "/v1/models" else self.props
+        ).encode()
         response._content_consumed = True
         return response
 
@@ -74,7 +84,9 @@ class CapabilityTests(unittest.TestCase):
         self.now += 1
         refreshed = self.diagnostics()
         self.assertNotEqual(first["observed_at"], refreshed["observed_at"])
-        self.assertEqual(self.calls, ["/v1/models", "/props", "/v1/models", "/v1/models", "/props"])
+        self.assertEqual(
+            self.calls, ["/v1/models", "/props", "/v1/models", "/v1/models", "/props"]
+        )
 
     def test_diagnostic_inspection_also_supplies_properties_to_the_next_job(self):
         observed = self.diagnostics()
@@ -85,7 +97,10 @@ class CapabilityTests(unittest.TestCase):
         previous = self.client().inspect()
         # Identical public basenames still represent different full engine IDs.
         self.models = {"data": [{"id": "other/model-one"}]}
-        self.props = {"default_generation_settings": {"n_ctx": 8192}, "chat_template": "template-two"}
+        self.props = {
+            "default_generation_settings": {"n_ctx": 8192},
+            "chat_template": "template-two",
+        }
         current = self.client().inspect()
         self.assertEqual(current["model"], previous["model"])
         self.assertEqual(current["context_tokens"], 8192)
@@ -102,7 +117,10 @@ class CapabilityTests(unittest.TestCase):
 
     def test_backend_url_or_credentials_cannot_reuse_another_backend_observation(self):
         self.diagnostics()
-        for name, value in (("LLAMA_BASE", "http://other.invalid"), ("KEY", "PRIVATE_NEW_KEY")):
+        for name, value in (
+            ("LLAMA_BASE", "http://other.invalid"),
+            ("KEY", "PRIVATE_NEW_KEY"),
+        ):
             with self.subTest(name=name), patch.object(app, name, value):
                 self.assertIsNone(app.cached_capabilities())
                 before = len(self.calls)
@@ -113,7 +131,9 @@ class CapabilityTests(unittest.TestCase):
         self.client().inspect()
         self.unavailable = True
         failed = self.client().inspect()
-        self.assertEqual((failed["status"], failed["context_tokens"]), ("unavailable", None))
+        self.assertEqual(
+            (failed["status"], failed["context_tokens"]), ("unavailable", None)
+        )
         self.unavailable = False
         self.now += app.CAPABILITY_FAILURE_CACHE_SECONDS - 1
         self.assertEqual(self.diagnostics(), failed)
@@ -121,15 +141,24 @@ class CapabilityTests(unittest.TestCase):
         self.assertEqual(self.calls, ["/v1/models", "/props", "/v1/models"])
         self.now += 1
         self.assertEqual(self.diagnostics()["context_tokens"], 16384)
-        self.assertEqual(self.calls, ["/v1/models", "/props", "/v1/models", "/v1/models", "/props"])
+        self.assertEqual(
+            self.calls, ["/v1/models", "/props", "/v1/models", "/v1/models", "/props"]
+        )
 
     def test_invalid_models_are_sanitized_and_do_not_keep_a_known_context(self):
         self.client().inspect()
-        for payload in ({"data": {"0": {"id": "invalid"}}}, {"data": [{"id": ""}]}, {"data": [None]}):
+        for payload in (
+            {"data": {"0": {"id": "invalid"}}},
+            {"data": [{"id": ""}]},
+            {"data": [None]},
+        ):
             with self.subTest(payload=payload):
                 self.models = payload
                 observed = self.client().inspect()
-                self.assertEqual((observed["status"], observed["context_tokens"]), ("unavailable", None))
+                self.assertEqual(
+                    (observed["status"], observed["context_tokens"]),
+                    ("unavailable", None),
+                )
                 self.now += app.CAPABILITY_FAILURE_CACHE_SECONDS
         self.models = {"data": [{"id": "restored"}]}
         self.assertEqual(self.client().inspect()["context_tokens"], 16384)
@@ -141,20 +170,32 @@ class CapabilityTests(unittest.TestCase):
                 observed = self.client().inspect()
                 self.assertIsNone(observed["context_tokens"])
                 preview = self.http.post("/api/config/preview", json={}).get_json()
-                self.assertIn("engine_context_unknown", preview["configuration"]["warnings"])
+                self.assertIn(
+                    "engine_context_unknown", preview["configuration"]["warnings"]
+                )
                 self.now += app.CAPABILITY_FAILURE_CACHE_SECONDS
         self.props = {"default_generation_settings": {"n_ctx": 16384}}
         self.assertEqual(self.client().inspect()["context_tokens"], 16384)
 
-    def test_request_and_generation_failures_invalidate_but_cancellation_and_validation_do_not(self):
-        for exc in (ModelError("stream_error", "Safe error."), Cancelled(),
-                    ConfigurationError("context_insufficient", "Safe validation.")):
+    def test_request_and_generation_failures_invalidate_but_cancellation_and_validation_do_not(
+        self,
+    ):
+        for exc in (
+            ModelError("stream_error", "Safe error."),
+            Cancelled(),
+            ConfigurationError("context_insufficient", "Safe validation."),
+        ):
             with self.subTest(error=type(exc).__name__):
                 client = self.client()
                 client.inspect()
-                with patch.object(app.BackendClient, "generate", side_effect=exc), self.assertRaises(type(exc)):
+                with (
+                    patch.object(app.BackendClient, "generate", side_effect=exc),
+                    self.assertRaises(type(exc)),
+                ):
                     client.generate("Analyze", "Source", 10)
-                self.assertEqual(app.cached_capabilities() is None, isinstance(exc, ModelError))
+                self.assertEqual(
+                    app.cached_capabilities() is None, isinstance(exc, ModelError)
+                )
         self.unavailable = True
         with self.assertRaises(ModelError):
             client.json_request("GET", "/props")
@@ -170,11 +211,19 @@ class CapabilityTests(unittest.TestCase):
         self.assertEqual(app.cached_capabilities(), previous)
         self.assertEqual(self.calls, ["/v1/models", "/props"])
 
-    def test_invalid_generation_and_tokenizer_responses_discard_known_capabilities(self):
+    def test_invalid_generation_and_tokenizer_responses_discard_known_capabilities(
+        self,
+    ):
         client = self.client()
         client.inspect()
-        with patch.object(client, "fits", return_value=(True, 10, "estimated_template", 384)), \
-             patch.object(client, "stream_lines", return_value=iter([b"data: {invalid"])):
+        with (
+            patch.object(
+                client, "fits", return_value=(True, 10, "estimated_template", 384)
+            ),
+            patch.object(
+                client, "stream_lines", return_value=iter([b"data: {invalid"])
+            ),
+        ):
             with self.assertRaises(ModelError) as raised:
                 client.generate("Analyze", "Source", 10)
         self.assertEqual(raised.exception.code, "invalid_stream")
@@ -196,11 +245,16 @@ class CapabilityTests(unittest.TestCase):
                 self.fail("Cancellation must not release another inspection's lock")
 
         client = self.client()
-        with patch.object(app, "_capability_lock", BusyLock()), self.assertRaises(Cancelled):
+        with (
+            patch.object(app, "_capability_lock", BusyLock()),
+            self.assertRaises(Cancelled),
+        ):
             client.inspect()
         self.assertEqual(self.calls, [])
 
-    def test_cached_values_are_copied_and_routes_share_the_same_context_observation(self):
+    def test_cached_values_are_copied_and_routes_share_the_same_context_observation(
+        self,
+    ):
         self.diagnostics()
         value = app.cached_capabilities()
         value["context_tokens"] = 1
@@ -220,12 +274,16 @@ class CapabilityTests(unittest.TestCase):
         self.assertIn("engine_context_unknown", profiles["defaults"]["warnings"])
         self.assertEqual(len(self.calls), before)
 
-    def test_profiles_remain_available_when_known_context_requires_smaller_budgets(self):
+    def test_profiles_remain_available_when_known_context_requires_smaller_budgets(
+        self,
+    ):
         self.props = {"default_generation_settings": {"n_ctx": 1024}}
         self.diagnostics()
         profiles = self.http.get("/api/profiles")
         self.assertEqual(profiles.status_code, 200)
-        self.assertNotIn("engine_context_unknown", profiles.get_json()["defaults"]["warnings"])
+        self.assertNotIn(
+            "engine_context_unknown", profiles.get_json()["defaults"]["warnings"]
+        )
         preview = self.http.post("/api/config/preview", json={})
         self.assertEqual(preview.status_code, 400)
         self.assertEqual(preview.get_json()["error_code"], "context_insufficient")

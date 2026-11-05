@@ -33,8 +33,18 @@ def record_failure(store, job_id, exc):
     if isinstance(exc, (ProcessingError, ConfigurationError)):
         code, message = exc.code, str(exc)
     else:
-        code, message = "analysis_failed", "Analysis failed. Check the PDF, configuration and local diagnostics."
-    store.update_job(job_id, status="failed", stage="Error", phase_code="failed", error_code=code, error=message)
+        code, message = (
+            "analysis_failed",
+            "Analysis failed. Check the PDF, configuration and local diagnostics.",
+        )
+    store.update_job(
+        job_id,
+        status="failed",
+        stage="Error",
+        phase_code="failed",
+        error_code=code,
+        error=message,
+    )
 
 
 class _CancelSignal:
@@ -67,7 +77,9 @@ class Worker:
         """
         if self._thread is not None:
             raise RuntimeError("Worker has already been started.")
-        self._thread = threading.Thread(target=self.run_forever, name="pdf-worker", daemon=True)
+        self._thread = threading.Thread(
+            target=self.run_forever, name="pdf-worker", daemon=True
+        )
         self._thread.start()
 
     def stop(self, timeout=SHUTDOWN_TIMEOUT_SECONDS):
@@ -78,8 +90,11 @@ class Worker:
         if thread is not None and thread.is_alive():
             thread.join(timeout=timeout)
         stopped = thread is None or not thread.is_alive()
-        event("worker_stopped" if stopped else "worker_shutdown_timeout",
-              logging.INFO if stopped else logging.WARNING, status="stopped" if stopped else "pending")
+        event(
+            "worker_stopped" if stopped else "worker_shutdown_timeout",
+            logging.INFO if stopped else logging.WARNING,
+            status="stopped" if stopped else "pending",
+        )
         return stopped
 
     def wake(self):
@@ -149,8 +164,14 @@ class Worker:
             except WorkerStopping:
                 event("worker_job_interrupted", job_id=job_id, status="interrupted")
             except Cancelled:
-                self.store.update_job(job_id, status="cancelled", stage="Cancelled", phase_code="cancelled",
-                                      error="", error_code="cancelled")
+                self.store.update_job(
+                    job_id,
+                    status="cancelled",
+                    stage="Cancelled",
+                    phase_code="cancelled",
+                    error="",
+                    error_code="cancelled",
+                )
             except Exception as exc:
                 # Keep the last preview to help diagnose the error.
                 record_failure(self.store, job_id, exc)

@@ -90,7 +90,10 @@ def plan_groups(notes, fits, max_group=MERGE_GROUP_SIZE):
     if current:
         groups.append(current)
     if not any(len(group) > 1 for group in groups):
-        raise ProcessingError("merge_impossible", "Notes cannot be merged within the context budget. Start a new job with adjusted budgets.")
+        raise ProcessingError(
+            "merge_impossible",
+            "Notes cannot be merged within the context budget. Start a new job with adjusted budgets.",
+        )
     return groups
 
 
@@ -112,17 +115,26 @@ class JobRun:
         self.question = self.job["question"].strip()
         self.config = self._load_config()
         if self.config.get("pipeline_version") != 2:
-            raise ProcessingError("pipeline_incompatible", "This job requires a different pipeline version. Start a new analysis.")
+            raise ProcessingError(
+                "pipeline_incompatible",
+                "This job requires a different pipeline version. Start a new analysis.",
+            )
         if file_hash(self.directory / SOURCE_FILE) != self.config["source_hash"]:
-            raise ProcessingError("source_changed", "The source PDF changed. Start a new analysis.")
+            raise ProcessingError(
+                "source_changed", "The source PDF changed. Start a new analysis."
+            )
         if self.store.attempt_count(job_id) >= self.config["max_attempts"]:
-            raise ProcessingError("retry_limit", "The retry limit was reached. Start a new analysis.")
+            raise ProcessingError(
+                "retry_limit", "The retry limit was reached. Start a new analysis."
+            )
         self.artifacts = Artifacts(self.directory, self.config)
         # Create the client before recording the attempt, so a failure here
         # cannot leave an attempt that looks active forever.
         self.model = runtime.model_client(self.config)
         self.model.cancel_check = lambda: runtime.cancellation_requested(job_id)
-        self.recorder = self.store.start_attempt(job_id, self.job.get("queued_at") or self.job["created_at"])
+        self.recorder = self.store.start_attempt(
+            job_id, self.job.get("queued_at") or self.job["created_at"]
+        )
         self.preview_path = self.directory / PREVIEW_FILE
         self.preview_payload: dict[str, Any] | None = None
         self.preview_persisted_at = float("-inf")
@@ -137,7 +149,9 @@ class JobRun:
         self.identity: dict[str, Any] | None = None  # set by _prepare()
         self.evidence: dict[str, Any] | None = None  # set by _extract()
         self._prepared_evidence: reliability.PreparedEvidence | None = None
-        self._generation_audit: tuple[str, tuple[int, ...], int, dict | None, dict] | None = None
+        self._generation_audit: (
+            tuple[str, tuple[int, ...], int, dict | None, dict] | None
+        ) = None
 
     def execute(self):
         """Run every step, then record how the attempt ended and close the client."""
@@ -148,15 +162,27 @@ class JobRun:
             chunks = self._split(extracted)
             notes = self._analyze_sections(chunks)
             final_instruction = prompts.instruction(
-                self.config, "final", self.question,
+                self.config,
+                "final",
+                self.question,
                 f"Pages with insufficient extracted/OCR text: {extracted['missing']}. "
-                f"OCR pages: {extracted['ocr_pages']}.")
-            notes, final_text, evidence_limit = self._merge_until_final_fits(notes, final_instruction)
-            final = self._write_final(notes, final_text, evidence_limit, final_instruction, len(chunks))
+                f"OCR pages: {extracted['ocr_pages']}.",
+            )
+            notes, final_text, evidence_limit = self._merge_until_final_fits(
+                notes, final_instruction
+            )
+            final = self._write_final(
+                notes, final_text, evidence_limit, final_instruction, len(chunks)
+            )
             self._save_report(final, extracted, len(chunks))
             status = "done"
-            log.info("job_finished job_id=%s pages=%d chunks=%d calls=%d",
-                     self.job_id, extracted["page_count"], len(chunks), self.calls)
+            log.info(
+                "job_finished job_id=%s pages=%d chunks=%d calls=%d",
+                self.job_id,
+                extracted["page_count"],
+                len(chunks),
+                self.calls,
+            )
         except WorkerStopping:
             status = "interrupted"
             raise
@@ -166,9 +192,15 @@ class JobRun:
         finally:
             self.store.previews.discard(self.job_id)
             model = self.model
-            self.recorder.provenance({**model.capabilities,
-                "tokenization_calls": model.tokenization_calls, "tokenization_ms": model.tokenization_ms,
-                "tokenization_cache_hits": model.tokenization_cache_hits, "generation_calls": self.calls})
+            self.recorder.provenance(
+                {
+                    **model.capabilities,
+                    "tokenization_calls": model.tokenization_calls,
+                    "tokenization_ms": model.tokenization_ms,
+                    "tokenization_cache_hits": model.tokenization_cache_hits,
+                    "generation_calls": self.calls,
+                }
+            )
             self.recorder.finish(status)
             model.session.close()
 
@@ -189,33 +221,71 @@ class JobRun:
         """Inspect the backend and refuse to reuse notes written by another model."""
         self._phase("preparing", "Preparing document", 2)
         capabilities = self.model.inspect_identity()
-        event("backend_checked", job_id=self.job_id, status=capabilities.get("status", "unknown"))
+        event(
+            "backend_checked",
+            job_id=self.job_id,
+            status=capabilities.get("status", "unknown"),
+        )
         self.recorder.provenance(capabilities)
         # A name is only a weak identity. Unknown fields remain unknown in diagnostics.
-        self.identity = {"model_id_hash": fingerprint(self.model.model()),
-                         "template_hash": capabilities.get("template_hash"),
-                         "engine_sampling_hash": fingerprint(capabilities["sampling"]) if capabilities.get("sampling") else None,
-                         "version": capabilities.get("version")}
+        self.identity = {
+            "model_id_hash": fingerprint(self.model.model()),
+            "template_hash": capabilities.get("template_hash"),
+            "engine_sampling_hash": fingerprint(capabilities["sampling"])
+            if capabilities.get("sampling")
+            else None,
+            "version": capabilities.get("version"),
+        }
         self.artifacts.bind_identity(self.identity)
 
     def _extract(self):
         """Read the PDF text (or reuse it) and build the source evidence ledger."""
+
         def extract():
             pages, count, missing, ocr = extraction.extract_pdf(
-                self.directory / SOURCE_FILE, self.config["extraction"], progress=self._extraction_progress)
-            return json.dumps({"pages": pages, "page_count": count, "missing": missing, "ocr_pages": ocr},
-                              ensure_ascii=False)
+                self.directory / SOURCE_FILE,
+                self.config["extraction"],
+                progress=self._extraction_progress,
+            )
+            return json.dumps(
+                {
+                    "pages": pages,
+                    "page_count": count,
+                    "missing": missing,
+                    "ocr_pages": ocr,
+                },
+                ensure_ascii=False,
+            )
 
-        extracted = json.loads(self._step("extracted.json", "extraction",
-                                          {"source": self.config["source_hash"], "extraction": self.config["extraction"]},
-                                          extract))
-        evidence_dependencies = {"extraction": fingerprint(extracted), "version": reliability.VERSION}
-        evidence_json = self.artifacts.read("source_evidence.json", evidence_dependencies)
+        extracted = json.loads(
+            self._step(
+                "extracted.json",
+                "extraction",
+                {
+                    "source": self.config["source_hash"],
+                    "extraction": self.config["extraction"],
+                },
+                extract,
+            )
+        )
+        evidence_dependencies = {
+            "extraction": fingerprint(extracted),
+            "version": reliability.VERSION,
+        }
+        evidence_json = self.artifacts.read(
+            "source_evidence.json", evidence_dependencies
+        )
         if evidence_json is None:
-            evidence = reliability.build_evidence(extracted["pages"], extracted["page_count"],
-                                                  extracted["missing"], extracted["ocr_pages"])
+            evidence = reliability.build_evidence(
+                extracted["pages"],
+                extracted["page_count"],
+                extracted["missing"],
+                extracted["ocr_pages"],
+            )
             evidence_json = json.dumps(evidence, ensure_ascii=False)
-            self.artifacts.write("source_evidence.json", evidence_json, evidence_dependencies)
+            self.artifacts.write(
+                "source_evidence.json", evidence_json, evidence_dependencies
+            )
         self.evidence = json.loads(evidence_json)
         self.store.update_job(self.job_id, pages=extracted["page_count"])
         return extracted
@@ -231,8 +301,11 @@ class JobRun:
         code = "ocr" if label.startswith("OCR") else "extraction"
         current = time.monotonic()
         last_page = bool(args) and args["index"] == args["total"]
-        if (code == self.extraction_phase and not last_page
-                and current - self.extraction_persisted_at < EXTRACTION_PROGRESS_SECONDS):
+        if (
+            code == self.extraction_phase
+            and not last_page
+            and current - self.extraction_persisted_at < EXTRACTION_PROGRESS_SECONDS
+        ):
             self.model.check_cancelled()
             return
         percent = 2 + round(5 * args.get("index", 0) / max(1, args.get("total", 1)))
@@ -244,13 +317,29 @@ class JobRun:
         """Group the pages into sections that fit the section token budget."""
         self._phase("chunking", "Splitting document", 7)
         budget = self.config["chunk_tokens"]
-        chunks = json.loads(self._step(
-            "chunks.json", "chunking",
-            {"extracted": fingerprint(extracted), "budget": budget, "identity": self.identity, "chunk_format_version": 3},
-            lambda: json.dumps(extraction.make_chunks(extracted["pages"], self.model, budget), ensure_ascii=False)))
+        chunks = json.loads(
+            self._step(
+                "chunks.json",
+                "chunking",
+                {
+                    "extracted": fingerprint(extracted),
+                    "budget": budget,
+                    "identity": self.identity,
+                    "chunk_format_version": 3,
+                },
+                lambda: json.dumps(
+                    extraction.make_chunks(extracted["pages"], self.model, budget),
+                    ensure_ascii=False,
+                ),
+            )
+        )
         if not chunks:
-            raise ProcessingError("empty_document", "Document contains no analyzable text.")
-        self.store.update_job(self.job_id, total_chunks=len(chunks), progress_percent=10)
+            raise ProcessingError(
+                "empty_document", "Document contains no analyzable text."
+            )
+        self.store.update_job(
+            self.job_id, total_chunks=len(chunks), progress_percent=10
+        )
         event("sections_ready", job_id=self.job_id, total_chunks=len(chunks))
         return chunks
 
@@ -259,22 +348,52 @@ class JobRun:
         notes = []
         total = len(chunks)
         for index, chunk in enumerate(chunks):
-            self._phase("section", f"Analyzing section {index + 1}/{total}", 10 + round(70 * index / total),
-                        index=index + 1, total=total, pages=chunk["pages"])
-            instruction = prompts.instruction(self.config, "section", self.question,
+            self._phase(
+                "section",
+                f"Analyzing section {index + 1}/{total}",
+                10 + round(70 * index / total),
+                index=index + 1,
+                total=total,
+                pages=chunk["pages"],
+            )
+            instruction = prompts.instruction(
+                self.config,
+                "section",
+                self.question,
                 f"Excerpt {index + 1} of {total}. Physical PDF pages: {chunk['pages']}. "
-                "Page references inside source prose are not extraction metadata.")
+                "Page references inside source prose are not extraction metadata.",
+            )
             name = f"analysis_{index:04d}.md"
             answer = self._step(
-                name, "section",
-                {"chunk": fingerprint(chunk), "instruction": fingerprint(instruction), "identity": self.identity},
-                lambda: self._generate("section", instruction, chunk["text"], self.config["analysis_tokens"],
-                                       chunk["pages"]))
+                name,
+                "section",
+                {
+                    "chunk": fingerprint(chunk),
+                    "instruction": fingerprint(instruction),
+                    "identity": self.identity,
+                },
+                lambda: self._generate(
+                    "section",
+                    instruction,
+                    chunk["text"],
+                    self.config["analysis_tokens"],
+                    chunk["pages"],
+                ),
+            )
             check = self._check(name, answer, chunk["pages"], [index])
-            notes.append(reliability.note(answer, chunk["pages"], [index],
-                                          (issue["code"] for issue in check["issues"])))
-            self.store.update_job(self.job_id, done_chunks=index + 1,
-                                  progress_percent=10 + round(70 * (index + 1) / total))
+            notes.append(
+                reliability.note(
+                    answer,
+                    chunk["pages"],
+                    [index],
+                    (issue["code"] for issue in check["issues"]),
+                )
+            )
+            self.store.update_job(
+                self.job_id,
+                done_chunks=index + 1,
+                progress_percent=10 + round(70 * (index + 1) / total),
+            )
         return notes
 
     def _merge_until_final_fits(self, notes, final_instruction):
@@ -290,12 +409,19 @@ class JobRun:
         while True:
             self.model.current_stage = "final"
             final_text, final_fits, final_evidence_limit = reliability.prepare_input(
-                notes, self.evidence,
-                lambda text: self.model.fits(final_instruction, text, self.config["final_tokens"])[0])
+                notes,
+                self.evidence,
+                lambda text: self.model.fits(
+                    final_instruction, text, self.config["final_tokens"]
+                )[0],
+            )
             if len(notes) <= MAX_FINAL_NOTES and final_fits:
                 return notes, final_text, final_evidence_limit
             if len(notes) < 2 or level >= MAX_MERGE_LEVELS:
-                raise ProcessingError("merge_impossible", "The final report cannot fit the configured context.")
+                raise ProcessingError(
+                    "merge_impossible",
+                    "The final report cannot fit the configured context.",
+                )
             notes = self._merge_level(notes, level, merge_instruction)
             level += 1
 
@@ -307,8 +433,12 @@ class JobRun:
         def group_fits(group):
             """Tell plan_groups whether a group fits the merge prompt; remember its evidence limit."""
             _, fits, limit = reliability.prepare_input(
-                group, self.evidence,
-                lambda text: self.model.fits(merge_instruction, text, self.config["merge_tokens"])[0])
+                group,
+                self.evidence,
+                lambda text: self.model.fits(
+                    merge_instruction, text, self.config["merge_tokens"]
+                )[0],
+            )
             evidence_limits[fingerprint(group)] = limit
             return fits
 
@@ -318,35 +448,76 @@ class JobRun:
             if len(group) == 1:
                 reduced.append(group[0])
                 continue
-            self._phase("merge", f"Merging level {level + 1}, group {index + 1}/{len(groups)}",
-                        min(94, 81 + level * 4), level=level + 1, index=index + 1, total=len(groups))
+            self._phase(
+                "merge",
+                f"Merging level {level + 1}, group {index + 1}/{len(groups)}",
+                min(94, 81 + level * 4),
+                level=level + 1,
+                index=index + 1,
+                total=len(groups),
+            )
             evidence_limit = evidence_limits[fingerprint(group)]
             text = reliability.combined(group, self.evidence, evidence_limit)
             name = f"merge_{level:02d}_{index:04d}.md"
             source_pages = sorted({page for item in group for page in item["pages"]})
             answer = self._step(
-                name, "merge",
-                {"notes": fingerprint(group), "input": fingerprint(text),
-                 "instruction": fingerprint(merge_instruction), "identity": self.identity},
-                lambda: self._generate("merge", merge_instruction, text, self.config["merge_tokens"], source_pages))
+                name,
+                "merge",
+                {
+                    "notes": fingerprint(group),
+                    "input": fingerprint(text),
+                    "instruction": fingerprint(merge_instruction),
+                    "identity": self.identity,
+                },
+                lambda: self._generate(
+                    "merge",
+                    merge_instruction,
+                    text,
+                    self.config["merge_tokens"],
+                    source_pages,
+                ),
+            )
             merged = reliability.merge_note(answer, group)
-            check = self._check(name, answer, merged["pages"], merged["sections"], evidence_limit)
-            merged["warning_codes"] = sorted(set(merged["warning_codes"]) | {issue["code"] for issue in check["issues"]})
+            check = self._check(
+                name, answer, merged["pages"], merged["sections"], evidence_limit
+            )
+            merged["warning_codes"] = sorted(
+                set(merged["warning_codes"])
+                | {issue["code"] for issue in check["issues"]}
+            )
             reduced.append(merged)
         if len(reduced) >= len(notes):
-            raise ProcessingError("merge_impossible", "The merge plan did not reduce its input.")
+            raise ProcessingError(
+                "merge_impossible", "The merge plan did not reduce its input."
+            )
         return reduced
 
-    def _write_final(self, notes, final_text, evidence_limit, final_instruction, chunk_count):
+    def _write_final(
+        self, notes, final_text, evidence_limit, final_instruction, chunk_count
+    ):
         """Ask the model for the final Markdown report (or reuse it) and check it."""
         self._phase("final", "Writing final report", 95)
         source_pages = sorted({page for item in notes for page in item["pages"]})
         final = self._step(
-            FINAL_ARTIFACT, "final",
-            {"notes": fingerprint(notes), "input": fingerprint(final_text),
-             "instruction": fingerprint(final_instruction), "identity": self.identity},
-            lambda: self._generate("final", final_instruction, final_text, self.config["final_tokens"], source_pages))
-        self._check(FINAL_ARTIFACT, final, source_pages, range(chunk_count), evidence_limit)
+            FINAL_ARTIFACT,
+            "final",
+            {
+                "notes": fingerprint(notes),
+                "input": fingerprint(final_text),
+                "instruction": fingerprint(final_instruction),
+                "identity": self.identity,
+            },
+            lambda: self._generate(
+                "final",
+                final_instruction,
+                final_text,
+                self.config["final_tokens"],
+                source_pages,
+            ),
+        )
+        self._check(
+            FINAL_ARTIFACT, final, source_pages, range(chunk_count), evidence_limit
+        )
         return final
 
     def _save_report(self, final, extracted, chunk_count):
@@ -358,22 +529,49 @@ class JobRun:
         self._phase("saving", "Saving report", 99)
         handle = self.recorder.start("saving", "report")
         try:
-            header = prompts.report_header(self.config, self.job["filename"], extracted["page_count"], chunk_count,
-                                           extracted["missing"], extracted["ocr_pages"])
+            header = prompts.report_header(
+                self.config,
+                self.job["filename"],
+                extracted["page_count"],
+                chunk_count,
+                extracted["missing"],
+                extracted["ocr_pages"],
+            )
             report_path = self.directory / REPORT_FILE
             if report_path.is_file():
                 archive = self.directory / "previous_reports"
                 archive.mkdir(exist_ok=True)
-                atomic_text(archive / (file_hash(report_path) + ".md"), report_path.read_text(encoding="utf-8"))
-            report_text = header + final + "\n" + reliability.report_warnings(
-                self.quality, prompts.deterministic_language(self.config))
+                atomic_text(
+                    archive / (file_hash(report_path) + ".md"),
+                    report_path.read_text(encoding="utf-8"),
+                )
+            report_text = (
+                header
+                + final
+                + "\n"
+                + reliability.report_warnings(
+                    self.quality, prompts.deterministic_language(self.config)
+                )
+            )
             atomic_text(report_path, report_text)
             name = report_filename(final, self.job["filename"])
             self.model.check_cancelled()
-            self.store.update_job(self.job_id, status="done", stage="Analysis completed", phase_code="done", error="",
-                                  error_code="", report_name=name)
-            event("report_saved", job_id=self.job_id, stage="saving", filename=name,
-                  bytes=report_path.stat().st_size)
+            self.store.update_job(
+                self.job_id,
+                status="done",
+                stage="Analysis completed",
+                phase_code="done",
+                error="",
+                error_code="",
+                report_name=name,
+            )
+            event(
+                "report_saved",
+                job_id=self.job_id,
+                stage="saving",
+                filename=name,
+                bytes=report_path.stat().st_size,
+            )
             self.recorder.end(handle, "done")
         except WorkerStopping:
             self.recorder.end(handle, "interrupted", {"stop_category": "interrupted"})
@@ -397,28 +595,51 @@ class JobRun:
             self.last_percent = percent
         self.store.update_job(self.job_id, **values)
         # Page extraction can be frequent: phase changes belong in INFO, page detail in DEBUG.
-        event("job_phase", logging.DEBUG if code in ("extraction", "ocr") else logging.INFO,
-              job_id=self.job_id, stage=code, progress_percent=percent, **args)
+        event(
+            "job_phase",
+            logging.DEBUG if code in ("extraction", "ocr") else logging.INFO,
+            job_id=self.job_id,
+            stage=code,
+            progress_percent=percent,
+            **args,
+        )
         if code != "saving":
-            self._write_preview(code, force=code not in ("extraction", "ocr") or
-                                bool(args) and args.get("index") == args.get("total"),
-                                content="", reasoning="", active=False, metrics={})
+            self._write_preview(
+                code,
+                force=code not in ("extraction", "ocr")
+                or bool(args)
+                and args.get("index") == args.get("total"),
+                content="",
+                reasoning="",
+                active=False,
+                metrics={},
+            )
 
     def _write_preview(self, phase_code, *, force=False, **fields):
         """Refresh memory immediately; checkpoint boundaries and active text every 20s."""
         if not self.runtime.live_output:
             return
-        payload = {"phase": self.phase_label, "phase_code": phase_code,
-                   "phase_args": self.phase_args, "updated_at": now(),
-                   "_attempt_id": self.recorder.run_id, **fields}
+        payload = {
+            "phase": self.phase_label,
+            "phase_code": phase_code,
+            "phase_args": self.phase_args,
+            "updated_at": now(),
+            "_attempt_id": self.recorder.run_id,
+            **fields,
+        }
         for field in ("content", "reasoning"):
-            payload[field] = payload.get(field, "")[-self.runtime.preview_chars:]
+            payload[field] = payload.get(field, "")[-self.runtime.preview_chars :]
         previous = self.preview_payload or {}
-        boundary = any(payload.get(key) != previous.get(key)
-                       for key in ("phase_code", "active", "started_at"))
+        boundary = any(
+            payload.get(key) != previous.get(key)
+            for key in ("phase_code", "active", "started_at")
+        )
         current = time.monotonic()
-        checkpoint = (payload.get("active") and (payload["content"] or payload["reasoning"])
-                      and current - self.preview_persisted_at >= CHECKPOINT_SECONDS)
+        checkpoint = (
+            payload.get("active")
+            and (payload["content"] or payload["reasoning"])
+            and current - self.preview_persisted_at >= CHECKPOINT_SECONDS
+        )
         # Cache owns a copy of the bounded payload, including nested metrics.
         self.store.previews.put(self.job_id, payload, self.runtime.preview_chars)
         self.preview_payload = payload
@@ -443,8 +664,11 @@ class JobRun:
             # Pre-fix artifacts may contain Latin-1-decoded UTF-8 even when
             # their file hashes are valid. Recompute on an explicit retry;
             # never try to repair their Unicode strings heuristically.
-            dependencies = {**dependencies, "text_transport_version": 1,
-                            "reliability_version": reliability.VERSION}
+            dependencies = {
+                **dependencies,
+                "text_transport_version": 1,
+                "reliability_version": reliability.VERSION,
+            }
         handle = self.recorder.start(stage, name)
         before_calls, before_ms = model.tokenization_calls, model.tokenization_ms
         before_hits = model.tokenization_cache_hits
@@ -453,17 +677,26 @@ class JobRun:
             if cached is not None:
                 self.recorder.end(handle, "reused", {"artifact_reused": True})
                 if generation:
-                    self._write_preview(stage, force=True, content=cached[-self.runtime.preview_chars:],
-                                        content_chars=len(cached), reasoning="", reasoning_chars=0,
-                                        active=False, metrics={"artifact_reused": True})
+                    self._write_preview(
+                        stage,
+                        force=True,
+                        content=cached[-self.runtime.preview_chars :],
+                        content_chars=len(cached),
+                        reasoning="",
+                        reasoning_chars=0,
+                        active=False,
+                        metrics={"artifact_reused": True},
+                    )
                 return cached
             result = compute()
             model.check_cancelled()
             self.artifacts.write(name, result, dependencies)
             measurements = dict(model.current_metrics) if generation else {}
-            measurements.update(tokenization_calls=model.tokenization_calls - before_calls,
-                                tokenization_ms=model.tokenization_ms - before_ms,
-                                tokenization_cache_hits=model.tokenization_cache_hits - before_hits)
+            measurements.update(
+                tokenization_calls=model.tokenization_calls - before_calls,
+                tokenization_ms=model.tokenization_ms - before_ms,
+                tokenization_cache_hits=model.tokenization_cache_hits - before_hits,
+            )
             self.recorder.end(handle, "done", measurements)
             return result
         except WorkerStopping:
@@ -474,14 +707,20 @@ class JobRun:
         except Exception as exc:
             measurements = dict(model.current_metrics) if generation else {}
             measurements["error_code"] = getattr(exc, "code", "step_failed")
-            self.recorder.end(handle, "cancelled" if isinstance(exc, Cancelled) else "failed", measurements)
+            self.recorder.end(
+                handle,
+                "cancelled" if isinstance(exc, Cancelled) else "failed",
+                measurements,
+            )
             raise
 
     def _generate(self, stage, instruction, text, budget, source_pages):
         """Call the model once within the call budget, publishing bounded previews."""
         self._generation_audit = None
         if self.calls >= self.config["max_calls"]:
-            raise ProcessingError("call_limit", "The job exceeded its generation-call limit.")
+            raise ProcessingError(
+                "call_limit", "The job exceeded its generation-call limit."
+            )
         self.calls += 1
         model = self.model
         model.current_stage = stage
@@ -494,11 +733,18 @@ class JobRun:
             if not self.runtime.live_output:
                 return
             stats = dict(model.current_metrics)
-            self._write_preview(stage, force=completed, content=content[-limit:], reasoning=reasoning[-limit:],
-                                content_chars=stats.get("content_chars", len(content)),
-                                reasoning_chars=stats.get("reasoning_chars", len(reasoning)),
-                                active=not completed, started_at=started_at,
-                                elapsed_seconds=round(time.monotonic() - started, 1), metrics=stats)
+            self._write_preview(
+                stage,
+                force=completed,
+                content=content[-limit:],
+                reasoning=reasoning[-limit:],
+                content_chars=stats.get("content_chars", len(content)),
+                reasoning_chars=stats.get("reasoning_chars", len(reasoning)),
+                active=not completed,
+                started_at=started_at,
+                elapsed_seconds=round(time.monotonic() - started, 1),
+                metrics=stats,
+            )
 
         live("", "", False)
         try:
@@ -507,18 +753,39 @@ class JobRun:
             # The stream need not emit a final callback on failure, cancellation or shutdown.
             # Flush the last useful bounded text, retaining the original processing error.
             if self.runtime.live_output and self.preview_payload is not None:
-                fields = {key: self.preview_payload[key] for key in (
-                    "content", "reasoning", "content_chars", "reasoning_chars", "started_at", "elapsed_seconds")
-                    if key in self.preview_payload}
+                fields = {
+                    key: self.preview_payload[key]
+                    for key in (
+                        "content",
+                        "reasoning",
+                        "content_chars",
+                        "reasoning_chars",
+                        "started_at",
+                        "elapsed_seconds",
+                    )
+                    if key in self.preview_payload
+                }
                 try:
-                    self._write_preview(stage, force=True, **fields, active=False, metrics=dict(model.current_metrics))
+                    self._write_preview(
+                        stage,
+                        force=True,
+                        **fields,
+                        active=False,
+                        metrics=dict(model.current_metrics),
+                    )
                 except OSError as exc:
                     failure("preview_checkpoint_failed", exc, job_id=self.job_id)
             raise
         # Public metrics contain counts only; detailed source values stay local.
         source_pages = tuple(sorted(set(source_pages)))
         check = self._audit(answer, source_pages)
-        self._generation_audit = (answer, source_pages, reliability.VERSION, self.evidence, check)
+        self._generation_audit = (
+            answer,
+            source_pages,
+            reliability.VERSION,
+            self.evidence,
+            check,
+        )
         # Retain historical recall counters for benchmark/API compatibility.
         # These raw-string differences are not numerical or citation validation.
         references = set(reliability.PAGE_REFERENCE.findall(text))
@@ -526,18 +793,24 @@ class JobRun:
         numbers = set(RAW_NUMBER.findall(text))
         output_numbers = set(RAW_NUMBER.findall(answer))
         model.current_metrics["quality_checks"] = {
-            "source": "mechanical_warning_only", "semantic_validation": False,
+            "source": "mechanical_warning_only",
+            "semantic_validation": False,
             "warnings": len(check["issues"]),
             "numeric_checks": check["numeric"]["checked"],
             "missing_page_references": len(references - output_references),
             "unseen_page_references": len(output_references - references),
-            "missing_numeric_items": len(numbers - output_numbers)}
+            "missing_numeric_items": len(numbers - output_numbers),
+        }
         return answer
 
     def _audit(self, text, source_pages):
         """Share only normalization of this attempt's unchanged source evidence."""
-        self._prepared_evidence = reliability.prepare_evidence(self.evidence, self._prepared_evidence)
-        return reliability.audit(text, self.evidence, source_pages, prepared=self._prepared_evidence)
+        self._prepared_evidence = reliability.prepare_evidence(
+            self.evidence, self._prepared_evidence
+        )
+        return reliability.audit(
+            text, self.evidence, source_pages, prepared=self._prepared_evidence
+        )
 
     def _check(self, name, text, source_pages, sections, evidence_limit=None):
         """Run the reliability checks on a generated text, new or reused, and save the results.
@@ -547,12 +820,17 @@ class JobRun:
         """
         source_pages = tuple(sorted(set(source_pages)))
         pending, self._generation_audit = self._generation_audit, None
-        if (pending is not None and pending[:3] == (text, source_pages, reliability.VERSION)
-                and pending[3] is self.evidence):
+        if (
+            pending is not None
+            and pending[:3] == (text, source_pages, reliability.VERSION)
+            and pending[3] is self.evidence
+        ):
             check = copy.deepcopy(pending[4])
         else:
             check = self._audit(text, source_pages)
-        check.update(input_pages=sorted(set(source_pages)), source_sections=sorted(set(sections)))
+        check.update(
+            input_pages=sorted(set(source_pages)), source_sections=sorted(set(sections))
+        )
         if evidence_limit is not None:
             check["evidence_prompt_limit"] = evidence_limit
         self.quality["steps"][name] = check

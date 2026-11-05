@@ -20,8 +20,10 @@ class PromptLogTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
-        for name, value in (("store", JobStore(root)),
-                            ("read_system_prompt", lambda: "PRIVATE_SERVER_PROMPT")):
+        for name, value in (
+            ("store", JobStore(root)),
+            ("read_system_prompt", lambda: "PRIVATE_SERVER_PROMPT"),
+        ):
             patcher = patch.object(app, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -29,8 +31,13 @@ class PromptLogTests(unittest.TestCase):
         self.client = app.app.test_client()
 
     def create(self, question):
-        response = self.client.post("/api/jobs", data={
-            "file": (io.BytesIO(b"%PDF-test"), "study.pdf"), "question": question})
+        response = self.client.post(
+            "/api/jobs",
+            data={
+                "file": (io.BytesIO(b"%PDF-test"), "study.pdf"),
+                "question": question,
+            },
+        )
         self.assertEqual(response.status_code, 201)
         return response.json["id"]
 
@@ -39,7 +46,9 @@ class PromptLogTests(unittest.TestCase):
         identifier = self.create(prompt)
         for status in ("queued", "running", "done"):
             app.store.update_job(identifier, status=status)
-            with patch.object(app, "read_system_prompt", return_value="CHANGED_SYSTEM_PROMPT"):
+            with patch.object(
+                app, "read_system_prompt", return_value="CHANGED_SYSTEM_PROMPT"
+            ):
                 detail = self.client.get(f"/api/jobs/{identifier}").json
                 listed = self.client.get("/api/jobs").json["jobs"][0]
             self.assertEqual(detail["question"], prompt)
@@ -62,15 +71,35 @@ class PromptLogTests(unittest.TestCase):
                 status TEXT NOT NULL, stage TEXT NOT NULL DEFAULT '', pages INTEGER DEFAULT 0,
                 total_chunks INTEGER DEFAULT 0, done_chunks INTEGER DEFAULT 0,
                 error TEXT DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""")
-            con.execute("INSERT INTO jobs (id,filename,question,status,created_at,updated_at) VALUES (?,?,?,?,?,?)",
-                        ("f" * 32, "old.pdf", "Saved legacy request", "done", jobs.utcnow(), jobs.utcnow()))
-            con.execute("INSERT INTO jobs (id,filename,question,status,created_at,updated_at) VALUES (?,?,?,?,?,?)",
-                        ("e" * 32, "old.pdf", app.FALLBACK_QUESTION, "done", jobs.utcnow(), jobs.utcnow()))
+            con.execute(
+                "INSERT INTO jobs (id,filename,question,status,created_at,updated_at) VALUES (?,?,?,?,?,?)",
+                (
+                    "f" * 32,
+                    "old.pdf",
+                    "Saved legacy request",
+                    "done",
+                    jobs.utcnow(),
+                    jobs.utcnow(),
+                ),
+            )
+            con.execute(
+                "INSERT INTO jobs (id,filename,question,status,created_at,updated_at) VALUES (?,?,?,?,?,?)",
+                (
+                    "e" * 32,
+                    "old.pdf",
+                    app.FALLBACK_QUESTION,
+                    "done",
+                    jobs.utcnow(),
+                    jobs.utcnow(),
+                ),
+            )
         with patch.object(app, "store", legacy):
             legacy.initialize()
             legacy.initialize()
             job = self.client.get("/api/jobs/" + "f" * 32).json
-            listed = {item["id"]: item for item in self.client.get("/api/jobs").json["jobs"]}
+            listed = {
+                item["id"]: item for item in self.client.get("/api/jobs").json["jobs"]
+            }
         self.assertEqual(job["question"], "Saved legacy request")
         self.assertIsNone(job["question_custom"])
         self.assertEqual(job["progress_percent"], 100)
@@ -84,14 +113,25 @@ class PromptLogTests(unittest.TestCase):
             identifier = self.create(secret)
             self.client.post(f"/api/jobs/{identifier}/cancel")
             with app.store.connect() as con:
-                con.execute("UPDATE jobs SET cancel_requested=0 WHERE id=?", (identifier,))
+                con.execute(
+                    "UPDATE jobs SET cancel_requested=0 WHERE id=?", (identifier,)
+                )
             app.store.update_job(identifier, status="done")
-            (app.store.job_dir(identifier) / "rapport_final.md").write_text("# Sensitive\nPRIVATE_REPORT_CONTENT", encoding="utf-8")
+            (app.store.job_dir(identifier) / "rapport_final.md").write_text(
+                "# Sensitive\nPRIVATE_REPORT_CONTENT", encoding="utf-8"
+            )
             self.client.get(f"/api/jobs/{identifier}/report/view")
             with self.client.get(f"/api/jobs/{identifier}/report") as response:
                 self.assertEqual(response.status_code, 200)
         output = "\n".join(captured.output)
-        for expected in ("job_created", "job_cancel_requested", "job_state", "report_download", "report_view", "job_id="):
+        for expected in (
+            "job_created",
+            "job_cancel_requested",
+            "job_state",
+            "report_download",
+            "report_view",
+            "job_id=",
+        ):
             self.assertIn(expected, output)
         for private in (secret, "PRIVATE_SERVER_PROMPT", "PRIVATE_REPORT_CONTENT"):
             self.assertNotIn(private, output)
@@ -100,7 +140,11 @@ class PromptLogTests(unittest.TestCase):
         root_level, app_level = logging.getLogger().level, app.log.level
         self.addCleanup(logging.getLogger().setLevel, root_level)
         self.addCleanup(app.log.setLevel, app_level)
-        for value, expected in (("ERROR", logging.ERROR), ("DEBUG", logging.DEBUG), ("invalid", logging.INFO)):
+        for value, expected in (
+            ("ERROR", logging.ERROR),
+            ("DEBUG", logging.DEBUG),
+            ("invalid", logging.INFO),
+        ):
             with patch.dict(os.environ, {"LOG_LEVEL": value}):
                 observability.configure_logging()
             self.assertEqual(app.log.level, expected)
@@ -129,13 +173,20 @@ class PromptLogTests(unittest.TestCase):
                 response = self.client.post(f"/api/jobs/{identifier}/cancel")
                 self.assertEqual(response.status_code, 202)
                 self.assertEqual(response.json["status"], "running")
-        self.assertEqual(sum("job_cancel_requested" in line for line in captured.output), 1)
+        self.assertEqual(
+            sum("job_cancel_requested" in line for line in captured.output), 1
+        )
         app.store.update_job(identifier, status="cancelled")
-        self.assertEqual(self.client.post(f"/api/jobs/{identifier}/cancel").json["status"], "cancelled")
+        self.assertEqual(
+            self.client.post(f"/api/jobs/{identifier}/cancel").json["status"],
+            "cancelled",
+        )
         with app.store.connect() as con:
             con.execute("UPDATE jobs SET cancel_requested=0 WHERE id=?", (identifier,))
         app.store.update_job(identifier, status="done")
-        self.assertEqual(self.client.post(f"/api/jobs/{identifier}/cancel").status_code, 409)
+        self.assertEqual(
+            self.client.post(f"/api/jobs/{identifier}/cancel").status_code, 409
+        )
 
 
 if __name__ == "__main__":

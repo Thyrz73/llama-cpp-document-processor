@@ -126,7 +126,9 @@ class ThreadConnections:
         skips this attempt and lets the main thread checkpoint after joining it.
         """
         if getattr(self._local, "busy", False):
-            raise RuntimeError("Cannot close a connection during a database transaction.")
+            raise RuntimeError(
+                "Cannot close a connection during a database transaction."
+            )
         con, self._local.connection = getattr(self._local, "connection", None), None
         if con is None:
             return
@@ -135,19 +137,36 @@ class ThreadConnections:
                 con.execute(f"PRAGMA busy_timeout={CHECKPOINT_TIMEOUT_MS}")
                 row = con.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
                 if row is None:
-                    event("sqlite_checkpoint_incomplete", logging.WARNING, status="unavailable")
+                    event(
+                        "sqlite_checkpoint_incomplete",
+                        logging.WARNING,
+                        status="unavailable",
+                    )
                 else:
                     busy, frames, copied = row
                     if busy or frames != copied:
-                        event("sqlite_checkpoint_incomplete", logging.WARNING,
-                              status="busy" if busy else "incomplete", busy=busy,
-                              wal_frames=frames, checkpointed_frames=copied)
+                        event(
+                            "sqlite_checkpoint_incomplete",
+                            logging.WARNING,
+                            status="busy" if busy else "incomplete",
+                            busy=busy,
+                            wal_frames=frames,
+                            checkpointed_frames=copied,
+                        )
                     else:
-                        event("sqlite_checkpoint", logging.DEBUG,
-                              status="not_wal" if frames == -1 else "complete",
-                              wal_frames=frames, checkpointed_frames=copied)
+                        event(
+                            "sqlite_checkpoint",
+                            logging.DEBUG,
+                            status="not_wal" if frames == -1 else "complete",
+                            wal_frames=frames,
+                            checkpointed_frames=copied,
+                        )
         except sqlite3.Error as exc:
-            event("sqlite_checkpoint_failed", logging.WARNING, error_type=type(exc).__name__)
+            event(
+                "sqlite_checkpoint_failed",
+                logging.WARNING,
+                error_type=type(exc).__name__,
+            )
         finally:
             con.close()
 
@@ -175,11 +194,17 @@ def _create_jobs(con):
 
 def _add_configurations_and_measurements(con):
     """Version 2: phases, cancellation, configuration snapshots, attempts and steps."""
-    _add_columns(con, "jobs", {
-        "phase_code": "TEXT NOT NULL DEFAULT ''", "phase_args": "TEXT NOT NULL DEFAULT '{}'",
-        "error_code": "TEXT NOT NULL DEFAULT ''", "cancel_requested": "INTEGER NOT NULL DEFAULT 0",
-        "queued_at": "TEXT",
-    })
+    _add_columns(
+        con,
+        "jobs",
+        {
+            "phase_code": "TEXT NOT NULL DEFAULT ''",
+            "phase_args": "TEXT NOT NULL DEFAULT '{}'",
+            "error_code": "TEXT NOT NULL DEFAULT ''",
+            "cancel_requested": "INTEGER NOT NULL DEFAULT 0",
+            "queued_at": "TEXT",
+        },
+    )
     con.execute("""CREATE TABLE IF NOT EXISTS job_configs (
         job_id TEXT PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
         snapshot TEXT NOT NULL, fingerprint TEXT NOT NULL, created_at TEXT NOT NULL)""")
@@ -206,7 +231,9 @@ def _index_job_order_and_status(con):
     # SQLite can scan this ascending index backwards for newest-first history.
     con.execute("CREATE INDEX IF NOT EXISTS jobs_by_created ON jobs(created_at, id)")
     # The status prefix also covers the global active-job lookup; no status-only index.
-    con.execute("CREATE INDEX IF NOT EXISTS jobs_by_status_created ON jobs(status, created_at, id)")
+    con.execute(
+        "CREATE INDEX IF NOT EXISTS jobs_by_status_created ON jobs(status, created_at, id)"
+    )
 
 
 # Ordered (version, migration) pairs. Append only; never edit a released migration.
@@ -231,14 +258,20 @@ def initialize(path):
         if mode != "wal":
             # Some file systems cannot share the memory WAL needs; see _open for what changes.
             event("sqlite_wal_unavailable", logging.WARNING, journal_mode=mode)
-        con.execute("CREATE TABLE IF NOT EXISTS schema_migrations "
-                    "(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
-        applied = {row["version"] for row in con.execute("SELECT version FROM schema_migrations")}
+        con.execute(
+            "CREATE TABLE IF NOT EXISTS schema_migrations "
+            "(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+        )
+        applied = {
+            row["version"]
+            for row in con.execute("SELECT version FROM schema_migrations")
+        }
     latest = MIGRATIONS[-1][0]
     if applied and max(applied) > latest:
         raise SchemaVersionError(
             f"The database uses schema version {max(applied)}, newer than this application "
-            f"supports ({latest}). Update the application or restore a matching backup.")
+            f"supports ({latest}). Update the application or restore a matching backup."
+        )
     for version, migrate in MIGRATIONS:
         if version in applied:
             continue
@@ -246,6 +279,11 @@ def initialize(path):
             # One transaction per migration: a failure leaves the previous version intact.
             con.execute("BEGIN IMMEDIATE")
             migrate(con)
-            con.execute("INSERT INTO schema_migrations VALUES (?, ?)",
-                        (version, datetime.now(timezone.utc).isoformat(timespec="milliseconds")))
+            con.execute(
+                "INSERT INTO schema_migrations VALUES (?, ?)",
+                (
+                    version,
+                    datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+                ),
+            )
         event("schema_migrated", version=version, status="applied")

@@ -87,10 +87,16 @@ def instruction(config, stage, question, extra=""):
     It combines the stage's task template, the report language, the detail
     level (final stage only), the user's request and extra.
     """
-    detail = {"concise": "Be concise without losing essential evidence.",
-              "standard": "Use a balanced level of detail.",
-              "detailed": "Explain the documented methods and evidence in detail."}
-    text = config["templates"][stage] + " " + language_instruction(config["report_language"])
+    detail = {
+        "concise": "Be concise without losing essential evidence.",
+        "standard": "Use a balanced level of detail.",
+        "detailed": "Explain the documented methods and evidence in detail.",
+    }
+    text = (
+        config["templates"][stage]
+        + " "
+        + language_instruction(config["report_language"])
+    )
     if stage == "final":
         text += " " + detail[config["detail_level"]]
     return text + "\nUser request: " + question + "\n" + extra
@@ -112,10 +118,14 @@ def resolve_report_language(language, question):
     if language != "auto":
         return "fr" if is_french(language) else "en"
     words = set(re.findall(r"[^\W\d_]+", question.casefold()))
-    french = set("analysez analyser résume résumez résumer résumé synthèse décris décrivez explique expliquez "
-                 "le la les des du ce cette ces un une et dans avec pour méthodes résultats conclusions".split())
-    english = set("analyze summarize summarise summary describe explain "
-                  "the this these a an and in with for methods results conclusions".split())
+    french = set(
+        "analysez analyser résume résumez résumer résumé synthèse décris décrivez explique expliquez "
+        "le la les des du ce cette ces un une et dans avec pour méthodes résultats conclusions".split()
+    )
+    english = set(
+        "analyze summarize summarise summary describe explain "
+        "the this these a an and in with for methods results conclusions".split()
+    )
     return "fr" if len(words & french) > len(words & english) else "en"
 
 
@@ -131,13 +141,25 @@ def report_header(config, filename, pages, chunks, missing, ocr_pages):
     needed OCR or still lack usable text.
     """
     french = is_french(deterministic_language(config))
-    title, page_label, chunk_label = (("Analyse de", "Pages PDF", "sections analysées")
-                                     if french else ("Analysis of", "PDF pages", "analyzed chunks"))
+    title, page_label, chunk_label = (
+        ("Analyse de", "Pages PDF", "sections analysées")
+        if french
+        else ("Analysis of", "PDF pages", "analyzed chunks")
+    )
     # A filename is untrusted text even though the browser renders it safely.
-    filename = filename.replace("\n", " ").replace("\r", " ").replace("<", "&lt;").replace(">", "&gt;")
+    filename = (
+        filename.replace("\n", " ")
+        .replace("\r", " ")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
     header = f"# {title} {filename}\n\n*{page_label}: {pages} — {chunk_label}: {chunks}.*\n\n"
     if missing:
-        label = "Texte insuffisant après extraction/OCR aux pages" if french else "Insufficient text after extraction/OCR on pages"
+        label = (
+            "Texte insuffisant après extraction/OCR aux pages"
+            if french
+            else "Insufficient text after extraction/OCR on pages"
+        )
         header += f"> {label}: {', '.join(map(str, missing))}.\n\n"
     if ocr_pages:
         label = "OCR utilisé aux pages" if french else "OCR used on pages"

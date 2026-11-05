@@ -21,8 +21,13 @@ def atomic_text(path, text):
         tmp.write_text(text, encoding="utf-8")
         os.replace(tmp, path)
     except OSError as exc:
-        event("artifact_write_failed", logging.ERROR, artifact=path.name,
-              job_id=current_job_id(), error_type=type(exc).__name__)
+        event(
+            "artifact_write_failed",
+            logging.ERROR,
+            artifact=path.name,
+            job_id=current_job_id(),
+            error_type=type(exc).__name__,
+        )
         raise
 
 

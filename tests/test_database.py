@@ -33,7 +33,12 @@ class MigrationTests(unittest.TestCase):
 
     def versions(self):
         with database.connect(self.path) as con:
-            return [row[0] for row in con.execute("SELECT version FROM schema_migrations ORDER BY version")]
+            return [
+                row[0]
+                for row in con.execute(
+                    "SELECT version FROM schema_migrations ORDER BY version"
+                )
+            ]
 
     def columns(self, table):
         with database.connect(self.path) as con:
@@ -42,20 +47,32 @@ class MigrationTests(unittest.TestCase):
     def test_new_database_gets_every_version_once(self):
         database.initialize(self.path)
         database.initialize(self.path)
-        self.assertEqual(self.versions(), [version for version, _ in database.MIGRATIONS])
-        self.assertTrue({"progress_percent", "cancel_requested", "report_name", "question_custom"} <= self.columns("jobs"))
+        self.assertEqual(
+            self.versions(), [version for version, _ in database.MIGRATIONS]
+        )
+        self.assertTrue(
+            {"progress_percent", "cancel_requested", "report_name", "question_custom"}
+            <= self.columns("jobs")
+        )
         self.assertIn("step_key", self.columns("job_steps"))
 
     def test_first_release_database_is_upgraded_without_touching_rows(self):
         with sqlite3.connect(self.path) as con:
             con.execute(LEGACY_JOBS)
-            con.execute("INSERT INTO jobs (id, filename, question, status, created_at, updated_at) "
-                        "VALUES ('a', 'old.pdf', 'Old request', 'done', '2025-01-01', '2025-01-01')")
+            con.execute(
+                "INSERT INTO jobs (id, filename, question, status, created_at, updated_at) "
+                "VALUES ('a', 'old.pdf', 'Old request', 'done', '2025-01-01', '2025-01-01')"
+            )
         database.initialize(self.path)
-        self.assertEqual(self.versions(), [version for version, _ in database.MIGRATIONS])
+        self.assertEqual(
+            self.versions(), [version for version, _ in database.MIGRATIONS]
+        )
         with database.connect(self.path) as con:
             row = dict(con.execute("SELECT * FROM jobs").fetchone())
-        self.assertEqual((row["question"], row["updated_at"], row["progress_percent"]), ("Old request", "2025-01-01", 0))
+        self.assertEqual(
+            (row["question"], row["updated_at"], row["progress_percent"]),
+            ("Old request", "2025-01-01", 0),
+        )
         self.assertIsNone(row["question_custom"])
 
     def test_database_from_releases_recording_versions_2_and_3_only(self):
@@ -64,13 +81,17 @@ class MigrationTests(unittest.TestCase):
         with database.connect(self.path) as con:
             con.execute("DELETE FROM schema_migrations WHERE version=1")
         database.initialize(self.path)
-        self.assertEqual(self.versions(), [version for version, _ in database.MIGRATIONS])
+        self.assertEqual(
+            self.versions(), [version for version, _ in database.MIGRATIONS]
+        )
 
     def test_newer_schema_refuses_to_start(self):
         database.initialize(self.path)
         with database.connect(self.path) as con:
             con.execute("INSERT INTO schema_migrations VALUES (999, 'future')")
-        with self.assertRaisesRegex(database.SchemaVersionError, "newer than this application"):
+        with self.assertRaisesRegex(
+            database.SchemaVersionError, "newer than this application"
+        ):
             database.initialize(self.path)
 
     def test_failed_migration_is_rolled_back_and_retried_at_next_start(self):
@@ -79,15 +100,19 @@ class MigrationTests(unittest.TestCase):
             raise sqlite3.OperationalError("simulated failure")
 
         expected = [version for version, _ in database.MIGRATIONS]
-        with patch.object(database, "MIGRATIONS", database.MIGRATIONS + ((expected[-1] + 1, broken),)):
+        with patch.object(
+            database, "MIGRATIONS", database.MIGRATIONS + ((expected[-1] + 1, broken),)
+        ):
             with self.assertRaises(sqlite3.OperationalError):
                 database.initialize(self.path)
         self.assertEqual(self.versions(), expected)
         self.assertNotIn("half_done", self.columns("jobs"))
 
 
-INSERT_JOB = ("INSERT INTO jobs (id, filename, question, status, created_at, updated_at) "
-              "VALUES (?, 'a.pdf', 'Analyze', 'queued', '2025-01-01', '2025-01-01')")
+INSERT_JOB = (
+    "INSERT INTO jobs (id, filename, question, status, created_at, updated_at) "
+    "VALUES (?, 'a.pdf', 'Analyze', 'queued', '2025-01-01', '2025-01-01')"
+)
 
 
 class ThreadConnectionsTests(unittest.TestCase):
@@ -126,11 +151,15 @@ class ThreadConnectionsTests(unittest.TestCase):
     def test_commits_skip_the_disk_wait_only_in_wal_mode(self):
         with self.connections.transaction() as con:
             self.assertEqual(con.execute("PRAGMA journal_mode").fetchone()[0], "wal")
-            self.assertEqual(con.execute("PRAGMA synchronous").fetchone()[0], 1)  # NORMAL
+            self.assertEqual(
+                con.execute("PRAGMA synchronous").fetchone()[0], 1
+            )  # NORMAL
         # Without WAL, NORMAL could corrupt the database after a power failure: keep the default.
         self.connections.close()
         with database.connect(self.path) as con:
-            self.assertEqual(con.execute("PRAGMA journal_mode=DELETE").fetchone()[0], "delete")
+            self.assertEqual(
+                con.execute("PRAGMA journal_mode=DELETE").fetchone()[0], "delete"
+            )
         with database.connect(self.path) as con:
             self.assertEqual(con.execute("PRAGMA synchronous").fetchone()[0], 2)  # FULL
 
@@ -182,7 +211,9 @@ class ThreadConnectionsTests(unittest.TestCase):
         # The refused block left nothing behind: the outer one was rolled back.
         self.assertEqual(self.job_ids(), [])
 
-    def test_close_folds_the_log_into_the_database_file_while_another_thread_stays_connected(self):
+    def test_close_folds_the_log_into_the_database_file_while_another_thread_stays_connected(
+        self,
+    ):
         connected, release = threading.Event(), threading.Event()
 
         def stay_connected():
@@ -210,11 +241,13 @@ class ThreadConnectionsTests(unittest.TestCase):
 
     def test_checkpoint_result_distinguishes_complete_busy_incomplete_and_non_wal(self):
         real_execute = database._Connection.execute
-        cases = [((0, 0, 0), "sqlite_checkpoint", logging.DEBUG, "complete"),
-                 ((1, 3, 3), "sqlite_checkpoint_incomplete", logging.WARNING, "busy"),
-                 ((0, 3, 1), "sqlite_checkpoint_incomplete", logging.WARNING, "incomplete"),
-                 ((0, -1, -1), "sqlite_checkpoint", logging.DEBUG, "not_wal"),
-                 (None, "sqlite_checkpoint_incomplete", logging.WARNING, "unavailable")]
+        cases = [
+            ((0, 0, 0), "sqlite_checkpoint", logging.DEBUG, "complete"),
+            ((1, 3, 3), "sqlite_checkpoint_incomplete", logging.WARNING, "busy"),
+            ((0, 3, 1), "sqlite_checkpoint_incomplete", logging.WARNING, "incomplete"),
+            ((0, -1, -1), "sqlite_checkpoint", logging.DEBUG, "not_wal"),
+            (None, "sqlite_checkpoint_incomplete", logging.WARNING, "unavailable"),
+        ]
         for row, name, level, status in cases:
             with self.subTest(row=row):
                 with self.connections.transaction() as con:
@@ -225,14 +258,19 @@ class ThreadConnectionsTests(unittest.TestCase):
                         return SimpleNamespace(fetchone=lambda: row)
                     return real_execute(connection, sql, *args)
 
-                with patch.object(database._Connection, "execute", execute), patch.object(database, "event") as event:
+                with (
+                    patch.object(database._Connection, "execute", execute),
+                    patch.object(database, "event") as event,
+                ):
                     self.connections.close()
                 self.assertEqual(event.call_count, 1)
                 self.assertEqual(event.call_args.args, (name, level))
                 self.assertEqual(event.call_args.kwargs["status"], status)
                 if row is not None:
                     self.assertEqual(event.call_args.kwargs["wal_frames"], row[1])
-                    self.assertEqual(event.call_args.kwargs["checkpointed_frames"], row[2])
+                    self.assertEqual(
+                        event.call_args.kwargs["checkpointed_frames"], row[2]
+                    )
                 with self.assertRaises(sqlite3.ProgrammingError):
                     con.execute("SELECT 1")
 
@@ -246,7 +284,10 @@ class ThreadConnectionsTests(unittest.TestCase):
                 raise sqlite3.OperationalError("PRIVATE_PATH_AND_SQL")
             return real_execute(connection, sql, *args)
 
-        with patch.object(database._Connection, "execute", execute), self.assertLogs("document-processor", "WARNING") as logs:
+        with (
+            patch.object(database._Connection, "execute", execute),
+            self.assertLogs("document-processor", "WARNING") as logs,
+        ):
             self.connections.close()
         self.assertIn("sqlite_checkpoint_failed", logs.output[0])
         self.assertIn('error_type="OperationalError"', logs.output[0])
@@ -254,7 +295,9 @@ class ThreadConnectionsTests(unittest.TestCase):
         with self.assertRaises(sqlite3.ProgrammingError):
             con.execute("SELECT 1")
 
-    def test_close_inside_transaction_is_refused_without_losing_connection_or_commit(self):
+    def test_close_inside_transaction_is_refused_without_losing_connection_or_commit(
+        self,
+    ):
         with self.connections.transaction() as con:
             con.execute(INSERT_JOB, ("committed",))
             with self.assertRaisesRegex(RuntimeError, "during a database transaction"):
@@ -288,23 +331,40 @@ class ThreadConnectionsTests(unittest.TestCase):
         try:
             self.assertTrue(ready.wait(3))
             started = time.monotonic()
-            with patch.object(database, "CHECKPOINT_TIMEOUT_MS", 30), self.assertLogs("document-processor", "WARNING") as logs:
+            with (
+                patch.object(database, "CHECKPOINT_TIMEOUT_MS", 30),
+                self.assertLogs("document-processor", "WARNING") as logs,
+            ):
                 self.connections.close()
-            self.assertLess(time.monotonic() - started, 2, "Checkpoint must not wait indefinitely for another writer")
+            self.assertLess(
+                time.monotonic() - started,
+                2,
+                "Checkpoint must not wait indefinitely for another writer",
+            )
             self.assertIn('status="busy"', logs.output[0])
             self.assertIn("wal_frames=", logs.output[0])
             commit.set()
             self.assertTrue(committed.wait(3))
-            self.assertGreater(self.path.with_name(self.path.name + "-wal").stat().st_size, 0)
+            self.assertGreater(
+                self.path.with_name(self.path.name + "-wal").stat().st_size, 0
+            )
             raw = self.path.with_name("raw.sqlite3")
             shutil.copy(self.path, raw)
             with closing(sqlite3.connect(raw)) as check:
-                self.assertNotIn(("after",), check.execute("SELECT id FROM jobs").fetchall())
+                self.assertNotIn(
+                    ("after",), check.execute("SELECT id FROM jobs").fetchall()
+                )
             backup = self.path.with_name("backup.sqlite3")
-            with closing(sqlite3.connect(self.path)) as source, closing(sqlite3.connect(backup)) as target:
+            with (
+                closing(sqlite3.connect(self.path)) as source,
+                closing(sqlite3.connect(backup)) as target,
+            ):
                 source.backup(target)
             with closing(sqlite3.connect(backup)) as check:
-                self.assertEqual(check.execute("SELECT id FROM jobs ORDER BY id").fetchall(), [("after",), ("before",)])
+                self.assertEqual(
+                    check.execute("SELECT id FROM jobs ORDER BY id").fetchall(),
+                    [("after",), ("before",)],
+                )
         finally:
             commit.set()
             release.set()
@@ -329,20 +389,34 @@ with store.connect() as con:
     con.execute('UPDATE jobs SET progress_percent=99 WHERE id=?', (identifier,))
     os._exit(23)
 """
-        result = subprocess.run([sys.executable, "-c", script, str(root)], capture_output=True, text=True, timeout=10)
+        result = subprocess.run(
+            [sys.executable, "-c", script, str(root)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
         self.assertEqual(result.returncode, 23, result.stderr)
         self.assertGreater((root / "jobs.sqlite3-wal").stat().st_size, 0)
         store = JobStore(root)
         try:
             store.initialize()
             job = store.get_job("a" * 32)
-            self.assertEqual((job["status"], job["progress_percent"], job["cancel_requested"]), ("queued", 52, 0))
+            self.assertEqual(
+                (job["status"], job["progress_percent"], job["cancel_requested"]),
+                ("queued", 52, 0),
+            )
             metrics = store.metrics(job["id"])
-            self.assertEqual([run["status"] for run in metrics["runs"]], ["interrupted"])
-            self.assertEqual([step["status"] for step in metrics["steps"]], ["interrupted"])
+            self.assertEqual(
+                [run["status"] for run in metrics["runs"]], ["interrupted"]
+            )
+            self.assertEqual(
+                [step["status"] for step in metrics["steps"]], ["interrupted"]
+            )
             self.assertEqual(store.load_config(job["id"]), {"max_attempts": 3})
             with store.connect() as con:
-                self.assertEqual(con.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+                self.assertEqual(
+                    con.execute("PRAGMA integrity_check").fetchone()[0], "ok"
+                )
         finally:
             store.close()
 
@@ -374,8 +448,13 @@ with store.connect() as con:
             finally:
                 store.close()
 
-        with patch("document_processor.jobs.event"):  # keep the log of 160 updates out of the test output
-            writers = [threading.Thread(target=write, args=(identifier,)) for identifier in identifiers]
+        with patch(
+            "document_processor.jobs.event"
+        ):  # keep the log of 160 updates out of the test output
+            writers = [
+                threading.Thread(target=write, args=(identifier,))
+                for identifier in identifiers
+            ]
             readers = [threading.Thread(target=read) for _ in range(3)]
             for thread in readers + writers:
                 thread.start()
@@ -385,7 +464,13 @@ with store.connect() as con:
             for thread in readers:
                 thread.join()
         self.assertEqual(failures, [])
-        self.assertEqual([store.get_job(identifier)["progress_percent"] for identifier in identifiers], [40] * 4)
+        self.assertEqual(
+            [
+                store.get_job(identifier)["progress_percent"]
+                for identifier in identifiers
+            ],
+            [40] * 4,
+        )
 
 
 if __name__ == "__main__":

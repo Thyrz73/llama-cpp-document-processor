@@ -49,8 +49,11 @@ def named_queries(statements):
 
 
 def summary(samples):
-    return {"samples": len(samples), "median_us": round(statistics.median(samples), 3),
-            "p95_us": round(sorted(samples)[int(len(samples) * 0.95)], 3)}
+    return {
+        "samples": len(samples),
+        "median_us": round(statistics.median(samples), 3),
+        "p95_us": round(sorted(samples)[int(len(samples) * 0.95)], 3),
+    }
 
 
 def benchmark():
@@ -84,7 +87,10 @@ def benchmark():
                     query_plans = plans(store, list(queries.values()))
                     results, work = {}, {}
                     with store.connect() as con:
-                        size = con.execute("PRAGMA page_count").fetchone()[0] * con.execute("PRAGMA page_size").fetchone()[0]
+                        size = (
+                            con.execute("PRAGMA page_count").fetchone()[0]
+                            * con.execute("PRAGMA page_size").fetchone()[0]
+                        )
                         for name, sql in queries.items():
                             if name == "delete_plan_only":
                                 continue
@@ -99,47 +105,79 @@ def benchmark():
 
                             con.set_progress_handler(progress, 1)
                             try:
-                                results[name] = [tuple(row) for row in con.execute(sql).fetchall()]
+                                results[name] = [
+                                    tuple(row) for row in con.execute(sql).fetchall()
+                                ]
                             finally:
                                 con.set_progress_handler(None, 0)
                             work[name] = instructions
                     if not expected:
                         expected = results
                     assert results == expected
-                    store.list_jobs(100)  # Warm public controls and filesystem probes before timing.
-                    data[variant] = {"jobs": count, "variant": variant, "sqlite_version": sqlite3.sqlite_version,
-                                     "migration_ms": migration_ms, "database_bytes_before_insert_samples": size,
-                                     "plans": {name: query_plans[sql] for name, sql in queries.items()},
-                                     "read_vm_steps": work, "read_results_equal": results == expected,
-                                     "sql_samples": {name: [] for name in work},
-                                     "method_samples": {name: [] for name in ("list_jobs", "get_job", "metrics")}}
+                    store.list_jobs(
+                        100
+                    )  # Warm public controls and filesystem probes before timing.
+                    data[variant] = {
+                        "jobs": count,
+                        "variant": variant,
+                        "sqlite_version": sqlite3.sqlite_version,
+                        "migration_ms": migration_ms,
+                        "database_bytes_before_insert_samples": size,
+                        "plans": {
+                            name: query_plans[sql] for name, sql in queries.items()
+                        },
+                        "read_vm_steps": work,
+                        "read_results_equal": results == expected,
+                        "sql_samples": {name: [] for name in work},
+                        "method_samples": {
+                            name: [] for name in ("list_jobs", "get_job", "metrics")
+                        },
+                    }
                 # Alternate variants over five rounds to reduce order/warmup bias.
                 for round_number in range(5):
-                    for variant in (("v3", "v4") if round_number % 2 == 0 else ("v4", "v3")):
+                    for variant in (
+                        ("v3", "v4") if round_number % 2 == 0 else ("v4", "v3")
+                    ):
                         store = stores[variant]
                         with store.connect() as con:
                             for name in data[variant]["sql_samples"]:
                                 for _ in range(50):
                                     started = time.perf_counter_ns()
                                     con.execute(queries[name]).fetchall()
-                                    data[variant]["sql_samples"][name].append((time.perf_counter_ns() - started) / 1000)
+                                    data[variant]["sql_samples"][name].append(
+                                        (time.perf_counter_ns() - started) / 1000
+                                    )
                         for name in data[variant]["method_samples"]:
                             method = getattr(store, name)
                             args = (100,) if name == "list_jobs" else (f"{1:032x}",)
                             for _ in range(50):
                                 started = time.perf_counter_ns()
                                 method(*args)
-                                data[variant]["method_samples"][name].append((time.perf_counter_ns() - started) / 1000)
+                                data[variant]["method_samples"][name].append(
+                                    (time.perf_counter_ns() - started) / 1000
+                                )
                 for variant, store in stores.items():
                     samples = []
                     for number in range(1_000_000, 1_000_200):
                         started = time.perf_counter_ns()
-                        store.create_job(f"{number:032x}", "insert.pdf", "Analyze", 1,
-                                         {"profile": "low", "max_attempts": 3, "system_prompt": "Synthetic private prompt"})
+                        store.create_job(
+                            f"{number:032x}",
+                            "insert.pdf",
+                            "Analyze",
+                            1,
+                            {
+                                "profile": "low",
+                                "max_attempts": 3,
+                                "system_prompt": "Synthetic private prompt",
+                            },
+                        )
                         samples.append((time.perf_counter_ns() - started) / 1000)
                     data[variant]["create_job"] = summary(samples)
                     for group in ("sql_samples", "method_samples"):
-                        data[variant][group] = {name: summary(values) for name, values in data[variant][group].items()}
+                        data[variant][group] = {
+                            name: summary(values)
+                            for name, values in data[variant][group].items()
+                        }
                     print(json.dumps(data[variant]))
             finally:
                 for store in stores.values():

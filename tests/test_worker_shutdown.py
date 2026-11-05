@@ -26,7 +26,9 @@ class WorkerShutdownTests(unittest.TestCase):
 
     def create(self, number=1):
         identifier = f"{number:032x}"
-        self.store.create_job(identifier, "test.pdf", "Summarize", 1, {"max_attempts": 3})
+        self.store.create_job(
+            identifier, "test.pdf", "Summarize", 1, {"max_attempts": 3}
+        )
         return identifier
 
     def test_idle_worker_wakes_for_shutdown_and_closes_its_own_connection_only(self):
@@ -49,7 +51,10 @@ class WorkerShutdownTests(unittest.TestCase):
             closed.append((threading.get_ident(), kwargs))
 
         runner = Worker(self.store, lambda *args: self.fail("No job should run"))
-        with patch.object(self.store, "claim_next_job", side_effect=claim), patch.object(self.store, "close", side_effect=close):
+        with (
+            patch.object(self.store, "claim_next_job", side_effect=claim),
+            patch.object(self.store, "close", side_effect=close),
+        ):
             runner.start()
             try:
                 self.assertTrue(idle.wait(3))
@@ -80,11 +85,18 @@ class WorkerShutdownTests(unittest.TestCase):
                 self.assertTrue(runner.stop(timeout=1))
             finally:
                 runner.stop(timeout=1)
-            self.assertEqual(opens.call_count, 1, "Shutdown must not undo P1 connection reuse")
+            self.assertEqual(
+                opens.call_count, 1, "Shutdown must not undo P1 connection reuse"
+            )
         self.assertEqual(len(set(connections)), 1)
-        self.assertEqual([self.store.get_job(identifier)["status"] for identifier in identifiers], ["done", "done"])
+        self.assertEqual(
+            [self.store.get_job(identifier)["status"] for identifier in identifiers],
+            ["done", "done"],
+        )
 
-    def test_shutdown_during_transaction_commits_or_rolls_back_before_owner_closes(self):
+    def test_shutdown_during_transaction_commits_or_rolls_back_before_owner_closes(
+        self,
+    ):
         for rollback in (False, True):
             with self.subTest(rollback=rollback):
                 identifier = self.create(10 if rollback else 20)
@@ -94,7 +106,9 @@ class WorkerShutdownTests(unittest.TestCase):
                 def run(job_id, check):
                     self.store.update_job(job_id, progress_percent=20)
                     with self.store.connect() as con:
-                        con.execute("UPDATE jobs SET progress_percent=41 WHERE id=?", (job_id,))
+                        con.execute(
+                            "UPDATE jobs SET progress_percent=41 WHERE id=?", (job_id,)
+                        )
                         entered.set()
                         if not runner._stopping.wait(3):
                             raise RuntimeError("Shutdown was not requested")
@@ -110,22 +124,31 @@ class WorkerShutdownTests(unittest.TestCase):
                 finally:
                     runner.stop(timeout=1)
                 job = self.store.get_job(identifier)
-                self.assertEqual((job["status"], job["progress_percent"], job["cancel_requested"]),
-                                 ("running", 20 if rollback else 41, 0))
+                self.assertEqual(
+                    (job["status"], job["progress_percent"], job["cancel_requested"]),
+                    ("running", 20 if rollback else 41, 0),
+                )
                 self.assertEqual(self.store.get_job(waiting)["status"], "queued")
                 self.store.close()
                 copy = self.root / "copy.sqlite3"
                 shutil.copy(self.store.db_path, copy)
                 with closing(sqlite3.connect(copy)) as con:
-                    self.assertEqual(con.execute("SELECT progress_percent FROM jobs WHERE id=?", (identifier,)).fetchone()[0],
-                                     20 if rollback else 41)
+                    self.assertEqual(
+                        con.execute(
+                            "SELECT progress_percent FROM jobs WHERE id=?",
+                            (identifier,),
+                        ).fetchone()[0],
+                        20 if rollback else 41,
+                    )
                 self.store.initialize()
                 self.assertEqual(self.store.get_job(identifier)["status"], "queued")
                 # Keep the next subcase's queue empty.
                 for job_id in (identifier, waiting):
                     self.store.update_job(job_id, status="done")
 
-    def test_non_cooperative_worker_times_out_without_cross_thread_connection_close(self):
+    def test_non_cooperative_worker_times_out_without_cross_thread_connection_close(
+        self,
+    ):
         identifier = self.create()
         entered, release = threading.Event(), threading.Event()
 
@@ -149,7 +172,9 @@ class WorkerShutdownTests(unittest.TestCase):
                     self.store.close()
             self.assertLess(time.monotonic() - started, 2)
             self.assertTrue(runner._thread.is_alive())
-            self.assertTrue(any("worker_shutdown_timeout" in line for line in logs.output))
+            self.assertTrue(
+                any("worker_shutdown_timeout" in line for line in logs.output)
+            )
             self.assertTrue(any('status="busy"' in line for line in logs.output))
         finally:
             release.set()

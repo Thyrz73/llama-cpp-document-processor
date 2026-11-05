@@ -26,7 +26,11 @@ def integer(name, default, *, minimum=1, maximum=None):
     except ValueError:
         raise SettingsError(f"{name} must be an integer.") from None
     if value < minimum or (maximum is not None and value > maximum):
-        bounds = f"between {minimum} and {maximum}" if maximum is not None else f"at least {minimum}"
+        bounds = (
+            f"between {minimum} and {maximum}"
+            if maximum is not None
+            else f"at least {minimum}"
+        )
         raise SettingsError(f"{name} must be {bounds}.")
     return value
 
@@ -40,7 +44,9 @@ def flag(name, default):
         return True
     if raw.lower() in FALSE_VALUES:
         return False
-    raise SettingsError(f"{name} must be one of: {', '.join(TRUE_VALUES + FALSE_VALUES)}.")
+    raise SettingsError(
+        f"{name} must be one of: {', '.join(TRUE_VALUES + FALSE_VALUES)}."
+    )
 
 
 def choice(name, default, allowed):

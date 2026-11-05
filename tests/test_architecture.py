@@ -16,8 +16,10 @@ INTERFACE = ROOT / "static" / "js"
 # The module specifier of each static import or re-export, in either quote
 # style, with or without a semicolon: import "./a.js", import { b } from
 # "./b.js" and export { c } from "./c.js".
-JS_IMPORT = re.compile(r"""^\s*(?:import\s*["']([^"']+)["']|(?:import|export)\s[^;]*?\bfrom\s*["']([^"']+)["'])""",
-                       re.M)
+JS_IMPORT = re.compile(
+    r"""^\s*(?:import\s*["']([^"']+)["']|(?:import|export)\s[^;]*?\bfrom\s*["']([^"']+)["'])""",
+    re.M,
+)
 
 
 class ScriptTags(HTMLParser):
@@ -34,7 +36,10 @@ class ScriptTags(HTMLParser):
 
 def js_imports(path):
     """Return the module specifiers imported or re-exported by one interface module."""
-    return [plain or named for plain, named in JS_IMPORT.findall(path.read_text(encoding="utf-8"))]
+    return [
+        plain or named
+        for plain, named in JS_IMPORT.findall(path.read_text(encoding="utf-8"))
+    ]
 
 
 def imported_modules(path):
@@ -46,12 +51,20 @@ def imported_modules(path):
         elif isinstance(node, ast.ImportFrom):
             if node.level == 0 and node.module:
                 parts = node.module.split(".")
-                names.add(parts[1] if parts[0] == PACKAGE.name and len(parts) > 1 else parts[0])
+                names.add(
+                    parts[1]
+                    if parts[0] == PACKAGE.name and len(parts) > 1
+                    else parts[0]
+                )
                 if node.module == PACKAGE.name:
                     names.update(alias.name for alias in node.names)
             elif node.level == 1:
                 # "from .x import y" imports module x; "from . import x, y" imports modules x and y.
-                names.update([node.module.split(".")[0]] if node.module else [alias.name for alias in node.names])
+                names.update(
+                    [node.module.split(".")[0]]
+                    if node.module
+                    else [alias.name for alias in node.names]
+                )
     modules = {path.stem for path in PACKAGE.glob("*.py")}
     return {name for name in names if name in modules or name == "app"}
 
@@ -64,7 +77,7 @@ def find_cycle(graph):
         if module in done:
             return None
         if module in visiting:
-            return visiting[visiting.index(module):] + [module]
+            return visiting[visiting.index(module) :] + [module]
         visiting.append(module)
         for imported in sorted(graph.get(module, ())):
             cycle = visit(imported)
@@ -83,14 +96,20 @@ def find_cycle(graph):
 
 class ArchitectureTests(unittest.TestCase):
     def setUp(self):
-        self.graph = {path.stem: imported_modules(path) for path in PACKAGE.glob("*.py")}
+        self.graph = {
+            path.stem: imported_modules(path) for path in PACKAGE.glob("*.py")
+        }
 
     def test_package_never_imports_the_web_app(self):
-        offenders = sorted(module for module, imports in self.graph.items() if "app" in imports)
+        offenders = sorted(
+            module for module, imports in self.graph.items() if "app" in imports
+        )
         self.assertEqual(offenders, [], "document_processor must not depend on app.py")
 
     def test_package_imports_form_no_cycle(self):
-        cycle = find_cycle({module: imports - {"app"} for module, imports in self.graph.items()})
+        cycle = find_cycle(
+            {module: imports - {"app"} for module, imports in self.graph.items()}
+        )
         self.assertIsNone(cycle, "import cycle: " + " -> ".join(cycle or []))
 
 
@@ -101,7 +120,11 @@ class InterfaceModuleTests(unittest.TestCase):
     def test_page_loads_the_entry_module(self):
         tags = ScriptTags()
         tags.feed((ROOT / "templates" / "index.html").read_text(encoding="utf-8"))
-        modules = [script.get("src", "") for script in tags.scripts if script.get("type") == "module"]
+        modules = [
+            script.get("src", "")
+            for script in tags.scripts
+            if script.get("type") == "module"
+        ]
         self.assertEqual(len(modules), 1, "the page must load exactly one module")
         self.assertIn("filename='js/main.js'", modules[0])
 
@@ -109,12 +132,20 @@ class InterfaceModuleTests(unittest.TestCase):
         for module, specifiers in self.imports.items():
             with self.subTest(module=module):
                 # Browsers resolve only relative or absolute URLs without an import map.
-                self.assertEqual([name for name in specifiers if not name.startswith("./")], [])
-                self.assertEqual({name[2:] for name in specifiers} - set(self.imports), set(),
-                                 "import of a missing module")
+                self.assertEqual(
+                    [name for name in specifiers if not name.startswith("./")], []
+                )
+                self.assertEqual(
+                    {name[2:] for name in specifiers} - set(self.imports),
+                    set(),
+                    "import of a missing module",
+                )
 
     def test_interface_imports_form_no_cycle_and_every_module_is_used(self):
-        graph = {module: {name[2:] for name in specifiers} for module, specifiers in self.imports.items()}
+        graph = {
+            module: {name[2:] for name in specifiers}
+            for module, specifiers in self.imports.items()
+        }
         cycle = find_cycle(graph)
         self.assertIsNone(cycle, "import cycle: " + " -> ".join(cycle or []))
         reachable, pending = set(), ["main.js"]
@@ -123,7 +154,9 @@ class InterfaceModuleTests(unittest.TestCase):
             if module not in reachable:
                 reachable.add(module)
                 pending.extend(graph.get(module, ()))
-        self.assertEqual(set(graph) - reachable, set(), "modules never imported from main.js")
+        self.assertEqual(
+            set(graph) - reachable, set(), "modules never imported from main.js"
+        )
 
 
 if __name__ == "__main__":

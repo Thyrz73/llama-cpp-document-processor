@@ -41,16 +41,33 @@ def current_job_id():
 def event(name, severity=logging.INFO, **fields):
     """Log one line: the event name followed by JSON-encoded key=value fields."""
     if log.isEnabledFor(severity):
-        log.log(severity, "%s %s", name, " ".join(
-            f"{key}={json.dumps(value, ensure_ascii=True)}" for key, value in fields.items()))
+        log.log(
+            severity,
+            "%s %s",
+            name,
+            " ".join(
+                f"{key}={json.dumps(value, ensure_ascii=True)}"
+                for key, value in fields.items()
+            ),
+        )
 
 
 def failure(name, exc, **fields):
     """Record all traceback frames without source lines, locals or private messages."""
     code = getattr(exc, "code", "application_error")
     fields.update(error_code=code, error_type=type(exc).__name__)
-    context = " ".join(f"{key}={json.dumps(value, ensure_ascii=True)}" for key, value in fields.items())
-    frames = "\n".join(f'  File "{Path(frame.f_code.co_filename).name}", line {line}, in {frame.f_code.co_name}'
-                       for frame, line in traceback.walk_tb(exc.__traceback__))
-    log.error("%s %s\nTraceback (most recent call last):\n%s\n%s: %s (private details omitted)",
-              name, context, frames, type(exc).__name__, code)
+    context = " ".join(
+        f"{key}={json.dumps(value, ensure_ascii=True)}" for key, value in fields.items()
+    )
+    frames = "\n".join(
+        f'  File "{Path(frame.f_code.co_filename).name}", line {line}, in {frame.f_code.co_name}'
+        for frame, line in traceback.walk_tb(exc.__traceback__)
+    )
+    log.error(
+        "%s %s\nTraceback (most recent call last):\n%s\n%s: %s (private details omitted)",
+        name,
+        context,
+        frames,
+        type(exc).__name__,
+        code,
+    )

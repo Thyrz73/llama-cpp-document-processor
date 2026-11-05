@@ -23,18 +23,42 @@ from test_stream_metrics import CountingParts
 
 def benchmark(reference):
     source = subprocess.check_output(
-        ["git", "show", f"{reference}:document_processor/model_client.py"], text=True)
+        ["git", "show", f"{reference}:document_processor/model_client.py"], text=True
+    )
     body = ast.parse(source).body
-    splitter = next(node for node in body if isinstance(node, ast.ClassDef) and node.name == "ThinkingSplitter")
-    client_class = next(node for node in body if isinstance(node, ast.ClassDef) and node.name == "ModelClient")
-    generate = next(node for node in client_class.body if isinstance(node, ast.FunctionDef) and node.name == "generate")
+    splitter = next(
+        node
+        for node in body
+        if isinstance(node, ast.ClassDef) and node.name == "ThinkingSplitter"
+    )
+    client_class = next(
+        node
+        for node in body
+        if isinstance(node, ast.ClassDef) and node.name == "ModelClient"
+    )
+    generate = next(
+        node
+        for node in client_class.body
+        if isinstance(node, ast.FunctionDef) and node.name == "generate"
+    )
     namespace = dict(model_client.__dict__)
-    exec(compile(ast.Module(body=[splitter, generate], type_ignores=[]), "reference_stream", "exec"), namespace)
+    exec(
+        compile(
+            ast.Module(body=[splitter, generate], type_ignores=[]),
+            "reference_stream",
+            "exec",
+        ),
+        namespace,
+    )
     previous_splitter = namespace["ThinkingSplitter"]
     for count in (1000, 10000):
         expected = None
         for variant in ("reference", "working_tree"):
-            base = previous_splitter if variant == "reference" else model_client.ThinkingSplitter
+            base = (
+                previous_splitter
+                if variant == "reference"
+                else model_client.ThinkingSplitter
+            )
             instances = []
 
             class TrackedSplitter(base):
@@ -46,13 +70,15 @@ def benchmark(reference):
             client = model_client.ModelClient("http://unused.invalid", "", {}, "")
             client.fits = lambda *args: (True, 10, "estimated_template", 384)
             client.model = lambda: "fake"
-            line = 'data: ' + json.dumps({"choices": [{"delta": {"content": "abcdefgh"}}]})
+            line = "data: " + json.dumps(
+                {"choices": [{"delta": {"content": "abcdefgh"}}]}
+            )
 
             def lines(payload):
                 for _ in range(count):
                     client.check_cancelled()
                     yield line
-                yield 'data: [DONE]'
+                yield "data: [DONE]"
 
             client.stream_lines = lines
             if variant == "reference":
@@ -63,17 +89,36 @@ def benchmark(reference):
                     started = time.perf_counter()
                     result = client.generate("instructions", "source", 100)
                     elapsed_ms = (time.perf_counter() - started) * 1000
-                values = (result.content, {key: value for key, value in result.metrics.items()
-                                          if key not in ("request_started_at", "request_ms", "first_event_ms", "first_content_ms")})
+                values = (
+                    result.content,
+                    {
+                        key: value
+                        for key, value in result.metrics.items()
+                        if key
+                        not in (
+                            "request_started_at",
+                            "request_ms",
+                            "first_event_ms",
+                            "first_content_ms",
+                        )
+                    },
+                )
                 if expected is None:
                     expected = values
                 assert values == expected
-                print(json.dumps({"variant": variant, "fragments": count,
-                                  "stored_fragment_visits": instances[0].content_parts.visits,
-                                  "content_chars": result.metrics["content_chars"],
-                                  "reasoning_chars": result.metrics["reasoning_chars"],
-                                  "output_and_non_timing_metrics_equal": values == expected,
-                                  "instrumented_ms": round(elapsed_ms, 3)}))
+                print(
+                    json.dumps(
+                        {
+                            "variant": variant,
+                            "fragments": count,
+                            "stored_fragment_visits": instances[0].content_parts.visits,
+                            "content_chars": result.metrics["content_chars"],
+                            "reasoning_chars": result.metrics["reasoning_chars"],
+                            "output_and_non_timing_metrics_equal": values == expected,
+                            "instrumented_ms": round(elapsed_ms, 3),
+                        }
+                    )
+                )
             finally:
                 client.session.close()
 

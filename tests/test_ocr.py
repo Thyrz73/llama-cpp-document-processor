@@ -1,4 +1,5 @@
 """Test PDF extraction with local Tesseract."""
+
 import os
 import shutil
 import tempfile
@@ -13,7 +14,8 @@ SETTINGS = app.runtime_defaults()["extraction"]
 
 # CI installs Tesseract, so a missing binary there must fail instead of skipping.
 requires_tesseract = unittest.skipUnless(
-    shutil.which("tesseract") or os.getenv("CI"), "Tesseract is not installed locally")
+    shutil.which("tesseract") or os.getenv("CI"), "Tesseract is not installed locally"
+)
 
 
 class TestExtraction(unittest.TestCase):
@@ -54,10 +56,16 @@ class TestExtraction(unittest.TestCase):
     def test_searchable_pdf_skips_ocr(self):
         """Skip OCR when the text layer is usable."""
         pdf = pymupdf.open()
-        self.write_text_page(pdf, "This is a searchable document with real letters and words about geophysics.")
+        self.write_text_page(
+            pdf,
+            "This is a searchable document with real letters and words about geophysics.",
+        )
         pdf.save(self.file)
         pdf.close()
-        with patch("document_processor.extraction.ocr_page", side_effect=AssertionError("OCR should not run")):
+        with patch(
+            "document_processor.extraction.ocr_page",
+            side_effect=AssertionError("OCR should not run"),
+        ):
             pages, count, missing, ocr = extract_pdf(self.file, SETTINGS)
         self.assertEqual((count, ocr, missing), (1, [], []))
         self.assertIn("searchable document", pages[0]["text"])
@@ -66,7 +74,9 @@ class TestExtraction(unittest.TestCase):
     def test_image_pdf_uses_ocr(self):
         """Recognize an image page and preserve its page number."""
         pdf = pymupdf.open()
-        self.insert_scan_page(pdf, "Scientific document analysis. Field data and important results.")
+        self.insert_scan_page(
+            pdf, "Scientific document analysis. Field data and important results."
+        )
         pdf.save(self.file)
         pdf.close()
         pages, count, missing, ocr = extract_pdf(self.file, SETTINGS)
@@ -79,8 +89,13 @@ class TestExtraction(unittest.TestCase):
     def test_mixed_pdf_ocr_only_scan_page(self):
         """Restrict OCR to the scanned page in a mixed document."""
         pdf = pymupdf.open()
-        self.write_text_page(pdf, "Measurements and measurements and observations are recorded here in text.")
-        self.insert_scan_page(pdf, "Numerical model results are recorded here with a clear conclusion.")
+        self.write_text_page(
+            pdf,
+            "Measurements and measurements and observations are recorded here in text.",
+        )
+        self.insert_scan_page(
+            pdf, "Numerical model results are recorded here with a clear conclusion."
+        )
         pdf.save(self.file)
         pdf.close()
         pages, count, missing, ocr = extract_pdf(self.file, SETTINGS)

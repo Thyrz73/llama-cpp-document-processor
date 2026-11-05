@@ -12,6 +12,7 @@ Settings are read from the environment when this module is imported.
 Running ``python app.py`` prepares the database, starts the worker and serves
 the API with Waitress; importing the module starts neither.
 """
+
 from __future__ import annotations
 
 import copy
@@ -31,7 +32,16 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from flask import Flask, abort, g, jsonify, make_response, render_template, request, send_file
+from flask import (
+    Flask,
+    abort,
+    g,
+    jsonify,
+    make_response,
+    render_template,
+    request,
+    send_file,
+)
 from waitress import serve
 from werkzeug.exceptions import Conflict, NotFound, RequestEntityTooLarge
 
@@ -40,7 +50,14 @@ from document_processor import environment, pipeline, profiles, prompts, reports
 from document_processor.database import SchemaVersionError
 from document_processor.errors import ModelError
 from document_processor.files import file_hash
-from document_processor.jobs import PREVIEW_FILE, REPORT_FILE, SOURCE_FILE, InvalidJobPath, JobStore, is_job_id
+from document_processor.jobs import (
+    PREVIEW_FILE,
+    REPORT_FILE,
+    SOURCE_FILE,
+    InvalidJobPath,
+    JobStore,
+    is_job_id,
+)
 from document_processor.model_client import ModelClient as BackendClient
 from document_processor.observability import configure_logging, event, failure
 from document_processor.worker import Worker
@@ -51,7 +68,9 @@ from document_processor.worker import Worker
 try:
     APP_PORT = environment.integer("APP_PORT", 9932, maximum=65535)
     DATA = Path(os.getenv("DATA_DIR") or "/app/data")
-    LLAMA_BASE = environment.http_url("LLAMA_BASE_URL", "http://host.docker.internal:8080")
+    LLAMA_BASE = environment.http_url(
+        "LLAMA_BASE_URL", "http://host.docker.internal:8080"
+    )
     KEY = os.getenv("LLAMA_API_KEY", "")
     MAX_UPLOAD_MB = environment.integer("MAX_UPLOAD_MB", 20)
     MAX_PAGES = environment.integer("MAX_PAGES", 120)
@@ -66,18 +85,25 @@ try:
     MAX_MODEL_CALLS = environment.integer("MAX_MODEL_CALLS", 500)
     MAX_JOB_ATTEMPTS = environment.integer("MAX_JOB_ATTEMPTS", 10)
     LIVE_OUTPUT_ENABLED = environment.flag("LIVE_OUTPUT_ENABLED", True)
-    LIVE_PREVIEW_CHARS = max(1000, min(environment.integer("LIVE_PREVIEW_CHARS", 12000), 50000))
+    LIVE_PREVIEW_CHARS = max(
+        1000, min(environment.integer("LIVE_PREVIEW_CHARS", 12000), 50000)
+    )
     OCR_ENABLED = environment.flag("OCR_ENABLED", True)
     OCR_LANGUAGES = os.getenv("OCR_LANGUAGES", "").strip() or "eng+fra"
     OCR_DPI = environment.integer("OCR_DPI", 150)
     OCR_MAX_PIXELS = environment.integer("OCR_MAX_PIXELS", 5000000)
     OCR_TIMEOUT = environment.integer("OCR_TIMEOUT_SECONDS", 180)
-    THINKING_ADAPTER = environment.choice("LLAMA_THINKING_ADAPTER", "unsupported",
-                                       ("unsupported", "chat_template", "prompt"))
+    THINKING_ADAPTER = environment.choice(
+        "LLAMA_THINKING_ADAPTER",
+        "unsupported",
+        ("unsupported", "chat_template", "prompt"),
+    )
     INITIAL_THINKING = environment.flag("LLAMA_INITIAL_THINKING", False)
     APPLY_TEMPLATE_SUPPORTED = environment.flag("LLAMA_APPLY_TEMPLATE_SUPPORTED", False)
     USAGE_SUPPORTED = environment.flag("LLAMA_USAGE_SUPPORTED", False)
-    SYSTEM_FILE = Path(os.getenv("SYSTEM_PROMPT_FILE") or "/app/config/system_prompt.txt")
+    SYSTEM_FILE = Path(
+        os.getenv("SYSTEM_PROMPT_FILE") or "/app/config/system_prompt.txt"
+    )
 except environment.SettingsError as exc:
     raise SystemExit(f"Configuration error: {exc}") from None
 MAX_QUESTION_CHARS = 1500
@@ -96,10 +122,14 @@ class ProcessorFlask(Flask):
 
 app = ProcessorFlask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_MB * 1024 * 1024 + 65536
-TRANSLATIONS = json.loads((Path(__file__).parent / "static" / "translations.json").read_text(encoding="utf-8"))
+TRANSLATIONS = json.loads(
+    (Path(__file__).parent / "static" / "translations.json").read_text(encoding="utf-8")
+)
 # Used when a request omits the question; older interfaces also sent it.
 FALLBACK_QUESTION = "Analyze the entire document"
-DEFAULT_QUESTIONS = {TRANSLATIONS[language]["default_question"] for language in ("en", "fr")} | {FALLBACK_QUESTION}
+DEFAULT_QUESTIONS = {
+    TRANSLATIONS[language]["default_question"] for language in ("en", "fr")
+} | {FALLBACK_QUESTION}
 
 
 def is_default_question(question):
@@ -113,7 +143,11 @@ def public_job(job):
     Their question_custom stays null unless the request is a known default,
     so the browser never needs its own copy of the default questions.
     """
-    if job.get("question_custom") is None and job.get("question") and is_default_question(job["question"]):
+    if (
+        job.get("question_custom") is None
+        and job.get("question")
+        and is_default_question(job["question"])
+    ):
         job["question_custom"] = 0
     return job
 
@@ -130,7 +164,9 @@ def read_system_prompt():
     try:
         return SYSTEM_FILE.read_text(encoding="utf-8").strip()
     except (OSError, UnicodeError):
-        raise job_config.ConfigurationError("missing_prompt", "The system prompt is missing or unreadable.") from None
+        raise job_config.ConfigurationError(
+            "missing_prompt", "The system prompt is missing or unreadable."
+        ) from None
 
 
 def runtime_defaults():
@@ -139,18 +175,36 @@ def runtime_defaults():
     New jobs start from it; existing jobs keep the configuration of their snapshot.
     """
     return {
-        "chunk_tokens": CHUNK_TOKENS, "context_tokens": CONTEXT_TOKENS,
-        "analysis_tokens": ANALYSIS_TOKENS, "merge_tokens": MERGE_TOKENS,
-        "final_tokens": FINAL_TOKENS, "report_language": OUTPUT_LANGUAGE,
-        "temperature": 0.2, "top_p": None, "top_k": None, "min_p": None,
-        "thinking_section": "inherit", "thinking_merge": "inherit", "thinking_final": "inherit",
-        "thinking_adapter": THINKING_ADAPTER, "initial_thinking": INITIAL_THINKING,
-        "apply_template": APPLY_TEMPLATE_SUPPORTED, "usage_supported": USAGE_SUPPORTED,
-        "request_timeout": REQUEST_TIMEOUT, "step_timeout_seconds": STEP_TIMEOUT,
-        "max_calls": MAX_MODEL_CALLS, "max_attempts": MAX_JOB_ATTEMPTS,
-        "extraction": {"version": 3, "enabled": OCR_ENABLED, "languages": OCR_LANGUAGES,
-                       "dpi": OCR_DPI, "max_pixels": OCR_MAX_PIXELS, "timeout": OCR_TIMEOUT,
-                       "max_pages": MAX_PAGES},
+        "chunk_tokens": CHUNK_TOKENS,
+        "context_tokens": CONTEXT_TOKENS,
+        "analysis_tokens": ANALYSIS_TOKENS,
+        "merge_tokens": MERGE_TOKENS,
+        "final_tokens": FINAL_TOKENS,
+        "report_language": OUTPUT_LANGUAGE,
+        "temperature": 0.2,
+        "top_p": None,
+        "top_k": None,
+        "min_p": None,
+        "thinking_section": "inherit",
+        "thinking_merge": "inherit",
+        "thinking_final": "inherit",
+        "thinking_adapter": THINKING_ADAPTER,
+        "initial_thinking": INITIAL_THINKING,
+        "apply_template": APPLY_TEMPLATE_SUPPORTED,
+        "usage_supported": USAGE_SUPPORTED,
+        "request_timeout": REQUEST_TIMEOUT,
+        "step_timeout_seconds": STEP_TIMEOUT,
+        "max_calls": MAX_MODEL_CALLS,
+        "max_attempts": MAX_JOB_ATTEMPTS,
+        "extraction": {
+            "version": 3,
+            "enabled": OCR_ENABLED,
+            "languages": OCR_LANGUAGES,
+            "dpi": OCR_DPI,
+            "max_pixels": OCR_MAX_PIXELS,
+            "timeout": OCR_TIMEOUT,
+            "max_pages": MAX_PAGES,
+        },
     }
 
 
@@ -162,10 +216,15 @@ def new_snapshot(options, capabilities=None):
     ConfigurationError for invalid options or an empty system prompt.
     """
     config = job_config.resolve(runtime_defaults(), options, capabilities)
-    config.update(system_prompt=read_system_prompt(), templates=dict(prompts.TEMPLATES),
-                  prompt_version=prompts.PROMPT_VERSION)
+    config.update(
+        system_prompt=read_system_prompt(),
+        templates=dict(prompts.TEMPLATES),
+        prompt_version=prompts.PROMPT_VERSION,
+    )
     if not config["system_prompt"]:
-        raise job_config.ConfigurationError("missing_prompt", "The system prompt is empty.")
+        raise job_config.ConfigurationError(
+            "missing_prompt", "The system prompt is empty."
+        )
     return config
 
 
@@ -178,7 +237,11 @@ CAPABILITY_FAILURE_CACHE_SECONDS = 5
 def capability_backend(client=None):
     """Identify the configured backend privately, without retaining another credential copy."""
     base = LLAMA_BASE if client is None else client.base_url
-    authorization = (f"Bearer {KEY}" if KEY else "") if client is None else client.session.headers.get("Authorization", "")
+    authorization = (
+        (f"Bearer {KEY}" if KEY else "")
+        if client is None
+        else client.session.headers.get("Authorization", "")
+    )
     return base.rstrip("/"), hashlib.sha256(authorization.encode("utf-8")).digest()
 
 
@@ -189,7 +252,10 @@ def cached_capabilities(client=None):
     live for 5 seconds. Reads never extend the original expiration.
     """
     cached = _capability_cache
-    if cached.get("backend") == capability_backend(client) and time.monotonic() < cached["expires"]:
+    if (
+        cached.get("backend") == capability_backend(client)
+        and time.monotonic() < cached["expires"]
+    ):
         return copy.deepcopy(cached["value"])
     return None
 
@@ -198,11 +264,16 @@ def remember_capabilities(value, client=None):
     """Publish one complete cache entry; callers serialize inspections with the lock."""
     global _capability_cache
     context = value.get("context_tokens")
-    healthy = value.get("status") == "available" and type(context) is int and context > 0
+    healthy = (
+        value.get("status") == "available" and type(context) is int and context > 0
+    )
     ttl = CAPABILITY_CACHE_SECONDS if healthy else CAPABILITY_FAILURE_CACHE_SECONDS
-    _capability_cache = {"value": copy.deepcopy(value), "expires": time.monotonic() + ttl,
-                         "backend": capability_backend(client),
-                         "model_name": client.model_name if client is not None else None}
+    _capability_cache = {
+        "value": copy.deepcopy(value),
+        "expires": time.monotonic() + ttl,
+        "backend": capability_backend(client),
+        "model_name": client.model_name if client is not None else None,
+    }
 
 
 def invalidate_capabilities(client):
@@ -218,8 +289,13 @@ class ModelClient(BackendClient):
     def __init__(self, config=None):
         settings = config if config is not None else runtime_defaults()
         prompt = settings.get("system_prompt")
-        super().__init__(LLAMA_BASE, KEY, settings,
-                         read_system_prompt() if prompt is None else prompt, LIVE_PREVIEW_CHARS)
+        super().__init__(
+            LLAMA_BASE,
+            KEY,
+            settings,
+            read_system_prompt() if prompt is None else prompt,
+            LIVE_PREVIEW_CHARS,
+        )
 
     def inspect(self, *, cached=None):
         """Read capabilities for display, allowing the shared TTL cache."""
@@ -241,7 +317,9 @@ class ModelClient(BackendClient):
                 self.capabilities = previous
                 self.model_name = None
                 return previous
-            model_name = _capability_cache.get("model_name") if previous is not None else None
+            model_name = (
+                _capability_cache.get("model_name") if previous is not None else None
+            )
             if for_identity:
                 try:
                     value = super().inspect_identity()
@@ -249,7 +327,9 @@ class ModelClient(BackendClient):
                     remember_capabilities(self.capabilities, self)
                     raise
             else:
-                value = super().inspect(cached=(model_name, previous) if previous is not None else None)
+                value = super().inspect(
+                    cached=(model_name, previous) if previous is not None else None
+                )
             if previous is None or self.model_name != model_name or value != previous:
                 remember_capabilities(value, self)
             return value
@@ -290,10 +370,17 @@ def analyze_job(job_id, cancellation_requested=None):
     The worker passes its own cancellation check; without one, every check
     reads SQLite.
     """
-    pipeline.run(job_id, pipeline.Runtime(
-        store=store, new_snapshot=new_snapshot, model_client=ModelClient,
-        cancellation_requested=cancellation_requested or store.read_cancellation,
-        live_output=LIVE_OUTPUT_ENABLED, preview_chars=LIVE_PREVIEW_CHARS))
+    pipeline.run(
+        job_id,
+        pipeline.Runtime(
+            store=store,
+            new_snapshot=new_snapshot,
+            model_client=ModelClient,
+            cancellation_requested=cancellation_requested or store.read_cancellation,
+            live_output=LIVE_OUTPUT_ENABLED,
+            preview_chars=LIVE_PREVIEW_CHARS,
+        ),
+    )
 
 
 # The single background worker; routes wake it when the queue changes.
@@ -331,10 +418,12 @@ def profile_info():
     context = (capabilities or {}).get("context_tokens")
     if type(context) is int and context > 0:
         defaults["warnings"].remove("engine_context_unknown")
-    return jsonify(profiles=profiles.catalog(),
-                   defaults=job_config.public_config(defaults),
-                   capabilities=capabilities,
-                   thinking_supported=runtime_defaults()["thinking_adapter"] != "unsupported")
+    return jsonify(
+        profiles=profiles.catalog(),
+        defaults=job_config.public_config(defaults),
+        capabilities=capabilities,
+        thinking_supported=runtime_defaults()["thinking_adapter"] != "unsupported",
+    )
 
 
 @app.post("/api/config/preview")
@@ -344,11 +433,16 @@ def config_preview():
         raise job_config.ConfigurationError("invalid_options", "Options are too large.")
     options = request.get_json()
     if not isinstance(options, dict):
-        raise job_config.ConfigurationError("invalid_options", "Options must be a JSON object.")
+        raise job_config.ConfigurationError(
+            "invalid_options", "Options must be a JSON object."
+        )
     capabilities = cached_capabilities()
     config = job_config.resolve(runtime_defaults(), options, capabilities)
-    return jsonify(configuration=job_config.public_config(config),
-                   capabilities=capabilities, validation="preliminary")
+    return jsonify(
+        configuration=job_config.public_config(config),
+        capabilities=capabilities,
+        validation="preliminary",
+    )
 
 
 @app.get("/api/diagnostics")
@@ -364,20 +458,37 @@ def diagnostics():
             client = BackendClient(LLAMA_BASE, KEY, runtime_defaults(), "")
             try:
                 value = client.inspect()
-                event("backend_checked", status=value.get("status", "unknown"), source="diagnostics")
+                event(
+                    "backend_checked",
+                    status=value.get("status", "unknown"),
+                    source="diagnostics",
+                )
             finally:
                 client.session.close()
             remember_capabilities(value, client)
     process_rss_kib = None
     try:
-        matched = re.search(r"^VmRSS:\s+(\d+)", Path("/proc/self/status").read_text(encoding="utf-8"), re.M)
+        matched = re.search(
+            r"^VmRSS:\s+(\d+)",
+            Path("/proc/self/status").read_text(encoding="utf-8"),
+            re.M,
+        )
         if matched:
             process_rss_kib = int(matched[1])
     except OSError:
         pass
-    return jsonify(backend=value, application={"context_limit": CONTEXT_TOKENS, "concurrency": 1,
-                   "process_rss_kib": process_rss_kib, "resource_scope": "processor_only"},
-                   engine_settings="read_only", engine_memory=None, engine_swap_rate=None)
+    return jsonify(
+        backend=value,
+        application={
+            "context_limit": CONTEXT_TOKENS,
+            "concurrency": 1,
+            "process_rss_kib": process_rss_kib,
+            "resource_scope": "processor_only",
+        },
+        engine_settings="read_only",
+        engine_memory=None,
+        engine_swap_rate=None,
+    )
 
 
 @app.get("/api/jobs")
@@ -388,7 +499,9 @@ def list_jobs():
     browser keeps polling while any job is queued or running.
     """
     jobs, has_active_jobs = store.list_jobs(100)
-    return jsonify(jobs=[public_job(job) for job in jobs], has_active_jobs=has_active_jobs)
+    return jsonify(
+        jobs=[public_job(job) for job in jobs], has_active_jobs=has_active_jobs
+    )
 
 
 @app.get("/api/jobs/<job_id>")
@@ -417,9 +530,17 @@ def delete_history_job(job_id):
         failure("history_delete_failed", exc, job_id=job_id)
         return {"id": job_id, "deleted": False, "error_code": "delete_database"}, 500
     if error_code:
-        return {"id": job_id, "deleted": False, "error_code": error_code}, 404 if error_code == "job_not_found" else 409
+        return {
+            "id": job_id,
+            "deleted": False,
+            "error_code": error_code,
+        }, 404 if error_code == "job_not_found" else 409
     warning = store.remove_files(job_id)
-    event("history_deleted", job_id=job_id, status="files_retained" if warning else "deleted")
+    event(
+        "history_deleted",
+        job_id=job_id,
+        status="files_retained" if warning else "deleted",
+    )
     return {"id": job_id, "deleted": True, "warning_code": warning}, 200
 
 
@@ -437,11 +558,16 @@ def delete_jobs():
         return jsonify(error_code="invalid_job_ids"), 400
     payload = request.get_json(silent=True)
     ids = payload.get("ids") if isinstance(payload, dict) else None
-    if (not isinstance(ids, list) or not 1 <= len(ids) <= 100
-            or not all(is_job_id(value) for value in ids)):
+    if (
+        not isinstance(ids, list)
+        or not 1 <= len(ids) <= 100
+        or not all(is_job_id(value) for value in ids)
+    ):
         return jsonify(error_code="invalid_job_ids"), 400
     results = [delete_history_job(job_id)[0] for job_id in dict.fromkeys(ids)]
-    return jsonify(results=results), 200 if all(item["deleted"] for item in results) else 207
+    return jsonify(results=results), 200 if all(
+        item["deleted"] for item in results
+    ) else 207
 
 
 @app.post("/api/jobs")
@@ -462,13 +588,22 @@ def create_job():
     if not uploaded or not uploaded.filename:
         return jsonify(error="Select a PDF file", error_code="invalid_pdf"), 400
     if not question.strip() or len(question) > MAX_QUESTION_CHARS:
-        return jsonify(error=f"Instructions required (maximum {MAX_QUESTION_CHARS} characters)", error_code="invalid_question"), 400
-    config["effective_report_language"] = prompts.resolve_report_language(config["report_language"], question)
+        return jsonify(
+            error=f"Instructions required (maximum {MAX_QUESTION_CHARS} characters)",
+            error_code="invalid_question",
+        ), 400
+    config["effective_report_language"] = prompts.resolve_report_language(
+        config["report_language"], question
+    )
     filename = uploaded.filename.replace("\\", "/").split("/")[-1][:120]
     if not filename.lower().endswith(".pdf"):
-        return jsonify(error="Only .pdf files are accepted", error_code="invalid_pdf"), 400
+        return jsonify(
+            error="Only .pdf files are accepted", error_code="invalid_pdf"
+        ), 400
     if uploaded.stream.read(5) != b"%PDF-":
-        return jsonify(error="The file does not appear to be a valid PDF", error_code="invalid_pdf"), 400
+        return jsonify(
+            error="The file does not appear to be a valid PDF", error_code="invalid_pdf"
+        ), 400
     uploaded.stream.seek(0)
     job_id = uuid.uuid4().hex
     directory = job_directory(job_id)
@@ -479,18 +614,30 @@ def create_job():
         if source.stat().st_size > MAX_UPLOAD_MB * 1024 * 1024:
             raise RequestEntityTooLarge()
         config["source_hash"] = file_hash(source)
-        store.create_job(job_id, filename, question, int(not is_default_question(question)), config)
+        store.create_job(
+            job_id, filename, question, int(not is_default_question(question)), config
+        )
     except Exception:
         source.unlink(missing_ok=True)
         directory.rmdir()
         raise
     worker.wake()
-    event("job_created", job_id=job_id, filename=filename, bytes=source.stat().st_size,
-          profile=config["profile"], custom_prompt=not is_default_question(question),
-          chunk_tokens=config["chunk_tokens"], analysis_tokens=config["analysis_tokens"],
-          merge_tokens=config["merge_tokens"], final_tokens=config["final_tokens"],
-          report_language=config["report_language"])
-    return jsonify(id=job_id, status="queued", configuration=job_config.public_config(config)), 201
+    event(
+        "job_created",
+        job_id=job_id,
+        filename=filename,
+        bytes=source.stat().st_size,
+        profile=config["profile"],
+        custom_prompt=not is_default_question(question),
+        chunk_tokens=config["chunk_tokens"],
+        analysis_tokens=config["analysis_tokens"],
+        merge_tokens=config["merge_tokens"],
+        final_tokens=config["final_tokens"],
+        report_language=config["report_language"],
+    )
+    return jsonify(
+        id=job_id, status="queued", configuration=job_config.public_config(config)
+    ), 201
 
 
 @app.get("/api/jobs/<job_id>/live")
@@ -506,8 +653,13 @@ def job_live(job_id):
         abort(404)
     path = job_directory(job_id) / PREVIEW_FILE
     if not LIVE_OUTPUT_ENABLED:
-        return jsonify(phase=job["stage"], content="", reasoning="",
-                       active=False, enabled=LIVE_OUTPUT_ENABLED)
+        return jsonify(
+            phase=job["stage"],
+            content="",
+            reasoning="",
+            active=False,
+            enabled=LIVE_OUTPUT_ENABLED,
+        )
     payload = store.previews.get(job_id)
     if payload is not None and payload.get("_attempt_id") != attempt_id:
         store.previews.discard(job_id)
@@ -518,13 +670,29 @@ def job_live(job_id):
         except (OSError, ValueError, UnicodeError):
             payload = None
     # Queued jobs have no current output, including legacy retries without job_runs.
-    if (not isinstance(payload, dict)
-            or job["status"] == "queued"
-            or (job["status"] == "running" and job["stage"] == "Starting")
-            or (payload.get("_attempt_id") is not None and payload["_attempt_id"] != attempt_id)
-            or (attempt_id is not None and job["status"] == "running" and payload.get("_attempt_id") != attempt_id)):
-        return jsonify(phase=job["stage"], phase_code=job["phase_code"], phase_args=job["phase_args"],
-                       content="", reasoning="", active=False, enabled=True)
+    if (
+        not isinstance(payload, dict)
+        or job["status"] == "queued"
+        or (job["status"] == "running" and job["stage"] == "Starting")
+        or (
+            payload.get("_attempt_id") is not None
+            and payload["_attempt_id"] != attempt_id
+        )
+        or (
+            attempt_id is not None
+            and job["status"] == "running"
+            and payload.get("_attempt_id") != attempt_id
+        )
+    ):
+        return jsonify(
+            phase=job["stage"],
+            phase_code=job["phase_code"],
+            phase_args=job["phase_args"],
+            content="",
+            reasoning="",
+            active=False,
+            enabled=True,
+        )
     payload.pop("_attempt_id", None)
     for field in ("content", "reasoning"):
         value = payload.get(field, "")
@@ -533,7 +701,16 @@ def job_live(job_id):
     payload["active"] = bool(payload.get("active") and job["status"] == "running")
     if payload["active"] and payload.get("started_at"):
         try:
-            payload["elapsed_seconds"] = round(max(0, (datetime.now(timezone.utc) - datetime.fromisoformat(payload["started_at"])).total_seconds()), 1)
+            payload["elapsed_seconds"] = round(
+                max(
+                    0,
+                    (
+                        datetime.now(timezone.utc)
+                        - datetime.fromisoformat(payload["started_at"])
+                    ).total_seconds(),
+                ),
+                1,
+            )
         except (ValueError, TypeError):
             pass
     payload["enabled"] = True
@@ -574,15 +751,26 @@ def retry_job(job_id):
     if not store.get_job(job_id):
         abort(404)
     if request.data or request.form:
-        return jsonify(error="Retry uses the original snapshot. Create a new job to change options.", error_code="immutable_config"), 400
+        return jsonify(
+            error="Retry uses the original snapshot. Create a new job to change options.",
+            error_code="immutable_config",
+        ), 400
     outcome, attempts = store.requeue(job_id, MAX_JOB_ATTEMPTS)
     if outcome == "limit":
-        return jsonify(error="The retry limit was reached. Create a new analysis.", error_code="retry_limit"), 409
+        return jsonify(
+            error="The retry limit was reached. Create a new analysis.",
+            error_code="retry_limit",
+        ), 409
     if outcome == "conflict":
-        return jsonify(error="Only failed or cancelled jobs can be retried", error_code="retry_conflict"), 409
+        return jsonify(
+            error="Only failed or cancelled jobs can be retried",
+            error_code="retry_conflict",
+        ), 409
     worker.wake()
     legacy = store.load_config(job_id) is None
-    event("job_retry", job_id=job_id, attempt=attempts + 1, status="queued", legacy=legacy)
+    event(
+        "job_retry", job_id=job_id, attempt=attempts + 1, status="queued", legacy=legacy
+    )
     return jsonify(status="queued", warnings=["legacy_recomputed"] if legacy else [])
 
 
@@ -600,12 +788,18 @@ def cancel_job(job_id):
     if outcome == "already_cancelled":
         return jsonify(status="cancelled"), 200
     if outcome == "not_active":
-        return jsonify(error="This job cannot be cancelled.", error_code="cancel_conflict"), 409
+        return jsonify(
+            error="This job cannot be cancelled.", error_code="cancel_conflict"
+        ), 409
     if outcome == "already_requested":
         return jsonify(status=status, cancel_requested=True), 202
     # The request is committed; let the running job see it without waiting for its next SQLite read.
     worker.notify_cancelled(job_id)
-    event("job_cancel_requested", job_id=job_id, status="cancelled" if outcome == "cancelled" else "cancelling")
+    event(
+        "job_cancel_requested",
+        job_id=job_id,
+        status="cancelled" if outcome == "cancelled" else "cancelling",
+    )
     return jsonify(status=status, cancel_requested=True), 202
 
 
@@ -615,11 +809,15 @@ def report(job_id):
     try:
         job, path = resolve_report(job_id)
         name = ensure_report_name(job, path)
-        response = send_file(path, mimetype="text/markdown", as_attachment=True, download_name=name)
+        response = send_file(
+            path, mimetype="text/markdown", as_attachment=True, download_name=name
+        )
     except OSError:
         event("report_missing", logging.WARNING, job_id=job_id, status="unavailable")
         abort(404)
-    event("report_download", job_id=job_id, filename=name, bytes=response.content_length)
+    event(
+        "report_download", job_id=job_id, filename=name, bytes=response.content_length
+    )
     # Names are portable ASCII; include the RFC 5987 form for UTF-8-aware clients too.
     response.headers["Content-Disposition"] += "; filename*=UTF-8''" + name
     response.headers["Content-Type"] = "text/markdown; charset=utf-8"
@@ -638,7 +836,11 @@ def resolve_report(job_id):
     if job["status"] != "done":
         abort(409)
     path = directory / REPORT_FILE
-    if path.is_symlink() or not path.is_file() or path.resolve().parent != directory.resolve():
+    if (
+        path.is_symlink()
+        or not path.is_file()
+        or path.resolve().parent != directory.resolve()
+    ):
         event("report_missing", logging.WARNING, job_id=job_id, status="unavailable")
         abort(404)
     return job, path
@@ -653,7 +855,9 @@ def ensure_report_name(job, path):
     if job.get("report_name"):
         return job["report_name"]
     with path.open(encoding="utf-8", errors="replace") as stream:
-        name = reports.report_filename(stream.read(reports.TITLE_SCAN_CHARS), job["filename"])
+        name = reports.report_filename(
+            stream.read(reports.TITLE_SCAN_CHARS), job["filename"]
+        )
     store.set_report_name(job["id"], name)
     return name
 
@@ -679,21 +883,51 @@ def view_report(job_id):
         with path.open("rb") as stream:
             content = stream.read(reports.PREVIEW_MAX_BYTES + 1)
         if len(content) > reports.PREVIEW_MAX_BYTES:
-            html, message, status = "", "Preview is limited to 1 MiB. Download the original Markdown.", 413
+            html, message, status = (
+                "",
+                "Preview is limited to 1 MiB. Download the original Markdown.",
+                413,
+            )
         else:
-            html = reports.render_markdown(content.decode("utf-8")) if content.strip() else ""
+            html = (
+                reports.render_markdown(content.decode("utf-8"))
+                if content.strip()
+                else ""
+            )
             message, status = ("" if html else "No content is available."), 200
     except (OSError, UnicodeError):
         event("report_unreadable", logging.WARNING, job_id=job_id)
-        name, html, message, status = translate("Markdown report"), "", "Report not found or unreadable.", 404
+        name, html, message, status = (
+            translate("Markdown report"),
+            "",
+            "Report not found or unreadable.",
+            404,
+        )
     except (NotFound, Conflict) as exc:
-        name, html, message, status = translate("Markdown report"), "", "Report not found or not ready.", exc.code
+        name, html, message, status = (
+            translate("Markdown report"),
+            "",
+            "Report not found or not ready.",
+            exc.code,
+        )
     event("report_view", job_id=job_id, status=status)
-    response = make_response(render_template("report.html", report_name=name, content=html, message=message,
-        job_id=job_id, available=status in (200, 413), language=language, t=translate), status)
+    response = make_response(
+        render_template(
+            "report.html",
+            report_name=name,
+            content=html,
+            message=message,
+            job_id=job_id,
+            available=status in (200, 413),
+            language=language,
+            t=translate,
+        ),
+        status,
+    )
     response.headers["Content-Security-Policy"] = (
         "default-src 'none'; style-src 'self'; script-src 'self'; img-src 'none'; "
-        "connect-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+        "connect-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    )
     response.headers["Referrer-Policy"] = "no-referrer"
     return response
 
@@ -707,8 +941,14 @@ def begin_request():
     g.started = time.monotonic()
     origin = request.headers.get("Origin")
     if request.method == "POST" and origin:
-        if urlsplit(origin).netloc != request.host or urlsplit(origin).scheme not in ("http", "https"):
-            return jsonify(error="Cross-origin writes are not allowed.", error_code="origin_rejected"), 403
+        if urlsplit(origin).netloc != request.host or urlsplit(origin).scheme not in (
+            "http",
+            "https",
+        ):
+            return jsonify(
+                error="Cross-origin writes are not allowed.",
+                error_code="origin_rejected",
+            ), 403
 
 
 @app.after_request
@@ -718,10 +958,20 @@ def finish_request(response):
         response.headers["Cache-Control"] = "no-store"
         response.headers["X-Content-Type-Options"] = "nosniff"
     if request.endpoint in ("report", "view_report"):
-        event("report_response", job_id=(request.view_args or {}).get("job_id"), status=response.status_code,
-              duration_ms=round((time.monotonic() - g.started) * 1000, 1), bytes=response.content_length)
+        event(
+            "report_response",
+            job_id=(request.view_args or {}).get("job_id"),
+            status=response.status_code,
+            duration_ms=round((time.monotonic() - g.started) * 1000, 1),
+            bytes=response.content_length,
+        )
     if response.status_code >= 400 and request.method == "POST":
-        event("request_rejected", logging.WARNING, endpoint=request.endpoint, status=response.status_code)
+        event(
+            "request_rejected",
+            logging.WARNING,
+            endpoint=request.endpoint,
+            status=response.status_code,
+        )
     return response
 
 
@@ -732,7 +982,9 @@ def too_large(_):
     The _ parameter is Flask's exception and is unused here.
     """
     event("upload_rejected", logging.WARNING, error_code="upload_limit")
-    return jsonify(error=f"PDF too large (limit: {MAX_UPLOAD_MB} MiB)", error_code="upload_limit"), 413
+    return jsonify(
+        error=f"PDF too large (limit: {MAX_UPLOAD_MB} MiB)", error_code="upload_limit"
+    ), 413
 
 
 @app.errorhandler(job_config.ConfigurationError)
@@ -749,9 +1001,15 @@ def invalid_configuration(exc):
 def api_error(exc):
     """Answer HTTP 400, 404, 409 and 500 with a generic JSON error, without exception details."""
     code = getattr(exc, "code", 500)
-    messages = {400: "Invalid request.", 404: "Job or file not found.",
-                409: "The result is not ready.", 500: "An internal error occurred."}
-    return jsonify(error=messages.get(code, "Request failed."), error_code=f"http_{code}"), code
+    messages = {
+        400: "Invalid request.",
+        404: "Job or file not found.",
+        409: "The result is not ready.",
+        500: "An internal error occurred.",
+    }
+    return jsonify(
+        error=messages.get(code, "Request failed."), error_code=f"http_{code}"
+    ), code
 
 
 if __name__ == "__main__":

@@ -9,9 +9,21 @@ from collections import OrderedDict
 MAX_CACHED_PREVIEWS = 16
 PREVIEW_TTL_SECONDS = 300.0
 CHECKPOINT_SECONDS = 20.0
-PREVIEW_FIELDS = {"phase", "phase_code", "phase_args", "updated_at", "content", "reasoning",
-                  "content_chars", "reasoning_chars", "active", "metrics", "started_at",
-                  "elapsed_seconds", "_attempt_id"}
+PREVIEW_FIELDS = {
+    "phase",
+    "phase_code",
+    "phase_args",
+    "updated_at",
+    "content",
+    "reasoning",
+    "content_chars",
+    "reasoning_chars",
+    "active",
+    "metrics",
+    "started_at",
+    "elapsed_seconds",
+    "_attempt_id",
+}
 
 
 class PreviewCache:
@@ -35,9 +47,13 @@ class PreviewCache:
 
     def put(self, job_id, payload, preview_chars):
         """Publish a bounded independent snapshot, evicting the oldest publication."""
-        bounded = copy.deepcopy({key: value for key, value in payload.items() if key in PREVIEW_FIELDS})
+        bounded = copy.deepcopy(
+            {key: value for key, value in payload.items() if key in PREVIEW_FIELDS}
+        )
         for field in ("content", "reasoning"):
-            bounded[field] = bounded.get(field, "")[-preview_chars:] if preview_chars > 0 else ""
+            bounded[field] = (
+                bounded.get(field, "")[-preview_chars:] if preview_chars > 0 else ""
+            )
         with self._lock:
             current = time.monotonic()
             self._expire(current)

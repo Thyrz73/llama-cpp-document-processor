@@ -29,9 +29,16 @@ PROFILES = {
 }
 
 
-
 def catalog():
     """Return the profiles as published by /api/profiles; none is calibrated for a given machine."""
-    return [{"id": name, "experimental": True, "calibrated": False,
-             "version": PROFILE_VERSION, "parameters": dict(values),
-             "concurrency": 1} for name, values in PROFILES.items()]
+    return [
+        {
+            "id": name,
+            "experimental": True,
+            "calibrated": False,
+            "version": PROFILE_VERSION,
+            "parameters": dict(values),
+            "concurrency": 1,
+        }
+        for name, values in PROFILES.items()
+    ]

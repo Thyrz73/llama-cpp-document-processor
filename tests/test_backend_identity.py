@@ -25,9 +25,20 @@ class IdentityAdapter(encoding.ModelAdapter):
     def __init__(self):
         super().__init__("Measured value: 25 degrees. [Page 1]")
         self.model_id = "private/model-one"
-        self.props = {"default_generation_settings": {"n_ctx": 16384, "params": {
-            "temperature": 0.2, "top_p": 0.9, "top_k": 40, "min_p": 0.05, "repeat_penalty": 1.1}},
-            "chat_template": "original-template", "version": "test-1"}
+        self.props = {
+            "default_generation_settings": {
+                "n_ctx": 16384,
+                "params": {
+                    "temperature": 0.2,
+                    "top_p": 0.9,
+                    "top_k": 40,
+                    "min_p": 0.05,
+                    "repeat_penalty": 1.1,
+                },
+            },
+            "chat_template": "original-template",
+            "version": "test-1",
+        }
         self.requests = []
         self.unavailable = None
         self.on_models = lambda: None
@@ -61,15 +72,20 @@ class BackendIdentityTests(unittest.TestCase):
             result.mount("https://", self.adapter)
             return result
 
-        for target, name, value in ((app, "store", JobStore(self.root)),
-                                    (app, "_capability_cache", {"value": None, "expires": 0}),
-                                    (app, "read_system_prompt", lambda: "PRIVATE_SYSTEM_PROMPT"),
-                                    (app.time, "monotonic", lambda: 100.0),
-                                    (requests, "Session", session)):
+        for target, name, value in (
+            (app, "store", JobStore(self.root)),
+            (app, "_capability_cache", {"value": None, "expires": 0}),
+            (app, "read_system_prompt", lambda: "PRIVATE_SYSTEM_PROMPT"),
+            (app.time, "monotonic", lambda: 100.0),
+            (requests, "Session", session),
+        ):
             patcher = patch.object(target, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
-        patcher = patch("requests.adapters.HTTPAdapter.send", side_effect=AssertionError("Real network forbidden"))
+        patcher = patch(
+            "requests.adapters.HTTPAdapter.send",
+            side_effect=AssertionError("Real network forbidden"),
+        )
         patcher.start()
         self.addCleanup(patcher.stop)
         app.store.initialize()
@@ -77,15 +93,23 @@ class BackendIdentityTests(unittest.TestCase):
         self.http = app.app.test_client()
 
     def create(self):
-        response = self.http.post("/api/jobs", data={
-            "file": (io.BytesIO(b"%PDF-test"), "study.pdf"), "question": "Summarize the measurements.",
-            "options": json.dumps({"overrides": {"chunk_tokens": 128}})})
+        response = self.http.post(
+            "/api/jobs",
+            data={
+                "file": (io.BytesIO(b"%PDF-test"), "study.pdf"),
+                "question": "Summarize the measurements.",
+                "options": json.dumps({"overrides": {"chunk_tokens": 128}}),
+            },
+        )
         self.assertEqual(response.status_code, 201, response.get_json())
         return response.get_json()["id"]
 
     def run_attempt(self, identifier, run=None):
         app.store.update_job(identifier, status="running")
-        pages = [{"page": i + 1, "text": self.adapter.text + "\n\n" + "padding " * 70} for i in range(5)]
+        pages = [
+            {"page": i + 1, "text": self.adapter.text + "\n\n" + "padding " * 70}
+            for i in range(5)
+        ]
         with patch.object(extraction, "extract_pdf", return_value=(pages, 5, [], [])):
             (run or app.analyze_job)(identifier)
 
@@ -100,14 +124,23 @@ class BackendIdentityTests(unittest.TestCase):
 
     def artifacts(self, identifier):
         directory = app.store.job_dir(identifier) / "artifacts"
-        return {str(path.relative_to(directory)): path.read_bytes()
-                for path in directory.rglob("*") if path.is_file()}
+        return {
+            str(path.relative_to(directory)): path.read_bytes()
+            for path in directory.rglob("*")
+            if path.is_file()
+        }
 
-    def assert_refused(self, identifier, code="identity_changed", exception=ProcessingError):
+    def assert_refused(
+        self, identifier, code="identity_changed", exception=ProcessingError
+    ):
         before = self.artifacts(identifier)
         snapshot = app.store.load_config(identifier)
         generations = len(self.adapter.completions)
-        with patch.object(Artifacts, "read", side_effect=AssertionError("No reuse before identity validation")) as read:
+        with patch.object(
+            Artifacts,
+            "read",
+            side_effect=AssertionError("No reuse before identity validation"),
+        ) as read:
             with self.assertRaises(exception) as raised:
                 self.run_attempt(identifier)
         self.assertEqual(raised.exception.code, code)
@@ -130,7 +163,11 @@ class BackendIdentityTests(unittest.TestCase):
         self.assertEqual(app.store.get_job(identifier)["status"], "done")
         self.assertEqual(app.store.metrics(identifier)["summary"]["reused_steps"], 9)
         self.assertEqual(len(self.adapter.completions), generations)
-        inspections = [path for path in self.adapter.requests[requests_before:] if path in ("/v1/models", "/props")]
+        inspections = [
+            path
+            for path in self.adapter.requests[requests_before:]
+            if path in ("/v1/models", "/props")
+        ]
         self.assertEqual(inspections, ["/v1/models", "/props"])
         self.assertEqual(self.artifacts(identifier), original)
         self.assertEqual(app.store.load_config(identifier), snapshot)
@@ -142,12 +179,19 @@ class BackendIdentityTests(unittest.TestCase):
 
     def test_changed_sampling_parameters_before_ttl_refuse_reuse(self):
         original = copy.deepcopy(self.adapter.props)
-        for name, value in (("temperature", 0.4), ("top_p", 0.8), ("top_k", 30),
-                            ("min_p", 0.1), ("repeat_penalty", 1.2)):
+        for name, value in (
+            ("temperature", 0.4),
+            ("top_p", 0.8),
+            ("top_k", 30),
+            ("min_p", 0.1),
+            ("repeat_penalty", 1.2),
+        ):
             with self.subTest(parameter=name):
                 self.adapter.props = copy.deepcopy(original)
                 identifier = self.seed_retry()
-                self.adapter.props["default_generation_settings"]["params"][name] = value
+                self.adapter.props["default_generation_settings"]["params"][name] = (
+                    value
+                )
                 self.assert_refused(identifier)
 
     def test_changed_full_model_id_refuses_reuse_even_with_the_same_public_name(self):
@@ -162,11 +206,22 @@ class BackendIdentityTests(unittest.TestCase):
                 identifier = self.seed_retry()
                 self.adapter.unavailable = path
                 before = len(self.adapter.requests)
-                self.assert_refused(identifier, "backend_unavailable" if path == "/v1/models" else "identity_changed")
-                self.assertEqual(self.adapter.requests[before:], ["/v1/models"] if path == "/v1/models"
-                                 else ["/v1/models", "/props"])
+                self.assert_refused(
+                    identifier,
+                    "backend_unavailable"
+                    if path == "/v1/models"
+                    else "identity_changed",
+                )
+                self.assertEqual(
+                    self.adapter.requests[before:],
+                    ["/v1/models"]
+                    if path == "/v1/models"
+                    else ["/v1/models", "/props"],
+                )
 
-    def test_missing_template_or_sampling_refuses_reuse_without_rewriting_manifest(self):
+    def test_missing_template_or_sampling_refuses_reuse_without_rewriting_manifest(
+        self,
+    ):
         original = copy.deepcopy(self.adapter.props)
         for field in ("chat_template", "params"):
             with self.subTest(field=field):
@@ -187,12 +242,18 @@ class BackendIdentityTests(unittest.TestCase):
         self.assert_refused(identifier)
 
     def test_invalid_sampling_value_cannot_be_discarded_to_match_an_old_identity(self):
-        self.adapter.props["default_generation_settings"]["params"] = {"temperature": 0.2}
+        self.adapter.props["default_generation_settings"]["params"] = {
+            "temperature": 0.2
+        }
         identifier = self.seed_retry()
-        self.adapter.props["default_generation_settings"]["params"]["top_p"] = "PRIVATE_INVALID_VALUE"
+        self.adapter.props["default_generation_settings"]["params"]["top_p"] = (
+            "PRIVATE_INVALID_VALUE"
+        )
         self.assert_refused(identifier)
 
-    def test_unknown_properties_on_both_attempts_do_not_prove_identity_compatibility(self):
+    def test_unknown_properties_on_both_attempts_do_not_prove_identity_compatibility(
+        self,
+    ):
         del self.adapter.props["default_generation_settings"]["params"]
         identifier = self.seed_retry()
         self.assert_refused(identifier)
@@ -221,7 +282,9 @@ class BackendIdentityTests(unittest.TestCase):
             self.assertEqual(self.http.get("/api/diagnostics").status_code, 200)
         self.assertEqual(len(self.adapter.requests), before)
 
-    def test_cancelled_identity_check_does_not_reuse_artifacts_or_corrupt_ui_cache(self):
+    def test_cancelled_identity_check_does_not_reuse_artifacts_or_corrupt_ui_cache(
+        self,
+    ):
         identifier = self.seed_retry()
         original = self.artifacts(identifier)
         cached = app.cached_capabilities()
@@ -232,10 +295,14 @@ class BackendIdentityTests(unittest.TestCase):
             runner.notify_cancelled(identifier)
 
         self.adapter.on_models = cancel
-        with patch.object(Artifacts, "read", side_effect=AssertionError("No reuse on cancellation")):
+        with patch.object(
+            Artifacts, "read", side_effect=AssertionError("No reuse on cancellation")
+        ):
             self.run_attempt(identifier, runner.run_claimed)
         self.assertEqual(app.store.get_job(identifier)["status"], "cancelled")
-        self.assertEqual(app.store.metrics(identifier)["runs"][0]["status"], "cancelled")
+        self.assertEqual(
+            app.store.metrics(identifier)["runs"][0]["status"], "cancelled"
+        )
         self.assertEqual(self.artifacts(identifier), original)
         self.assertEqual(app.cached_capabilities(), cached)
         self.assertFalse(app._capability_lock.locked())

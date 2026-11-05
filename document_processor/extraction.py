@@ -54,7 +54,11 @@ def split_with_page(text, page, limit=5000):
         prefix = text[:end].rstrip("\n")
         line_start = prefix.rfind("\n") + 1
         last_line = prefix[line_start:].strip()
-        if line_start >= limit * 0.6 and re.match(r"^(#{1,6}\s|\d+(?:\.\d+)*[.)]?\s+[A-Z])", last_line) and len(last_line) < 120:
+        if (
+            line_start >= limit * 0.6
+            and re.match(r"^(#{1,6}\s|\d+(?:\.\d+)*[.)]?\s+[A-Z])", last_line)
+            and len(last_line) < 120
+        ):
             end = line_start
         out.append({"page": page, "text": text[:end].strip()})
         text = text[end:].strip()
@@ -76,8 +80,12 @@ def make_chunks(pages, model, budget):
     invalid budgets or an indivisible passage that cannot fit. Propagate tokenizer
     failures and cancellation unchanged.
     """
+
     def failed():
-        return ProcessingError("chunking_failed", "Unable to split a PDF passage into sufficiently small chunks.")
+        return ProcessingError(
+            "chunking_failed",
+            "Unable to split a PDF passage into sufficiently small chunks.",
+        )
 
     if type(budget) is not int or budget < 1:
         raise failed()
@@ -128,8 +136,13 @@ def make_chunks(pages, model, budget):
             group = pending_groups.pop()
             text = chunk_text(group)
             if count(text) <= budget:
-                chunks.append({"text": text, "pages": sorted({part["page"] for part in group}),
-                               "parts": list(group)})
+                chunks.append(
+                    {
+                        "text": text,
+                        "pages": sorted({part["page"] for part in group}),
+                        "parts": list(group),
+                    }
+                )
             elif len(group) > 1:
                 middle = len(group) // 2
                 pending_groups.extend((group[middle:], group[:middle]))
@@ -148,7 +161,9 @@ def make_chunks(pages, model, budget):
             radius = min(300, size // 5)
             pivot = half
             for boundary in ("\n\n", "\n", " "):
-                found = piece["text"].rfind(boundary, max(1, half - radius), half + radius)
+                found = piece["text"].rfind(
+                    boundary, max(1, half - radius), half + radius
+                )
                 cut = found + len(boundary)
                 if found >= 0 and 0 < cut < size:
                     pivot = cut
@@ -217,35 +232,85 @@ def ocr_page(page, number, settings):
     job_id = current_job_id()
     event("ocr_started", job_id=job_id, page=number)
     # Reduce the render before allocation to limit memory use.
-    pixels_at_dpi = (page.rect.width * settings["dpi"] / 72) * (page.rect.height * settings["dpi"] / 72)
+    pixels_at_dpi = (page.rect.width * settings["dpi"] / 72) * (
+        page.rect.height * settings["dpi"] / 72
+    )
     scale = min(1.0, math.sqrt(settings["max_pixels"] / max(1.0, pixels_at_dpi)))
     dpi = max(1, math.floor(settings["dpi"] * scale))
-    if (page.rect.width * dpi / 72) * (page.rect.height * dpi / 72) > settings["max_pixels"]:
-        raise ProcessingError("ocr_page_too_large", f"PDF page {number} exceeds the OCR pixel budget.")
+    if (page.rect.width * dpi / 72) * (page.rect.height * dpi / 72) > settings[
+        "max_pixels"
+    ]:
+        raise ProcessingError(
+            "ocr_page_too_large", f"PDF page {number} exceeds the OCR pixel budget."
+        )
     # Encode the bitmap right away: only the smaller PNG stays in memory while Tesseract runs.
-    png = page.get_pixmap(dpi=dpi, colorspace=pymupdf.csGRAY, alpha=False, annots=False).tobytes("png")
+    png = page.get_pixmap(
+        dpi=dpi, colorspace=pymupdf.csGRAY, alpha=False, annots=False
+    ).tobytes("png")
     try:
         process = subprocess.run(
             ["tesseract", "stdin", "stdout", "-l", settings["languages"], "--psm", "3"],
-            input=png, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            timeout=settings["timeout"], check=False,
+            input=png,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=settings["timeout"],
+            check=False,
         )
     except FileNotFoundError as exc:
-        event("ocr_failed", logging.ERROR, job_id=job_id, page=number, error_code="ocr_missing")
-        raise ProcessingError("ocr_missing", "Tesseract is missing from the container; rebuild the Docker image.") from exc
+        event(
+            "ocr_failed",
+            logging.ERROR,
+            job_id=job_id,
+            page=number,
+            error_code="ocr_missing",
+        )
+        raise ProcessingError(
+            "ocr_missing",
+            "Tesseract is missing from the container; rebuild the Docker image.",
+        ) from exc
     except subprocess.TimeoutExpired:
-        event("ocr_failed", logging.ERROR, job_id=job_id, page=number, error_code="ocr_timeout")
-        raise ProcessingError("ocr_timeout", f"OCR timed out on page {number}.") from None
+        event(
+            "ocr_failed",
+            logging.ERROR,
+            job_id=job_id,
+            page=number,
+            error_code="ocr_timeout",
+        )
+        raise ProcessingError(
+            "ocr_timeout", f"OCR timed out on page {number}."
+        ) from None
     if process.returncode:
-        event("ocr_failed", logging.ERROR, job_id=job_id, page=number, error_code="ocr_failed")
-        raise ProcessingError("ocr_failed", f"OCR failed on page {number}. Check installed language packs.")
+        event(
+            "ocr_failed",
+            logging.ERROR,
+            job_id=job_id,
+            page=number,
+            error_code="ocr_failed",
+        )
+        raise ProcessingError(
+            "ocr_failed",
+            f"OCR failed on page {number}. Check installed language packs.",
+        )
     try:
         text = process.stdout.decode("utf-8")
     except UnicodeDecodeError:
-        event("ocr_failed", logging.ERROR, job_id=job_id, page=number, error_code="invalid_ocr_encoding")
-        raise ProcessingError("invalid_ocr_encoding", "OCR returned text that is not valid UTF-8.") from None
-    event("ocr_finished", job_id=job_id, page=number,
-          duration_ms=round((time.monotonic() - started) * 1000, 1), characters=len(text))
+        event(
+            "ocr_failed",
+            logging.ERROR,
+            job_id=job_id,
+            page=number,
+            error_code="invalid_ocr_encoding",
+        )
+        raise ProcessingError(
+            "invalid_ocr_encoding", "OCR returned text that is not valid UTF-8."
+        ) from None
+    event(
+        "ocr_finished",
+        job_id=job_id,
+        page=number,
+        duration_ms=round((time.monotonic() - started) * 1000, 1),
+        characters=len(text),
+    )
     return normalize_extracted_text(text)
 
 
@@ -271,10 +336,14 @@ def extract_pdf(pdf_path, settings, progress=None):
         raise ProcessingError("unreadable_pdf", "Unable to read PDF.") from None
     with doc:
         if doc.needs_pass:
-            raise ProcessingError("encrypted_pdf", "Encrypted PDF: remove the password before uploading.")
+            raise ProcessingError(
+                "encrypted_pdf", "Encrypted PDF: remove the password before uploading."
+            )
         count = len(doc)
         if count > settings["max_pages"]:
-            raise ProcessingError("page_limit", f"PDF has {count} pages (configured maximum exceeded).")
+            raise ProcessingError(
+                "page_limit", f"PDF has {count} pages (configured maximum exceeded)."
+            )
         pages, missing, ocr_pages = [], [], []
         alt_reader = None
         for number in range(1, count + 1):
@@ -284,20 +353,32 @@ def extract_pdf(pdf_path, settings, progress=None):
             try:
                 text = normalize_extracted_text(page.get_text("text", sort=True))
             except Exception:
-                event("extraction_fallback", logging.WARNING, page=number, reader="pymupdf",
-                      job_id=current_job_id())
+                event(
+                    "extraction_fallback",
+                    logging.WARNING,
+                    page=number,
+                    reader="pymupdf",
+                    job_id=current_job_id(),
+                )
                 text = ""
             if not text_is_usable(text):
                 # Try another reader for unusual or incorrectly encoded fonts.
                 try:
                     if alt_reader is None:
                         alt_reader = PdfReader(str(pdf_path), strict=False)
-                    alternate = normalize_extracted_text(alt_reader.pages[number - 1].extract_text())
+                    alternate = normalize_extracted_text(
+                        alt_reader.pages[number - 1].extract_text()
+                    )
                     if text_is_usable(alternate) or len(alternate) > len(text):
                         text = alternate
                 except Exception:
-                    event("extraction_fallback", logging.WARNING, page=number, reader="pypdf",
-                          job_id=current_job_id())
+                    event(
+                        "extraction_fallback",
+                        logging.WARNING,
+                        page=number,
+                        reader="pypdf",
+                        job_id=current_job_id(),
+                    )
             if not text_is_usable(text) and settings["enabled"]:
                 if progress:
                     progress(f"OCR recognition: page {number}/{count}")
@@ -312,9 +393,23 @@ def extract_pdf(pdf_path, settings, progress=None):
             # Release the page now: rebinding `page` would only free it after loading the next one.
             del page
         if not any(text_is_usable(p["text"]) for p in pages):
-            event("extraction_empty", logging.WARNING, job_id=current_job_id(), pages=count)
+            event(
+                "extraction_empty",
+                logging.WARNING,
+                job_id=current_job_id(),
+                pages=count,
+            )
             detail = "even after OCR" if settings["enabled"] else "(OCR disabled)"
-            raise ProcessingError("no_usable_text", f"No usable text found in this PDF {detail}. Check the source PDF.")
-        event("extraction_summary", job_id=current_job_id(), pages=count,
-              ocr_pages=len(ocr_pages), insufficient_pages=len(missing), characters=sum(len(p["text"]) for p in pages))
+            raise ProcessingError(
+                "no_usable_text",
+                f"No usable text found in this PDF {detail}. Check the source PDF.",
+            )
+        event(
+            "extraction_summary",
+            job_id=current_job_id(),
+            pages=count,
+            ocr_pages=len(ocr_pages),
+            insufficient_pages=len(missing),
+            characters=sum(len(p["text"]) for p in pages),
+        )
         return pages, count, missing, ocr_pages

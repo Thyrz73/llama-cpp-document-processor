@@ -12,19 +12,35 @@ from document_processor import database
 from document_processor.config import fingerprint
 from document_processor.jobs import JobStore
 
-INDEXES = {"jobs_by_created": ("created_at", "id"),
-           "jobs_by_status_created": ("status", "created_at", "id")}
+INDEXES = {
+    "jobs_by_created": ("created_at", "id"),
+    "jobs_by_status_created": ("status", "created_at", "id"),
+}
 
 
 def populate(store, count):
     """Create deterministic ties and old active jobs at the end of physical insertion order."""
     base = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    config = {"profile": "low", "max_attempts": 3, "system_prompt": "Synthetic private prompt"}
+    config = {
+        "profile": "low",
+        "max_attempts": 3,
+        "system_prompt": "Synthetic private prompt",
+    }
     configs, rows, runs, steps = [], [], [], []
     for number in range(1, count + 1):
         identifier = f"{number:032x}"
-        status = "queued" if number >= count - 1 else "running" if number == count - 2 else "done"
-        created = "2000-01-01T00:00:00+00:00" if status != "done" else (base + timedelta(seconds=number // 2)).isoformat()
+        status = (
+            "queued"
+            if number >= count - 1
+            else "running"
+            if number == count - 2
+            else "done"
+        )
+        created = (
+            "2000-01-01T00:00:00+00:00"
+            if status != "done"
+            else (base + timedelta(seconds=number // 2)).isoformat()
+        )
         rows.append((identifier, "example.pdf", "Analyze", status, created, created))
         configs.append((identifier, json.dumps(config), fingerprint(config), created))
         for attempt in range(2):
@@ -33,11 +49,20 @@ def populate(store, count):
             for offset in range(2):
                 steps.append((run_id, identifier, f"analysis_{offset:04d}.md", created))
     with store.connect() as con:
-        con.executemany("INSERT INTO jobs (id,filename,question,status,created_at,updated_at) VALUES (?,?,?,?,?,?)", rows)
+        con.executemany(
+            "INSERT INTO jobs (id,filename,question,status,created_at,updated_at) VALUES (?,?,?,?,?,?)",
+            rows,
+        )
         con.executemany("INSERT INTO job_configs VALUES (?,?,?,?)", configs)
-        con.executemany("INSERT INTO job_runs (id,job_id,started_at,status) VALUES (?,?,?,'done')", runs)
-        con.executemany("INSERT INTO job_steps (run_id,job_id,stage,step_key,started_at,status) "
-                        "VALUES (?,?,'section',?,?,'done')", steps)
+        con.executemany(
+            "INSERT INTO job_runs (id,job_id,started_at,status) VALUES (?,?,?,'done')",
+            runs,
+        )
+        con.executemany(
+            "INSERT INTO job_steps (run_id,job_id,stage,step_key,started_at,status) "
+            "VALUES (?,?,'section',?,?,'done')",
+            steps,
+        )
 
 
 def capture_queries(store):
@@ -60,8 +85,11 @@ def capture_queries(store):
 def plans(store, statements):
     # Compile each before/after plan on the current schema, without cached EXPLAIN statements.
     with database.connect(store.db_path) as con:
-        return {sql: [row["detail"] for row in con.execute("EXPLAIN QUERY PLAN " + sql)]
-                for sql in dict.fromkeys(statements) if sql.startswith(("SELECT", "DELETE FROM jobs"))}
+        return {
+            sql: [row["detail"] for row in con.execute("EXPLAIN QUERY PLAN " + sql)]
+            for sql in dict.fromkeys(statements)
+            if sql.startswith(("SELECT", "DELETE FROM jobs"))
+        }
 
 
 class JobIndexTests(unittest.TestCase):
@@ -76,8 +104,13 @@ class JobIndexTests(unittest.TestCase):
 
     def contents(self):
         with self.store.connect() as con:
-            return {table: [tuple(row) for row in con.execute(f"SELECT * FROM {table} ORDER BY 1")]
-                    for table in ("jobs", "job_configs", "job_runs", "job_steps")}
+            return {
+                table: [
+                    tuple(row)
+                    for row in con.execute(f"SELECT * FROM {table} ORDER BY 1")
+                ]
+                for table in ("jobs", "job_configs", "job_runs", "job_steps")
+            }
 
     def test_upgrade_is_idempotent_and_preserves_every_historical_row_and_file(self):
         populate(self.store, 100)
@@ -94,10 +127,23 @@ class JobIndexTests(unittest.TestCase):
         self.assertEqual(self.contents(), before)
         self.assertEqual(report.read_bytes(), b"Historical report")
         with self.store.connect() as con:
-            self.assertEqual([row[0] for row in con.execute("SELECT version FROM schema_migrations ORDER BY version")],
-                             [version for version, _ in database.MIGRATIONS])
+            self.assertEqual(
+                [
+                    row[0]
+                    for row in con.execute(
+                        "SELECT version FROM schema_migrations ORDER BY version"
+                    )
+                ],
+                [version for version, _ in database.MIGRATIONS],
+            )
             for index, columns in INDEXES.items():
-                self.assertEqual(tuple(row["name"] for row in con.execute(f"PRAGMA index_info({index})")), columns)
+                self.assertEqual(
+                    tuple(
+                        row["name"]
+                        for row in con.execute(f"PRAGMA index_info({index})")
+                    ),
+                    columns,
+                )
             self.assertEqual(con.execute("PRAGMA journal_mode").fetchone()[0], "wal")
             self.assertEqual(con.execute("PRAGMA synchronous").fetchone()[0], 1)
             self.assertEqual(con.execute("PRAGMA foreign_keys").fetchone()[0], 1)
@@ -111,12 +157,20 @@ class JobIndexTests(unittest.TestCase):
             con.execute("CREATE INDEX jobs_by_created ON jobs(created_at, id)")
             raise sqlite3.OperationalError("Simulated index migration failure")
 
-        with patch.object(database, "MIGRATIONS", database.MIGRATIONS[:3] + ((4, broken),)):
+        with patch.object(
+            database, "MIGRATIONS", database.MIGRATIONS[:3] + ((4, broken),)
+        ):
             with self.assertRaises(sqlite3.OperationalError):
                 database.initialize(self.store.db_path)
         with self.store.connect() as con:
-            self.assertNotIn("jobs_by_created", {row["name"] for row in con.execute("PRAGMA index_list(jobs)")})
-            self.assertEqual(con.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0], 3)
+            self.assertNotIn(
+                "jobs_by_created",
+                {row["name"] for row in con.execute("PRAGMA index_list(jobs)")},
+            )
+            self.assertEqual(
+                con.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0],
+                3,
+            )
         self.assertEqual(self.contents(), before)
         database.initialize(self.store.db_path)
         self.assertEqual(self.contents(), before)
@@ -143,10 +197,18 @@ class JobIndexTests(unittest.TestCase):
                 self.assertIn("job_runs_by_job", details)
             elif "FROM job_steps" in sql:
                 self.assertIn("job_steps_by_job", details)
-            elif sql.startswith(("SELECT * FROM jobs WHERE id=", "SELECT status FROM jobs WHERE id=", "DELETE FROM jobs")):
+            elif sql.startswith(
+                (
+                    "SELECT * FROM jobs WHERE id=",
+                    "SELECT status FROM jobs WHERE id=",
+                    "DELETE FROM jobs",
+                )
+            ):
                 self.assertIn("sqlite_autoindex_jobs_1", details)
         with self.store.connect() as con:
-            added = {row["name"] for row in con.execute("PRAGMA index_list(jobs)")} - {"sqlite_autoindex_jobs_1"}
+            added = {row["name"] for row in con.execute("PRAGMA index_list(jobs)")} - {
+                "sqlite_autoindex_jobs_1"
+            }
         self.assertEqual(added, set(INDEXES))
         self.assertIn("BEGIN IMMEDIATE", statements)
 
