@@ -42,8 +42,7 @@ function initialState() {
     liveTab: "content",
     liveBusy: false,
     liveTimer: null,
-    liveOutput: null,
-    liveJobStatus: null,
+    liveContext: null,
     // History selection and deletion (history.js).
     selectionMode: false,
     selectedJobs: new Set(),

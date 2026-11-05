@@ -5,7 +5,7 @@ import { state, ACTIVE_STATUSES, TERMINAL_STATUSES } from "./state.js";
 import { t, errorText } from "./i18n.js";
 import { jsonFetch } from "./api.js";
 import { jobCard } from "./card.js";
-import { syncLivePolling } from "./live.js";
+import { invalidateLivePreview, syncLivePolling } from "./live.js";
 import {
   closeDeleteDialog,
   historyControls,
@@ -227,6 +227,7 @@ export async function retry(id) {
     const r = await jsonFetch(`/api/jobs/${id}/retry`, { method: "POST" });
     const d = await r.json();
     if (!r.ok) throw Error(errorText(d, "Retry failed"));
+    invalidateLivePreview(id);
     await refresh(true);
   } catch (err) {
     showJobsNotice({ error: err.message });

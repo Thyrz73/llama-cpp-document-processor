@@ -442,6 +442,122 @@ async function runPollingTests(template, translations={en:{},fr:{}}) {
   assert(h.livePolls().length===0&&h.document.getElementById('live-content').textContent==='Final','Final output stays idle');
  });
 
+ for(const status of ['done','failed','cancelled']){
+  await test(`${status} final response received while hidden is recovered once on visibility`,async()=>{
+   const h=setup();await h.respond(0,{jobs:[job()]});h.api.toggleLive('a'.repeat(32));
+   await h.respond(1,{content:'Partial',active:true});
+   await h.tick(6000);await h.respond(2,{jobs:[job(status)]});
+   assert(h.requests.length===4&&h.livePolls().length===0,'Terminal observation starts exactly one final load');
+   await h.visible(false);await h.respond(3,{content:'Final',active:false});
+   const output=h.document.getElementById('live-content');
+   assert(output.textContent==='Partial'&&h.livePolls().length===0,'Hidden response is not treated as rendered');
+   await h.visible(true);
+   assert(h.requests.length===6&&h.requests[5].url.endsWith('/live'),'Visibility starts one list and one needed final load');
+   await h.respond(4,{jobs:[job(status)]});
+   assert(h.requests.length===6,'Unchanged terminal list does not duplicate the pending final load');
+   await h.respond(5,{content:'Final',active:false});
+   assert(output.textContent==='Final'&&h.livePolls().length===0,'Render final text and leave no live timer');
+   await h.visible(false);await h.visible(true);await h.respond(6,{jobs:[job(status)]});
+   h.click();await h.respond(7,{jobs:[job(status)]});
+   assert(h.requests.length===8&&h.livePolls().length===0&&h.polls().length===0,'Confirmed final output needs no more requests or polling');
+   assert(output.textContent==='Final','Confirmed final text survives subsequent visibility and list refreshes');
+  });
+ }
+ await test('a terminal load failing while hidden remains pending without background retries',async()=>{
+  for(const failure of ['network','http','timeout']){
+   const h=setup();await h.respond(0,{jobs:[job()]});h.api.toggleLive('a'.repeat(32));
+   await h.respond(1,{content:'Partial',active:true});await h.tick(6000);await h.respond(2,{jobs:[job('done')]});
+   await h.visible(false);
+   if(failure==='network'){h.requests[3].reject(Error('Offline'));await flush();}
+   else if(failure==='http')await h.respond(3,{},false);
+   else await h.tick(15000);
+   assert(h.requests.length===4&&h.livePolls().length===0,'Hidden failures never start retries');
+   assert(h.document.getElementById('live-content').textContent==='Partial','Preserve useful text on failure');
+   await h.visible(true);await h.respond(4,{jobs:[job('done')]});
+   assert(h.requests.length===6,'Retry the unconfirmed final preview once on visibility');
+   await h.respond(5,{content:'Recovered final',active:false});
+   if(failure==='timeout')await h.respond(3,{content:'Expired response',active:false});
+   assert(h.document.getElementById('live-content').textContent==='Recovered final','Late expired responses cannot overwrite recovery');
+   assert(h.requests.length===6&&h.livePolls().length===0,'Successful recovery leaves no extra request or timer');
+  }
+ });
+ await test('visibility during a pending final request coalesces recovery and bounds repeated failures',async()=>{
+  for(const succeeds of [true,false]){
+   const h=setup();await h.respond(0,{jobs:[job()]});h.api.toggleLive('a'.repeat(32));
+   await h.respond(1,{content:'Partial',active:true});await h.tick(6000);await h.respond(2,{jobs:[job('done')]});
+   await h.visible(false);await h.visible(true);await h.respond(4,{jobs:[job('done')]});
+   assert(h.requests.length===5,'Returning visible never overlaps the pending final request');
+   if(succeeds){
+    await h.respond(3,{content:'Final',active:false});
+    assert(h.requests.length===5&&h.document.getElementById('live-content').textContent==='Final','A relevant successful response satisfies recovery directly');
+   }else{
+    h.requests[3].reject(Error('Offline'));await flush();
+    assert(h.requests.length===6,'One pending visibility recovery follows a failed request');
+    h.requests[5].reject(Error('Still offline'));await flush();
+    h.click();await h.respond(6,{jobs:[job('done')]});
+    assert(h.requests.length===7&&h.document.getElementById('live-content').textContent==='Partial','Repeated failure does not create an immediate or list-triggered retry loop');
+    assert(h.document.getElementById('live-note').textContent.includes('Still offline'),'Keep the recovery error visible');
+   }
+   assert(h.livePolls().length===0&&h.polls().length===0,'Terminal recovery never creates permanent polling');
+  }
+ });
+ await test('closing a terminal panel before a hidden final response prevents recovery requests',async()=>{
+  const h=setup();await h.respond(0,{jobs:[job()]});h.api.toggleLive('a'.repeat(32));
+  await h.respond(1,{content:'Partial',active:true});await h.tick(6000);await h.respond(2,{jobs:[job('done')]});
+  await h.visible(false);h.api.toggleLive('a'.repeat(32));await h.respond(3,{content:'Final',active:false});
+  await h.visible(true);await h.respond(4,{jobs:[job('done')]});
+  assert(!h.document.getElementById('live-content'),'The closed panel is not recreated by its response');
+  assert(h.requests.length===5&&h.livePolls().length===0,'Closed panels never request a final recovery');
+  h.api.toggleLive('a'.repeat(32));assert(h.requests.length===6,'Reopening starts exactly one on-demand load');
+  await h.respond(5,{content:'Final after reopening',active:false});
+  assert(h.document.getElementById('live-content').textContent==='Final after reopening'&&h.livePolls().length===0,'Reopened terminal panel renders and stays idle');
+ });
+ await test('reopening a terminal panel while its old final request is pending ignores the old response',async()=>{
+  const h=setup();await h.respond(0,{jobs:[job()]});h.api.toggleLive('a'.repeat(32));
+  await h.respond(1,{content:'Partial',active:true});await h.tick(6000);await h.respond(2,{jobs:[job('done')]});
+  h.api.toggleLive('a'.repeat(32));h.api.toggleLive('a'.repeat(32));
+  assert(h.requests.length===4,'Reopening waits for the existing request to settle');
+  await h.respond(3,{content:'Old panel final',active:false});
+  assert(h.requests.length===5&&h.document.getElementById('live-content').textContent==='Waiting for streamed output…','Ignore replaced panel response and load current panel once');
+  await h.respond(4,{content:'Current panel final',active:false});
+  assert(h.document.getElementById('live-content').textContent==='Current panel final'&&h.livePolls().length===0,'Only current final text is confirmed');
+ });
+ await test('accepted retry invalidates a previous attempt response before the refreshed list arrives',async()=>{
+  const h=setup();const id='a'.repeat(32);await h.respond(0,{jobs:[job('failed')]});
+  h.api.toggleLive(id);const retry=h.api.retry(id);await h.respond(2,{status:'queued'});
+  assert(h.requests.length===4,'Accepted retry refreshes the list without overlapping live requests');
+  await h.respond(1,{content:'Previous attempt',active:false});
+  assert(h.document.getElementById('live-content').textContent==='Waiting for streamed output…','Previous attempt is rejected immediately after retry acknowledgement');
+  assert(h.requests.length===4&&h.livePolls().length===0,'Wait for fresh job state before starting new live work');
+  await h.respond(3,{jobs:[{...job('queued'),queued_at:'2026-11-05T14:00:00Z'}]});await retry;
+  assert(h.requests.length===5,'Queued retry resumes one serialized live load');
+  await h.respond(4,{content:'',active:false});await h.tick(6000);
+  await h.respond(5,{jobs:[{...job('running'),queued_at:'2026-11-05T14:00:00Z'}]});
+  await h.respond(6,{content:'New attempt',active:true});
+  assert(h.document.getElementById('live-content').textContent==='New attempt'&&h.livePolls().length===1,'New attempt streams normally');
+ });
+ await test('old final responses cannot survive a retry status cycle back to the same terminal status',async()=>{
+  const h=setup();const id='a'.repeat(32);await h.respond(0,{jobs:[job('failed')]});h.api.toggleLive(id);
+  h.click();await h.respond(2,{jobs:[job('queued')]});
+  h.click();await h.respond(3,{jobs:[job('running')]});
+  h.click();await h.respond(4,{jobs:[job('failed')]});
+  assert(h.requests.length===5,'Status changes share the existing live request');
+  await h.respond(1,{content:'Old failed attempt',active:false});
+  assert(h.document.getElementById('live-content').textContent==='Waiting for streamed output…','Same final status does not make an old attempt response relevant again');
+  assert(h.requests.length===6,'Load the new attempt final exactly once after settlement');
+  await h.respond(5,{content:'New failed attempt',active:false});
+  assert(h.document.getElementById('live-content').textContent==='New failed attempt'&&h.livePolls().length===0,'Render the current attempt without terminal polling');
+ });
+ await test('a changed queue timestamp rejects an older attempt even when its terminal status is unchanged',async()=>{
+  const h=setup();const id='a'.repeat(32);
+  await h.respond(0,{jobs:[{...job('cancelled'),queued_at:'2026-11-05T14:00:00Z'}]});h.api.toggleLive(id);
+  h.click();await h.respond(2,{jobs:[{...job('cancelled'),queued_at:'2026-11-05T14:01:00Z'}]});
+  await h.respond(1,{content:'Old cancelled attempt',active:false});
+  assert(h.requests.length===4&&h.document.getElementById('live-content').textContent==='Waiting for streamed output…','Queue timestamp invalidates a missed retry transition');
+  await h.respond(3,{content:'New cancelled attempt',active:false});
+  assert(h.document.getElementById('live-content').textContent==='New cancelled attempt'&&h.livePolls().length===0,'New terminal output is confirmed without polling');
+ });
+
  await test('a stalled jobs request times out and releases its shared promise',async()=>{
   const h=setup();await h.tick(15000);assert(!h.elements.jobsError.hidden,'Timeout must be visible');
   h.click();assert(h.requests.length===2,'Retry after a timeout must issue a new request');
