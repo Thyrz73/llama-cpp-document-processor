@@ -64,7 +64,11 @@ export function jobCard(job, handlers, live) {
 function cardHeader(job) {
   const top = el("div", undefined, "top");
   const finished = TERMINAL_STATUSES.has(job.status);
-  const identity = el(finished && state.selectionMode ? "label" : "div", undefined, "job-identity");
+  const identity = el(
+    finished && state.selectionMode ? "label" : "div",
+    undefined,
+    "job-identity",
+  );
   if (finished) {
     const checkbox = el("input");
     checkbox.type = "checkbox";

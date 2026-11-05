@@ -13,3 +13,6 @@ __pycache__/
 *.db*
 local/
 **/*:Zone.Identifier
+
+# Frontend development tools
+node_modules/

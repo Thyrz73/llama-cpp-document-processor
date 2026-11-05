@@ -16,7 +16,18 @@ Bug reports, fixes and improvements are welcome. This guide describes the workfl
    node --test tests/test_polling.js
    ```
 
-   Frontend tests use Node 22’s built-in `node:test` runner and `node:assert/strict`; no npm installation is needed. The suites run sequentially because real interface modules share state and browser globals. Each scenario gets a fresh simulated DOM, explicitly settled requests, manually controlled timers and automatic cleanup of globals. Filter scenarios with `node --test --test-name-pattern="visibility" tests/test_polling.js`.
+   Frontend tests use Node 22’s built-in `node:test` runner and `node:assert/strict`; no dependency installation is needed. The suites run sequentially because real interface modules share state and browser globals. Each scenario gets a fresh simulated DOM, explicitly settled requests, manually controlled timers and automatic cleanup of globals. Filter scenarios with `node --test --test-name-pattern="visibility" tests/test_polling.js`.
+
+   Check JS, HTML and CSS formatting with the locked development tool:
+
+   ```bash
+   npm ci --ignore-scripts
+   npm run format:check
+   ```
+
+   Apply formatting with `npm run format`; `npm test` is an alias for the Node test command above. Prettier 3.6.2 is the only npm dependency, pinned exactly in `package.json` and integrity-locked in `package-lock.json`. It provides one formatter for JS, HTML and CSS without a build step or browser dependency. CI uses `npm ci`; no command downloads an unpinned formatter. The scripts target source JS, CSS and HTML plus the test helpers and tooling configuration; generated assets and translation catalogs are outside their scope.
+
+   `.prettierrc.json` uses strict HTML whitespace sensitivity to preserve spacing around inline elements. Review template changes carefully: keep Jinja expressions and literal textarea/pre content intact, and run the Python template/report tests after formatting templates. To update the formatter deliberately, run `npm install --save-dev --save-exact prettier@<version>` and commit both npm manifests with the formatting changes and checks.
 
    Apply Python formatting locally with `.venv/bin/ruff format .`. Ruff checks import sorting (`I`), bug-prone constructs (`B`), Python 3.12 modernization (`UP`) and simplifications (`SIM`), in addition to the core rules. Keep any rule exceptions local and explain why they preserve existing behavior.
 

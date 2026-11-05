@@ -25,21 +25,37 @@ function liveJobStatus() {
 function currentLiveContext() {
   const output = $("live-content"),
     job = state.jobs.find((job) => job.id === state.expandedId);
-  if (!output || !job) return state.liveContext = null;
+  if (!output || !job) return (state.liveContext = null);
   const previous = state.liveContext;
-  if (!previous || previous.output !== output || previous.status !== job.status ||
-      previous.queuedAt !== job.queued_at || previous.tab !== state.liveTab) {
-    if (previous?.output === output && (previous.queuedAt !== job.queued_at ||
-        (TERMINAL_STATUSES.has(previous.status) && ACTIVE_STATUSES.has(job.status))))
+  if (
+    !previous ||
+    previous.output !== output ||
+    previous.status !== job.status ||
+    previous.queuedAt !== job.queued_at ||
+    previous.tab !== state.liveTab
+  ) {
+    if (
+      previous?.output === output &&
+      (previous.queuedAt !== job.queued_at ||
+        (TERMINAL_STATUSES.has(previous.status) &&
+          ACTIVE_STATUSES.has(job.status)))
+    )
       clearLivePreview();
-    state.liveContext = { output, status: job.status, queuedAt: job.queued_at,
-      tab: state.liveTab, rendered: false, resumePending: false };
+    state.liveContext = {
+      output,
+      status: job.status,
+      queuedAt: job.queued_at,
+      tab: state.liveTab,
+      rendered: false,
+      resumePending: false,
+    };
   }
   return state.liveContext;
 }
 
 function clearLivePreview() {
-  const output = $("live-content"), note = $("live-note");
+  const output = $("live-content"),
+    note = $("live-note");
   if (output) output.textContent = t("Waiting for streamed output…");
   if (note) note.textContent = "";
 }
@@ -53,8 +69,13 @@ export function invalidateLivePreview(id) {
 }
 
 function canPollLive() {
-  return state.uiActive && !document.hidden && state.expandedId &&
-    $("live-content") && ACTIVE_STATUSES.has(liveJobStatus());
+  return (
+    state.uiActive &&
+    !document.hidden &&
+    state.expandedId &&
+    $("live-content") &&
+    ACTIVE_STATUSES.has(liveJobStatus())
+  );
 }
 
 function scheduleLivePolling() {
@@ -68,13 +89,16 @@ function scheduleLivePolling() {
 // A new panel or job status needs one fresh preview, including the final one.
 // Unrelated list rebuilds keep the current timer and leave historical previews idle.
 export function syncLivePolling(resume = false) {
-  const previous = state.liveContext, context = currentLiveContext();
+  const previous = state.liveContext,
+    context = currentLiveContext();
   if (!canPollLive()) stopLivePolling();
   if (!state.uiActive || document.hidden || !context) return;
-  if (resume && state.liveBusy && !context.rendered) context.resumePending = true;
+  if (resume && state.liveBusy && !context.rendered)
+    context.resumePending = true;
   // Failed/hidden terminal loads remain unconfirmed. Retry once on visibility,
   // reopening or channel selection; unchanged list refreshes never create a loop.
-  if (previous !== context || (resume && (canPollLive() || !context.rendered))) loadLive();
+  if (previous !== context || (resume && (canPollLive() || !context.rendered)))
+    loadLive();
   else scheduleLivePolling();
 }
 
@@ -143,7 +167,9 @@ export async function loadLive() {
     output = $("live-content"),
     note = $("live-note");
   if (!id || !output || !note) return;
-  const generation = state.uiGeneration, tab = state.liveTab, context = currentLiveContext();
+  const generation = state.uiGeneration,
+    tab = state.liveTab,
+    context = currentLiveContext();
   if (!context) return;
   state.liveBusy = true;
   try {
@@ -154,14 +180,22 @@ export async function loadLive() {
     );
     if (!res.ok) throw Error(`HTTP ${res.status}`);
     const d = await res.json();
-    if (generation !== state.uiGeneration || !state.uiActive || document.hidden ||
-        id !== state.expandedId || output !== $("live-content") || tab !== state.liveTab ||
-        context !== state.liveContext) return;
+    if (
+      generation !== state.uiGeneration ||
+      !state.uiActive ||
+      document.hidden ||
+      id !== state.expandedId ||
+      output !== $("live-content") ||
+      tab !== state.liveTab ||
+      context !== state.liveContext
+    )
+      return;
     // Render the requested channel; pending channel changes load after settlement.
     const reasoning = state.liveTab === "reasoning";
     const content = reasoning ? d.reasoning : d.content;
     const truncated =
-      (reasoning ? d.reasoning_chars : d.content_chars) > (content || "").length;
+      (reasoning ? d.reasoning_chars : d.content_chars) >
+      (content || "").length;
     const label = reasoning
       ? t(
           "No reasoning text was emitted for this pass. The model may not support it, or the server may not expose it.",
@@ -187,8 +221,14 @@ export async function loadLive() {
       liveMetrics(d);
     context.rendered = true;
   } catch (err) {
-    if (generation === state.uiGeneration && state.uiActive && !document.hidden &&
-        id === state.expandedId && output === $("live-content") && context === state.liveContext)
+    if (
+      generation === state.uiGeneration &&
+      state.uiActive &&
+      !document.hidden &&
+      id === state.expandedId &&
+      output === $("live-content") &&
+      context === state.liveContext
+    )
       note.textContent = t("Cannot load live output: ") + err.message;
   } finally {
     if (generation !== state.uiGeneration) return;
@@ -196,7 +236,8 @@ export async function loadLive() {
     // Coalesce a new context or one visibility recovery behind the pending request.
     // An accepted retry leaves context null until its refreshed list is observed.
     const current = state.liveContext;
-    const recover = current === context && context.resumePending && !context.rendered;
+    const recover =
+      current === context && context.resumePending && !context.rendered;
     context.resumePending = false;
     if (current && (current !== context || tab !== state.liveTab || recover))
       loadLive();

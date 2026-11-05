@@ -8,7 +8,11 @@ import { t } from "./i18n.js";
 // The list owns rendering; a callback keeps this module independent of jobs.js.
 export function historyHeading(title, render) {
   const row = el("div", undefined, "top history-heading");
-  const toggle = el("button", t(state.selectionMode ? "Cancel" : "Select"), "button-secondary");
+  const toggle = el(
+    "button",
+    t(state.selectionMode ? "Cancel" : "Select"),
+    "button-secondary",
+  );
   toggle.id = "toggleSelection";
   toggle.type = "button";
   toggle.disabled = state.deleting;
@@ -78,7 +82,9 @@ export function historyControls(eligible) {
 // Only the finished analyses of the displayed list can be selected.
 export function updateSelection() {
   const { selectedJobs, deleting, selectionMode } = state;
-  const eligible = state.jobs.filter((job) => TERMINAL_STATUSES.has(job.status));
+  const eligible = state.jobs.filter((job) =>
+    TERMINAL_STATUSES.has(job.status),
+  );
   const all = $("selectAllJobs");
   if (!all) return;
   all.checked = eligible.length > 0 && selectedJobs.size === eligible.length;
@@ -91,7 +97,10 @@ export function updateSelection() {
     checkbox.disabled = deleting;
   }
   for (const item of $("jobs").querySelectorAll("[data-job-id]"))
-    item.classList.toggle("item-selected", selectedJobs.has(item.dataset.jobId));
+    item.classList.toggle(
+      "item-selected",
+      selectedJobs.has(item.dataset.jobId),
+    );
   $("historyControls").hidden = !selectionMode;
   $("selectionActions").hidden = !selectionMode || !selectedJobs.size;
   $("selectionCount").textContent = t("{count} analyses selected", {
@@ -101,7 +110,8 @@ export function updateSelection() {
   $("clearSelection").disabled = deleting;
   $("deleteSelection").disabled = deleting;
   $("deleteSelection").textContent = t(
-    deleting ? "Deleting…" : "Delete ({count})", { count: selectedJobs.size },
+    deleting ? "Deleting…" : "Delete ({count})",
+    { count: selectedJobs.size },
   );
   $("deleteSelection").setAttribute("aria-busy", String(deleting));
 }
@@ -152,7 +162,9 @@ export function closeDeleteDialog() {
     ? [...$("jobs").querySelectorAll("[data-delete-job]")].find(
         (node) => node.dataset.deleteJob === trigger.dataset.deleteJob,
       )
-    : trigger?.id ? $(trigger.id) : null;
+    : trigger?.id
+      ? $(trigger.id)
+      : null;
   const target = trigger?.isConnected ? trigger : replacement;
   focusHistoryControl(target);
 }
@@ -160,5 +172,7 @@ export function closeDeleteDialog() {
 // A refresh may remove the initiator or hide its action bar while a dialog is open.
 export function focusHistoryControl(target) {
   (target && !target.disabled && !target.closest("[hidden]")
-    ? target : $("toggleSelection"))?.focus();
+    ? target
+    : $("toggleSelection")
+  )?.focus();
 }

@@ -206,7 +206,7 @@ python3 -m venv .venv
 node --test tests/test_polling.js
 ```
 
-Python tests use temporary data and simulated model responses; no llama.cpp is needed. One test starts `app.py` on a free local port and stops it with `SIGTERM`. Two tests require real Tesseract: they are skipped locally when it is missing, but never in CI (`CI` set), where a missing Tesseract fails the build. Node.js 22.7 or later is needed only for the frontend tests (CI uses Node.js 22). [CI](.github/workflows/tests.yml) also lints with ruff and type-checks with mypy (settings in [pyproject.toml](pyproject.toml)), checks syntax, an offline benchmark plan, Compose and Docker packaging.
+Python tests use temporary data and simulated model responses; no llama.cpp is needed. One test starts `app.py` on a free local port and stops it with `SIGTERM`. Two tests require real Tesseract: they are skipped locally when it is missing, but never in CI (`CI` set), where a missing Tesseract fails the build. Node.js 22 is needed only for frontend development (CI uses Node.js 22). The browser tests require no npm dependencies. For the locked JS/HTML/CSS formatter, run `npm ci --ignore-scripts` then `npm run format:check`; `npm run format` applies formatting. [CI](.github/workflows/tests.yml) also lints with ruff and type-checks with mypy (settings in [pyproject.toml](pyproject.toml)), checks syntax, an offline benchmark plan, Compose and Docker packaging.
 
 Dependencies are hash-locked and the Docker base image is pinned by digest; [Dependabot](.github/dependabot.yml) proposes weekly updates on `develop`. To change a dependency, see [updating dependencies](CONTRIBUTING.md#updating-dependencies).
 

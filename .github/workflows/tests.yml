@@ -30,8 +30,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+          cache: npm
+      - name: Install frontend development tools
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Check frontend formatting
+        run: npm run format:check
       - name: Run browser polling tests
-        run: node --test tests/test_polling.js
+        run: npm test
       - name: Validate frontend syntax and Compose
         run: |
           for file in static/js/*.js static/report.js tests/test_polling.js tests/helpers/*.js; do node --check "$file"; done

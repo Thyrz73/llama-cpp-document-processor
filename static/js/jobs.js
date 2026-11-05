@@ -122,7 +122,9 @@ export function renderJobs() {
     const title = el("h3", t(heading));
     title.id = "jobs-" + key + "-heading";
     section.setAttribute("aria-labelledby", title.id);
-    section.append(key === "history" ? historyHeading(title, renderJobs) : title);
+    section.append(
+      key === "history" ? historyHeading(title, renderJobs) : title,
+    );
     const list = el("div", undefined, "job-list");
     section.append(list);
     // The toolbar sits above the history cards, after the heading.
@@ -168,7 +170,12 @@ function restoreFocus(focused, host) {
     );
     focusHistoryControl(replacement);
   } else if (
-    ["toggleSelection", "selectAllJobs", "clearSelection", "deleteSelection"].includes(focused?.id)
+    [
+      "toggleSelection",
+      "selectAllJobs",
+      "clearSelection",
+      "deleteSelection",
+    ].includes(focused?.id)
   ) {
     const replacement = $(focused.id);
     focusHistoryControl(replacement);

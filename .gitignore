@@ -42,3 +42,6 @@ venv/
 
 # Windows download markers, created when files are copied into WSL
 *:Zone.Identifier
+
+# Frontend development tools
+node_modules/
