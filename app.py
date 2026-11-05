@@ -517,8 +517,9 @@ def job_live(job_id):
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError, UnicodeError):
             payload = None
+    # Queued jobs have no current output, including legacy retries without job_runs.
     if (not isinstance(payload, dict)
-            or (attempt_id is not None and job["status"] == "queued")
+            or job["status"] == "queued"
             or (job["status"] == "running" and job["stage"] == "Starting")
             or (payload.get("_attempt_id") is not None and payload["_attempt_id"] != attempt_id)
             or (attempt_id is not None and job["status"] == "running" and payload.get("_attempt_id") != attempt_id)):

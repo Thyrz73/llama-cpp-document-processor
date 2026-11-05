@@ -138,6 +138,195 @@ class LiveTests(unittest.TestCase):
                 self.assertEqual(client.get('/api/jobs/' + 'a' * 32).get_json()['progress_percent'], 100)
 
 
+class LegacyPreviewTests(unittest.TestCase):
+    """Upgrade a pre-attempt database without relabelling or removing old files."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.store = JobStore(Path(temporary.name))
+        self.addCleanup(self.store.close)
+        self.identifiers = {status: character * 32 for status, character in
+                            (("done", "a"), ("failed", "b"), ("cancelled", "c"), ("running", "d"))}
+        # Original jobs schema: no snapshots, attempts, phases or queued_at.
+        with self.store.connect() as con:
+            con.execute("""CREATE TABLE jobs (
+                id TEXT PRIMARY KEY, filename TEXT NOT NULL, question TEXT NOT NULL,
+                status TEXT NOT NULL, stage TEXT NOT NULL DEFAULT '',
+                pages INTEGER DEFAULT 0, total_chunks INTEGER DEFAULT 0, done_chunks INTEGER DEFAULT 0,
+                error TEXT DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            )""")
+            for status, identifier in self.identifiers.items():
+                con.execute("INSERT INTO jobs (id,filename,question,status,stage,created_at,updated_at) "
+                            "VALUES (?, 'legacy.pdf', 'Analyze', ?, 'Historical stage', '2025-01-01', '2025-01-01')",
+                            (identifier, status))
+        self.payloads = {}
+        for status, identifier in self.identifiers.items():
+            directory = self.store.job_dir(identifier)
+            directory.mkdir(parents=True)
+            (directory / "source.pdf").write_bytes(b"%PDF-legacy-source")
+            (directory / "rapport_final.md").write_text("Historical report", encoding="utf-8")
+            archive = directory / "previous_reports"
+            archive.mkdir()
+            (archive / "retained.md").write_text("Archived report", encoding="utf-8")
+            artifacts = directory / "artifacts" / "historical"
+            artifacts.mkdir(parents=True)
+            atomic_json(artifacts / "manifest.json", {"version": 1, "artifacts": {}})
+            (artifacts / "analysis_0000.md").write_text("Reusable historical notes", encoding="utf-8")
+            self.payloads[identifier] = {"phase": "Historical stage", "content": f"LEGACY_{status}_TEXT",
+                                         "reasoning": f"LEGACY_{status}_REASONING", "reasoning_chars": 30,
+                                         "active": True}
+            atomic_json(directory / "live_preview.json", self.payloads[identifier])
+        self.files_before = self.files()
+        self.store.initialize()
+        for name, value in (("store", self.store), ("LIVE_OUTPUT_ENABLED", True)):
+            changed = patch.object(app, name, value)
+            changed.start()
+            self.addCleanup(changed.stop)
+        self.client = app.app.test_client()
+
+    def files(self):
+        return {path.relative_to(self.store.data_dir): path.read_bytes()
+                for path in (self.store.data_dir / "jobs").rglob("*") if path.is_file()}
+
+    def live(self, identifier, reasoning=False):
+        response = self.client.get(f"/api/jobs/{identifier}/live" +
+                                   ("?include_reasoning=true" if reasoning else ""))
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertNotIn("_attempt_id", payload)
+        return payload
+
+    def retry(self, identifier):
+        with patch.object(app.worker, "wake"):
+            response = self.client.post(f"/api/jobs/{identifier}/retry")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json(), {"status": "queued", "warnings": ["legacy_recomputed"]})
+
+    def assert_empty(self, identifier):
+        job = self.store.get_job(identifier)
+        self.assertEqual(self.live(identifier, reasoning=True), {
+            "phase": job["stage"], "phase_code": job["phase_code"], "phase_args": job["phase_args"],
+            "content": "", "reasoning": "", "active": False, "enabled": True})
+
+    def test_terminal_legacy_previews_remain_readable_without_attempts_or_snapshots(self):
+        for status in ("done", "failed", "cancelled"):
+            identifier = self.identifiers[status]
+            with self.subTest(status=status):
+                self.assertIsNone(self.store.get_live_job(identifier)[1])
+                self.assertIsNone(self.store.load_config(identifier))
+                self.assertEqual(self.store.attempt_count(identifier), 0)
+                public = self.live(identifier)
+                self.assertEqual(public["content"], self.payloads[identifier]["content"])
+                self.assertEqual(public["reasoning"], "")
+                self.assertFalse(public["active"])
+                self.assertEqual(self.live(identifier, True)["reasoning"], self.payloads[identifier]["reasoning"])
+        self.assertEqual(self.files(), self.files_before)
+
+    def test_queued_legacy_retries_hide_both_disk_and_cached_previews_without_creating_attempts(self):
+        for status in ("failed", "cancelled"):
+            identifier = self.identifiers[status]
+            with self.subTest(status=status):
+                self.store.previews.put(identifier, self.payloads[identifier], 1000)
+                self.retry(identifier)
+                self.assertIsNone(self.store.previews.get(identifier))
+                self.assertIsNone(self.store.get_live_job(identifier)[1])
+                self.assert_empty(identifier)
+                # A separate publisher/reader may still have an untagged cached snapshot.
+                self.store.previews.put(identifier, self.payloads[identifier], 1000)
+                self.assert_empty(identifier)
+                self.assertEqual(self.store.attempt_count(identifier), 0)
+                self.assertIsNone(self.store.load_config(identifier))
+                done = self.identifiers["done"]
+                self.assertEqual(self.live(done)["content"], self.payloads[done]["content"])
+        self.assertEqual(self.files(), self.files_before)
+
+    def test_restart_and_claim_hide_interrupted_legacy_output_before_any_attempt_exists(self):
+        identifier = self.identifiers["running"]
+        self.assertEqual(self.store.get_job(identifier)["status"], "queued")
+        self.assert_empty(identifier)
+        self.assertEqual(self.store.claim_next_job(), identifier)
+        self.assert_empty(identifier)
+        self.store.initialize()
+        self.assertEqual(self.store.get_job(identifier)["status"], "queued")
+        self.assertIsNone(self.store.get_live_job(identifier)[1])
+        self.assert_empty(identifier)
+        self.assertEqual(self.files(), self.files_before)
+
+    def test_new_attempt_accepts_current_memory_and_disk_previews_but_rejects_untagged_output(self):
+        identifier = self.identifiers["failed"]
+        self.retry(identifier)
+        self.assertEqual(self.store.claim_next_job(), identifier)
+        recorder = self.store.start_attempt(identifier, self.store.get_job(identifier)["queued_at"])
+        self.store.update_job(identifier, stage="Analyzing section 1/1", phase_code="section")
+        self.assert_empty(identifier)  # The old untagged disk file is still intact.
+        current = {"_attempt_id": recorder.run_id, "content": "CURRENT_TEXT", "reasoning": "CURRENT_REASONING",
+                   "reasoning_chars": 17, "active": True}
+        self.store.previews.put(identifier, current, 1000)
+        self.assertEqual(self.live(identifier)["content"], "CURRENT_TEXT")
+        self.assertEqual(self.live(identifier)["reasoning"], "")
+        self.assertTrue(self.live(identifier)["active"])
+        self.assertEqual(self.live(identifier, True)["reasoning"], "CURRENT_REASONING")
+        self.assertEqual(self.files(), self.files_before)
+        path = self.store.job_dir(identifier) / "live_preview.json"
+        atomic_json(path, current)
+        self.store.previews.clear()
+        self.assertEqual(self.live(identifier)["content"], "CURRENT_TEXT")
+        expected = dict(self.files_before)
+        expected[path.relative_to(self.store.data_dir)] = path.read_bytes()
+        self.assertEqual(self.files(), expected)
+
+    def test_error_cancellation_and_restart_preserve_current_partial_output_and_retry_files(self):
+        for status in ("failed", "cancelled"):
+            identifier = self.identifiers[status]
+            with self.subTest(status=status):
+                self.retry(identifier)
+                self.assertEqual(self.store.claim_next_job(), identifier)
+                recorder = self.store.start_attempt(identifier, self.store.get_job(identifier)["queued_at"])
+                path = self.store.job_dir(identifier) / "live_preview.json"
+                payload = {"_attempt_id": recorder.run_id, "content": f"CURRENT_{status}_PARTIAL",
+                           "reasoning": "CURRENT_REASONING", "reasoning_chars": 17, "active": True}
+                atomic_json(path, payload)
+                recorder.finish(status)
+                self.store.update_job(identifier, status=status, phase_code=status,
+                                      error_code="output_limit" if status == "failed" else "cancelled")
+                self.assertEqual(self.live(identifier)["content"], payload["content"])
+                self.assertFalse(self.live(identifier)["active"])
+                before_restart = self.files()
+                self.store.initialize()
+                self.assertEqual(self.live(identifier)["content"], payload["content"])
+                self.assertFalse(self.live(identifier)["active"])
+                self.retry(identifier)
+                self.assert_empty(identifier)
+                self.store.request_cancel(identifier)
+                self.assertEqual(self.files(), before_restart)
+                retained = self.files()
+                for path, contents in self.files_before.items():
+                    if path.name != "live_preview.json":
+                        self.assertEqual(retained[path], contents)
+
+    def test_mismatched_job_or_attempt_previews_cannot_expose_previous_output(self):
+        identifier = self.identifiers["failed"]
+        self.retry(identifier)
+        self.assertEqual(self.store.claim_next_job(), identifier)
+        first = self.store.start_attempt(identifier, self.store.get_job(identifier)["queued_at"])
+        old = {"_attempt_id": first.run_id, "content": "PREVIOUS_ATTEMPT", "active": True}
+        atomic_json(self.store.job_dir(identifier) / "live_preview.json", old)
+        first.finish("failed")
+        self.store.update_job(identifier, status="failed")
+        self.retry(identifier)
+        self.assertEqual(self.store.claim_next_job(), identifier)
+        current = self.store.start_attempt(identifier, self.store.get_job(identifier)["queued_at"])
+        self.assertNotEqual(first.run_id, current.run_id)
+        self.store.update_job(identifier, stage="Analyzing section 1/1", phase_code="section")
+        self.store.previews.put(identifier, old, 1000)
+        self.store.previews.put(self.identifiers["done"], {"_attempt_id": current.run_id,
+                                                        "content": "OTHER_JOB", "active": True}, 1000)
+        before = self.files()
+        self.assert_empty(identifier)
+        self.assertEqual(self.files(), before)
+
+
 class PreviewCacheTests(unittest.TestCase):
     def test_bounds_copies_and_expiration_are_independent_of_reads(self):
         cache = previews.PreviewCache(max_entries=2, ttl=5)

@@ -519,6 +519,10 @@ class V2Tests(unittest.TestCase):
         atomic_json(directory / "live_preview.json", {"content": "Answer", "reasoning": "PRIVATE_REASONING",
                                                          "reasoning_chars": 17, "active": True})
         with patch.object(app.ModelClient, "complete", side_effect=AssertionError("No generation")):
+            queued = self.client.get(f"/api/jobs/{identifier}/live?include_reasoning=true").json
+            self.assertEqual((queued["content"], queued["reasoning"]), ("", ""))
+            # Reasoning opt-in still applies to historical output on terminal jobs.
+            app.store.update_job(identifier, status="failed")
             self.assertNotIn("PRIVATE_REASONING", self.client.get(f"/api/jobs/{identifier}/live").get_data(as_text=True))
             self.assertEqual(self.client.get(f"/api/jobs/{identifier}/live?include_reasoning=true").json["reasoning"], "PRIVATE_REASONING")
             self.assertEqual(self.client.get(f"/api/jobs/{identifier}/report").status_code, 409)
