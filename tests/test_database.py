@@ -52,7 +52,7 @@ class MigrationTests(unittest.TestCase):
             con.execute("INSERT INTO jobs (id, filename, question, status, created_at, updated_at) "
                         "VALUES ('a', 'old.pdf', 'Old request', 'done', '2025-01-01', '2025-01-01')")
         database.initialize(self.path)
-        self.assertEqual(self.versions(), [1, 2, 3])
+        self.assertEqual(self.versions(), [version for version, _ in database.MIGRATIONS])
         with database.connect(self.path) as con:
             row = dict(con.execute("SELECT * FROM jobs").fetchone())
         self.assertEqual((row["question"], row["updated_at"], row["progress_percent"]), ("Old request", "2025-01-01", 0))
@@ -64,7 +64,7 @@ class MigrationTests(unittest.TestCase):
         with database.connect(self.path) as con:
             con.execute("DELETE FROM schema_migrations WHERE version=1")
         database.initialize(self.path)
-        self.assertEqual(self.versions(), [1, 2, 3])
+        self.assertEqual(self.versions(), [version for version, _ in database.MIGRATIONS])
 
     def test_newer_schema_refuses_to_start(self):
         database.initialize(self.path)
@@ -78,10 +78,11 @@ class MigrationTests(unittest.TestCase):
             con.execute("ALTER TABLE jobs ADD COLUMN half_done TEXT")
             raise sqlite3.OperationalError("simulated failure")
 
-        with patch.object(database, "MIGRATIONS", database.MIGRATIONS + ((4, broken),)):
+        expected = [version for version, _ in database.MIGRATIONS]
+        with patch.object(database, "MIGRATIONS", database.MIGRATIONS + ((expected[-1] + 1, broken),)):
             with self.assertRaises(sqlite3.OperationalError):
                 database.initialize(self.path)
-        self.assertEqual(self.versions(), [1, 2, 3])
+        self.assertEqual(self.versions(), expected)
         self.assertNotIn("half_done", self.columns("jobs"))
 
 

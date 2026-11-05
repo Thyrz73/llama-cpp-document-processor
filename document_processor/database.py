@@ -201,11 +201,20 @@ def _add_report_names_and_prompt_origin(con):
     _add_columns(con, "jobs", {"report_name": "TEXT", "question_custom": "INTEGER"})
 
 
+def _index_job_order_and_status(con):
+    """Version 4: avoid sorting history/queue reads and scanning for active jobs."""
+    # SQLite can scan this ascending index backwards for newest-first history.
+    con.execute("CREATE INDEX IF NOT EXISTS jobs_by_created ON jobs(created_at, id)")
+    # The status prefix also covers the global active-job lookup; no status-only index.
+    con.execute("CREATE INDEX IF NOT EXISTS jobs_by_status_created ON jobs(status, created_at, id)")
+
+
 # Ordered (version, migration) pairs. Append only; never edit a released migration.
 MIGRATIONS = (
     (1, _create_jobs),
     (2, _add_configurations_and_measurements),
     (3, _add_report_names_and_prompt_origin),
+    (4, _index_job_order_and_status),
 )
 
 

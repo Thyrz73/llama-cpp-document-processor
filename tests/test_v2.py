@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import app
-from document_processor import config, extraction, pipeline, prompts, worker
+from document_processor import config, database, extraction, pipeline, prompts, worker
 from document_processor.errors import Cancelled, ModelError, ProcessingError, WorkerStopping
 from document_processor.files import atomic_json, file_hash
 from document_processor.jobs import JobStore
@@ -428,7 +428,8 @@ class V2Tests(unittest.TestCase):
         app.store.initialize()
         self.assertEqual(app.store.get_job(identifier), before)
         with app.store.connect() as con:
-            self.assertEqual([row[0] for row in con.execute("SELECT version FROM schema_migrations ORDER BY version")], [1, 2, 3])
+            self.assertEqual([row[0] for row in con.execute("SELECT version FROM schema_migrations ORDER BY version")],
+                             [version for version, _ in database.MIGRATIONS])
 
     def test_running_job_cancellation_is_signalled_without_polling_sqlite(self):
         identifier = self.create()
