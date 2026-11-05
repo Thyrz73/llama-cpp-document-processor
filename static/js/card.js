@@ -64,7 +64,7 @@ export function jobCard(job, handlers, live) {
 function cardHeader(job) {
   const top = el("div", undefined, "top");
   const finished = TERMINAL_STATUSES.has(job.status);
-  const identity = el(finished ? "label" : "div", undefined, "job-identity");
+  const identity = el(finished && state.selectionMode ? "label" : "div", undefined, "job-identity");
   if (finished) {
     const checkbox = el("input");
     checkbox.type = "checkbox";
@@ -74,16 +74,20 @@ function cardHeader(job) {
       t("Select analysis: {name}", { name: job.filename }),
     );
     checkbox.addEventListener("change", () => {
-      if (checkbox.checked) state.selectedJobs.add(job.id);
-      else state.selectedJobs.delete(job.id);
+      if (state.selectionMode && !state.deleting) {
+        if (checkbox.checked) state.selectedJobs.add(job.id);
+        else state.selectedJobs.delete(job.id);
+      }
       updateSelection();
     });
     identity.append(checkbox);
   }
   identity.append(el("span", job.filename, "name"));
   top.append(identity);
-  top.append(el("span", statusLabel(job.status), `pill ${job.status}`));
-  if (finished) top.append(deleteButton(job));
+  const status = el("div", undefined, "job-status");
+  status.append(el("span", statusLabel(job.status), `pill ${job.status}`));
+  if (finished) status.append(deleteButton(job));
+  top.append(status);
   return top;
 }
 
@@ -98,6 +102,7 @@ function deleteButton(job) {
   );
   remove.dataset.deleteJob = job.id;
   remove.disabled = state.deleting;
+  remove.hidden = state.selectionMode;
   const icon = document.createElementNS(SVG, "svg");
   icon.setAttribute("viewBox", "0 0 24 24");
   icon.setAttribute("class", "trash-icon");

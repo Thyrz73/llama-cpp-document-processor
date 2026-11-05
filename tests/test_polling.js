@@ -135,6 +135,26 @@ async function runPollingTests(template, translations={en:{},fr:{}}) {
    assert(setup(false,storage).document.documentElement.dataset.theme==='light','Restore light on next visit');
   }
  });
+ await test('early page, modules and report agree on explicit themes and legacy system fallback',async()=>{
+  const reportScript=require('node:fs').readFileSync(path.join(__dirname,'../static/report.js'),'utf8');
+  for(const systemDark of [false,true])for(const initial of [null,'system','invalid','light','dark']){
+   const key='document-processor-theme',storage=new Map(initial===null?[]:[[key,initial]]),h=setup(false,storage,systemDark);
+   const expected=initial==='dark'?'dark':'light';
+   assert(h.earlyTheme===expected&&h.elements.theme.value===expected&&h.document.documentElement.dataset.theme===expected,'Early paint and modules must agree');
+   h.systemTheme.matches=!systemDark;for(const fn of h.systemTheme.handlers)fn();
+   assert(h.document.documentElement.dataset.theme===expected,'OS changes must not override explicit or migrated themes');
+   if(initial===null)storage.delete(key);else storage.set(key,initial);
+   new Function(reportScript)();assert(h.document.documentElement.dataset.theme===expected,'Report uses the same saved or legacy fallback');
+  }
+ });
+ await test('language and theme persist together across independently started pages',async()=>{
+  const storage=new Map([['document-processor-language','fr'],['document-processor-theme','dark']]);
+  const first=setup(true,storage);assert(first.document.documentElement.lang==='fr'&&first.elements.theme.value==='dark','Restore both saved preferences');
+  first.elements.uiLanguage.value='en';first.elements.uiLanguage.handlers.change[0]();
+  first.elements.theme.value='light';first.elements.theme.handlers.change[0]();
+  const second=setup(true,storage);
+  assert(second.document.documentElement.lang==='en'&&second.elements.theme.value==='light','New page uses the same saved preferences');
+ });
 
  await test('initial load stops for empty, completed, failed and mixed terminal lists',async()=>{
   for(const jobs of [[],[job('done',100)],[job('failed')],[job('done',100),job('failed',20,'b'.repeat(32))]]){
@@ -351,6 +371,13 @@ async function runPollingTests(template, translations={en:{},fr:{}}) {
  const checks=h=>descendants(h.elements.jobs).filter(node=>node.dataset.selectJob);
  const select=(node,value=true)=>{node.checked=value;node.handlers.change[0]()};
  const toggleSelection=h=>h.document.getElementById('toggleSelection').handlers.click[0]();
+ await test('hidden selection controls cannot select jobs outside selection mode',async()=>{
+  const h=setup();await h.respond(0,{jobs:[job('done')]});
+  const checkbox=checks(h)[0];assert(checkbox.parentElement.tag==='div','Normal filename must not activate a hidden checkbox label');
+  select(checkbox);assert(!checkbox.checked&&h.document.getElementById('selectionActions').hidden,'Ignore hidden checkbox changes');
+  select(h.document.getElementById('selectAllJobs'));assert(!checks(h)[0].checked,'Ignore hidden select-all changes');
+  toggleSelection(h);assert(checks(h)[0].parentElement.tag==='label','Visible selection keeps its accessible label');
+ });
  await test('selection mode starts hidden, toggles controls and resets on cancel',async()=>{
   const h=setup();await h.respond(0,{jobs:[job('done'),job('failed',0,'b'.repeat(32)),job('running',20,'c'.repeat(32))]});
   const get=id=>h.document.getElementById(id),trash=()=>descendants(h.elements.jobs).filter(n=>n.dataset.deleteJob);
@@ -407,6 +434,60 @@ async function runPollingTests(template, translations={en:{},fr:{}}) {
   assert(h.elements.deleteMessage.textContent.includes('1 analyses'),'Exact bulk count');
   h.elements.deleteDialog.handlers.cancel[0]({preventDefault(){}});
   assert(!h.elements.deleteDialog.open&&checks(h)[0].checked&&h.requests.length===1,'Escape preserves selection');
+ });
+ await test('selection and confirmation never include queued or running analyses',async()=>{
+  const h=setup(),active=[job('queued',0,'b'.repeat(32)),job('running',20,'c'.repeat(32))];
+  await h.respond(0,{jobs:[job('done'),...active]});
+  assert(descendants(h.elements.jobs).filter(n=>n.dataset.deleteJob).length===1,'Only finished analyses have trash buttons');
+  h.api.confirmDeletion(active.map(j=>j.id),true);assert(!h.elements.deleteDialog.open&&h.requests.length===1,'Active-only confirmation is refused');
+  toggleSelection(h);select(h.document.getElementById('selectAllJobs'));
+  h.document.getElementById('deleteSelection').handlers.click[0]();
+  const pending=h.api.submitDeletion();assert(JSON.stringify(JSON.parse(h.requests[1].options.body).ids)===JSON.stringify(['a'.repeat(32)]),'Send only the visible terminal ID');
+  await h.respond(1,{results:[{id:'a'.repeat(32),deleted:true}]});await h.respond(2,{jobs:active});await pending;
+ });
+ await test('selection toggle retains focus and accessible state across refresh and cancellation',async()=>{
+  const h=setup();await h.respond(0,{jobs:[job('done')]});toggleSelection(h);
+  const first=h.document.getElementById('toggleSelection');
+  assert(h.document.activeElement===first&&first.attributes['aria-pressed']==='true'&&first.attributes['aria-controls']==='historyControls','Toggle keeps focus and announces its controls');
+  select(checks(h)[0]);h.click();await h.respond(1,{jobs:[job('done'),job('running',1,'b'.repeat(32))]});
+  const current=h.document.getElementById('toggleSelection');
+  assert(current!==first&&!first.isConnected&&h.document.activeElement===current,'Focus the replacement toggle after rendering');
+  toggleSelection(h);assert(h.document.activeElement===h.document.getElementById('toggleSelection')&&!checks(h)[0].checked,'Cancel clears selection and preserves focus');
+ });
+ await test('dialog cancellation restores a refreshed initiator or a visible fallback',async()=>{
+  const h=setup();await h.respond(0,{jobs:[job('done')]});
+  const trash=()=>descendants(h.elements.jobs).find(n=>n.dataset.deleteJob);
+  const original=trash();original.focus();original.handlers.click[0]();
+  assert(h.document.activeElement===h.elements.deleteCancel,'Dialog opens on the safe cancel control');
+  h.click();await h.respond(1,{jobs:[{...job('done'),filename:'changed.pdf'}]});
+  h.elements.deleteCancel.handlers.click[0]();assert(!original.isConnected&&h.document.activeElement===trash(),'Cancel returns to the replacement trash button');
+  toggleSelection(h);select(checks(h)[0]);h.document.getElementById('deleteSelection').handlers.click[0]();
+  h.click();await h.respond(2,{jobs:[]});h.elements.deleteDialog.handlers.cancel[0]({preventDefault(){}});
+  assert(h.document.activeElement===h.document.getElementById('toggleSelection'),'Do not focus a button inside a hidden action bar');
+  assert(h.requests.length===3,'Cancel and Escape never send deletion requests');
+ });
+ await test('deletion locks selection changes and restores focus after completion',async()=>{
+  const h=setup();await h.respond(0,{jobs:[job('done')]});toggleSelection(h);select(checks(h)[0]);
+  h.document.getElementById('deleteSelection').handlers.click[0]();const pending=h.api.submitDeletion();
+  assert(h.document.getElementById('toggleSelection').disabled&&h.document.getElementById('selectAllJobs').disabled&&checks(h)[0].disabled,'Disable all selection controls during deletion');
+  toggleSelection(h);select(checks(h)[0],false);select(h.document.getElementById('selectAllJobs'),false);
+  assert(checks(h)[0].checked&&h.document.getElementById('toggleSelection').attributes['aria-pressed']==='true','Even stale events cannot alter the in-flight selection');
+  await h.respond(1,{results:[{id:'a'.repeat(32),deleted:true}]});await h.respond(2,{jobs:[]});await pending;
+  assert(h.document.activeElement===h.document.getElementById('toggleSelection'),'Empty history falls back to its enabled toggle');
+ });
+ await test('deselect keeps selection mode open and moves focus out of the hidden action bar',async()=>{
+  const h=setup();await h.respond(0,{jobs:[job('done')]});toggleSelection(h);select(checks(h)[0]);
+  const clear=h.document.getElementById('clearSelection');clear.focus();clear.handlers.click[0]();
+  assert(checks(h).every(n=>!n.checked)&&h.document.getElementById('selectionActions').hidden,'Deselect clears all visible checks');
+  assert(h.document.getElementById('toggleSelection').attributes['aria-pressed']==='true','Deselect preserves selection mode');
+  assert(h.document.activeElement===h.document.getElementById('selectAllJobs'),'Focus the still-visible select-all control');
+ });
+ await test('a focused terminal analysis becoming active loses selection and returns focus safely',async()=>{
+  const h=setup();await h.respond(0,{jobs:[job('done')]});toggleSelection(h);select(checks(h)[0]);
+  const old=checks(h)[0];old.focus();h.click();await h.respond(1,{jobs:[job('running')]});
+  assert(!old.isConnected&&checks(h).length===0,'An active job has no selection checkbox');
+  assert(h.document.getElementById('selectionActions').hidden,'Discard selection when a job becomes active');
+  assert(h.document.activeElement===h.document.getElementById('toggleSelection'),'Keep focus on a visible history control');
  });
  await test('individual deletion removes only the confirmed card and shows an empty state',async()=>{
   const h=setup();const id='a'.repeat(32);await h.respond(0,{jobs:[job('done')]});

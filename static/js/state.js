@@ -35,6 +35,7 @@ function initialState() {
     liveTab: "content",
     liveBusy: false,
     // History selection and deletion (history.js).
+    selectionMode: false,
     selectedJobs: new Set(),
     deleting: false,
     deleteIntent: null,

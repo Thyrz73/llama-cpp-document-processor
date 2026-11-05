@@ -9,6 +9,8 @@ import { loadLive } from "./live.js";
 import {
   closeDeleteDialog,
   historyControls,
+  historyHeading,
+  focusHistoryControl,
   updateSelection,
 } from "./history.js";
 
@@ -97,6 +99,7 @@ export function renderJobs() {
     state.jobs,
     state.expandedId,
     state.deleting,
+    state.selectionMode,
   ]);
   if (signature === state.renderedSignature) return;
   const focused = document.activeElement;
@@ -111,11 +114,15 @@ export function renderJobs() {
     const title = el("h3", t(heading));
     title.id = "jobs-" + key + "-heading";
     section.setAttribute("aria-labelledby", title.id);
-    section.append(title);
+    section.append(key === "history" ? historyHeading(title, renderJobs) : title);
     const list = el("div", undefined, "job-list");
     section.append(list);
     // The toolbar sits above the history cards, after the heading.
-    if (key === "history") list.append(historyControls(eligible));
+    if (key === "history") {
+      const { controls, actions } = historyControls(eligible);
+      list.append(controls);
+      section.append(actions);
+    }
     host.append(section);
     groups[key] = list;
     if (
@@ -151,11 +158,12 @@ function restoreFocus(focused, host) {
         node.dataset.selectJob === focused.dataset.selectJob &&
         node.dataset.deleteJob === focused.dataset.deleteJob,
     );
-    replacement?.focus();
+    focusHistoryControl(replacement);
   } else if (
-    ["selectAllJobs", "clearSelection", "deleteSelection"].includes(focused?.id)
+    ["toggleSelection", "selectAllJobs", "clearSelection", "deleteSelection"].includes(focused?.id)
   ) {
-    $(focused.id)?.focus();
+    const replacement = $(focused.id);
+    focusHistoryControl(replacement);
   }
 }
 
@@ -306,6 +314,7 @@ export async function submitDeletion() {
   } finally {
     state.deleting = false;
     renderJobs();
-    $("selectAllJobs")?.focus();
+    const all = $("selectAllJobs");
+    focusHistoryControl(state.selectionMode ? all : $("toggleSelection"));
   }
 }

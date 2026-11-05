@@ -10,7 +10,11 @@ Saved custom analysis instructions are available in a collapsible block on each 
 
 Finished analyses can be deleted one at a time or selected in bulk from the displayed history. Each deletion asks for confirmation, and active analyses cannot be selected. Deleting removes the job record and its private files; see [history deletion](api.md#history-deletion) for the guarantees and warnings.
 
+Use **Select** to show the history checkboxes and select-all control. Bulk actions appear below the list once an analysis is selected. **Cancel** exits selection mode and clears the selection; the individual trash buttons return. Refreshes and language changes preserve visible selections and keyboard focus. While deletion is pending, selection controls are disabled; failed deletions retain their entries and selection.
+
 The interface initially selects `low`, automatic report language and standard detail. Interface language and theme are saved in the browser; changing them does not translate existing reports. Automatic report language follows the request, not the interface language.
+
+The initial theme is light. An explicit light/dark choice is remembered on both the analysis page and report reader. The retired `system` setting and invalid saved values fall back to light, independently of the operating system's color scheme.
 
 For new analyses, headers, extraction notices and mechanical warnings use a private `effective_report_language` (`fr` or `en`) saved with the configuration. Explicit French/English choices win. With `auto`, a small local heuristic compares distinct common French and English request words; ties or unrecognized requests use English. It examines the request only, not the PDF, and can misclassify short or mixed requests; choose an explicit language when needed. The generation prompt still asks the model to follow the request. Retries reuse the saved choice; older snapshots without this field keep their original rendering (English for `auto`).
 
