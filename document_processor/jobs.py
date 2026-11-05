@@ -7,13 +7,16 @@ database.ThreadConnections), so the store is safe to share between the web
 threads and the worker thread. Call close() when the process stops.
 """
 
+import copy
 import json
 import logging
 import os
 import re
 import shutil
 import stat
+import threading
 import time
+from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -28,6 +31,8 @@ from .previews import PreviewCache
 SOURCE_FILE = "source.pdf"
 REPORT_FILE = "rapport_final.md"
 PREVIEW_FILE = "live_preview.json"
+# More than two visible history pages; retain only sanitized public fields.
+PUBLIC_CONFIG_CACHE_SIZE = 256
 
 # Columns that update_job() may change; every other column is fixed at creation.
 UPDATABLE_COLUMNS = {"status", "stage", "pages", "total_chunks", "done_chunks", "error", "progress_percent",
@@ -65,6 +70,8 @@ class JobStore:
         self.db_path = self.data_dir / "jobs.sqlite3"
         self._connections = database.ThreadConnections(self.db_path)
         self.previews = PreviewCache()
+        self._public_config_lock = threading.Lock()
+        self._public_configs: OrderedDict[tuple[str, str], dict] = OrderedDict()
 
     def connect(self):
         """Open a transaction on the jobs database, on this thread's connection (see database.ThreadConnections).
@@ -85,6 +92,8 @@ class JobStore:
     def initialize(self):
         """Create the data directory and schema, then recover jobs cut short by a restart."""
         self.previews.clear()
+        with self._public_config_lock:
+            self._public_configs.clear()
         self.data_dir.mkdir(parents=True, exist_ok=True)
         event("workspace_ready", status="available")
         database.initialize(self.db_path)
@@ -212,18 +221,49 @@ class JobStore:
         The activity flag covers the whole queue, including older jobs outside
         the list, so the browser keeps polling while any job is queued or running.
         """
-        with self.connect() as con:
-            rows = con.execute("SELECT * FROM jobs ORDER BY created_at DESC, id DESC LIMIT ?", (limit,)).fetchall()
-            has_active = con.execute("SELECT EXISTS(SELECT 1 FROM jobs WHERE status IN ('queued', 'running'))").fetchone()[0]
-            # Reuse the fingerprint stored with each snapshot instead of rehashing it on every poll.
-            configs = {row["job_id"]: (json.loads(row["snapshot"]), row["fingerprint"]) for row in con.execute(
-                "SELECT job_id, snapshot, fingerprint FROM job_configs WHERE job_id IN "
-                "(SELECT id FROM jobs ORDER BY created_at DESC, id DESC LIMIT ?)", (limit,))}
+        # Serialize cache fills with invalidation, including concurrent HTTP readers.
+        # Only fingerprints are read on hits: private snapshot text never leaves SQLite.
+        with self._public_config_lock:
+            with self.connect() as con:
+                rows = con.execute("SELECT jobs.*, job_configs.fingerprint AS config_fingerprint FROM jobs "
+                                   "LEFT JOIN job_configs ON job_configs.job_id=jobs.id "
+                                   "ORDER BY jobs.created_at DESC, jobs.id DESC LIMIT ?", (limit,)).fetchall()
+                has_active = con.execute("SELECT EXISTS(SELECT 1 FROM jobs WHERE status IN ('queued', 'running'))").fetchone()[0]
+                configs = {}
+                missing = []
+                for row in rows:
+                    key = (row["id"], row["config_fingerprint"])
+                    if key[1] is None:
+                        continue  # Legacy job: do not cache the absence of a snapshot.
+                    cached = self._public_configs.get(key)
+                    if cached is None:
+                        missing.append(row["id"])
+                    else:
+                        self._public_configs.move_to_end(key)
+                        configs[row["id"]] = copy.deepcopy(cached)
+                if missing:
+                    placeholders = ",".join("?" for _ in missing)
+                    for row in con.execute("SELECT job_id, fingerprint, snapshot FROM job_configs "
+                                           f"WHERE job_id IN ({placeholders})", missing):
+                        public = public_config(json.loads(row["snapshot"]), row["fingerprint"])
+                        key = (row["job_id"], row["fingerprint"])
+                        self._public_configs[key] = copy.deepcopy(public)
+                        self._public_configs.move_to_end(key)
+                        configs[row["job_id"]] = public
+                        while len(self._public_configs) > PUBLIC_CONFIG_CACHE_SIZE:
+                            self._public_configs.popitem(last=False)
         jobs = [self.serialize(row) for row in rows]
         for job in jobs:
             if job["id"] in configs:
-                job["configuration"] = public_config(*configs[job["id"]])
+                job["configuration"] = configs[job["id"]]
         return jobs, bool(has_active)
+
+    def _discard_public_config(self, job_id):
+        """Invalidate all cached fingerprints of one deleted or migrated snapshot."""
+        with self._public_config_lock:
+            for key in list(self._public_configs):
+                if key[0] == job_id:
+                    del self._public_configs[key]
 
     def create_job(self, job_id, filename, question, question_custom, config):
         """Insert a queued job together with its immutable configuration snapshot."""
@@ -289,6 +329,7 @@ class JobStore:
                 return "delete_active"
             con.execute("DELETE FROM jobs WHERE id=?", (job_id,))
         self.previews.discard(job_id)
+        self._discard_public_config(job_id)
         return None
 
     # Queue --------------------------------------------------------------------
@@ -362,6 +403,7 @@ class JobStore:
         """Save the snapshot of a job created before snapshots existed."""
         with self.connect() as con:
             self._insert_config(con, job_id, config)
+        self._discard_public_config(job_id)
 
     def _insert_config(self, con, job_id, config):
         """Insert a snapshot once, inside the caller's transaction; never replace it."""

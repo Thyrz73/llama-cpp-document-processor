@@ -30,6 +30,8 @@ The reader escapes raw HTML, rejects executable link schemes, disables images an
 
 Job responses additionally include `report_name` (null for old jobs until first report access), `report_available` for completed jobs, and `question_custom` (`1` for explicitly customized instructions, `0` for known default instructions, including older jobs whose saved request is a default, null when an older job's origin is unknown). `question` preserves the original submitted text, including whitespace; the model still receives the same trimmed instructions as before. Configuration snapshots and system prompts remain private.
 
+`GET /api/jobs` caches only immutable public configurations by job ID and stored fingerprint, with a process-local limit of 256 entries. The response format is unchanged: job state and `has_active_jobs` are always fresh, including active jobs outside the latest 100. Fingerprint changes, snapshot creation, deletion and startup/migration recovery invalidate cached observations. Private snapshots are loaded only on a cache miss; individual job details continue to verify snapshot integrity.
+
 ## Creating a job
 
 Multipart fields are `file`, `question` (maximum 1,500 characters) and optional `options` containing a JSON object:
