@@ -1,12 +1,14 @@
 """Application collaborators shared by HTTP routes and the background worker."""
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
+from typing import cast
 
 from . import config as job_config
 from . import pipeline, prompts
 from .backend import BackendClient, CapabilityCache, DeploymentModelClient
+from .contracts import DiagnosticConfig, JobConfig, JobSnapshot
 from .jobs import JobStore
 from .settings import Settings
 from .worker import Worker
@@ -30,15 +32,24 @@ def read_system_prompt(settings):
         ) from None
 
 
-def make_snapshot(defaults, options, capabilities, prompt_reader):
+def make_snapshot(
+    defaults: JobConfig,
+    options: object,
+    capabilities: Mapping[str, object] | None,
+    prompt_reader: Callable[[], str],
+) -> JobSnapshot:
     """Resolve options into the configuration snapshot of a new job.
 
     The snapshot includes the current system prompt and task templates, so a
     retry uses the same text even after these files change. Raise
     ConfigurationError for invalid options or an empty system prompt.
     """
-    config = job_config.resolve(defaults, options, capabilities)
-    config.update(
+    # Extend the validated controls in place; the required prompt fields are added below.
+    config: JobSnapshot = cast(
+        JobSnapshot, job_config.resolve(defaults, options, capabilities)
+    )
+    # mypy does not accept keyword updates on a TypedDict; retain dict.update semantics.
+    cast(dict[str, object], config).update(
         system_prompt=prompt_reader(),
         templates=dict(prompts.TEMPLATES),
         prompt_version=prompts.PROMPT_VERSION,
@@ -57,7 +68,7 @@ class Services:
         self,
         settings: Settings,
         store: JobStore,
-        client_factory: Callable[[dict], BackendClient] | None = None,
+        client_factory: Callable[[JobConfig], BackendClient] | None = None,
         worker: Worker | None = None,
     ):
         self._settings = settings
@@ -91,7 +102,7 @@ class Services:
         return BackendClient
 
     @property
-    def client_factory(self):
+    def client_factory(self) -> Callable[[JobConfig], BackendClient]:
         return (
             self.make_client if self._client_factory is None else self._client_factory
         )
@@ -99,18 +110,20 @@ class Services:
     def create_capabilities(self):
         return CapabilityCache(lambda: self.settings)
 
-    def runtime_defaults(self, settings=None):
+    def runtime_defaults(self, settings: Settings | None = None) -> JobConfig:
         return (self.settings if settings is None else settings).job_defaults()
 
     def read_system_prompt(self):
         return read_system_prompt(self.settings)
 
-    def new_snapshot(self, options, capabilities=None):
+    def new_snapshot(
+        self, options: object, capabilities: Mapping[str, object] | None = None
+    ) -> JobSnapshot:
         return make_snapshot(
             self.runtime_defaults(), options, capabilities, self.read_system_prompt
         )
 
-    def make_client(self, config=None) -> DeploymentModelClient:
+    def make_client(self, config: JobConfig | None = None) -> DeploymentModelClient:
         settings = self.settings
         config = self.runtime_defaults() if config is None else config
         prompt = config.get("system_prompt")
@@ -129,7 +142,8 @@ class Services:
         """Inspect without reading a private prompt; honor an injected client factory."""
         defaults = self.runtime_defaults(self.settings)
         if self._client_factory is not None:
-            return self._client_factory({**defaults, "system_prompt": ""})
+            diagnostic: DiagnosticConfig = {**defaults, "system_prompt": ""}
+            return self._client_factory(diagnostic)
         return self.backend_factory(
             self.settings.llama_base_url, self.settings.api_key, defaults, ""
         )

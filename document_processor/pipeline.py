@@ -20,13 +20,14 @@ import json
 import logging
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from . import extraction, prompts, reliability
 from .artifacts import Artifacts
 from .config import fingerprint
+from .contracts import AnalysisNote, Chunk, ExtractionResult, JobSnapshot
 from .errors import Cancelled, ProcessingError, WorkerStopping
 from .files import atomic_json, atomic_text, file_hash
 from .jobs import PREVIEW_FILE, REPORT_FILE, SOURCE_FILE, JobStore, now
@@ -63,9 +64,9 @@ class Runtime:
 
     store: JobStore
     # Creates a configuration snapshot for jobs saved before snapshots existed.
-    new_snapshot: Callable[[dict], dict]
+    new_snapshot: Callable[[dict[str, object]], JobSnapshot]
     # Returns a client for the deployment's llama.cpp server, bound to a job configuration.
-    model_client: Callable[[dict], ModelClient]
+    model_client: Callable[[JobSnapshot], ModelClient]
     # Tells whether the job's cancellation was requested; called very often.
     cancellation_requested: Callable[[str], bool]
     # Whether to write live_preview.json, and how many characters each channel keeps.
@@ -98,7 +99,7 @@ def plan_groups(notes, fits, max_group=MERGE_GROUP_SIZE):
     return groups
 
 
-def run(job_id, runtime):
+def run(job_id: str, runtime: Runtime) -> None:
     """Analyze job_id with the services provided by runtime (see Runtime)."""
     JobRun(job_id, runtime).execute()
 
@@ -106,7 +107,7 @@ def run(job_id, runtime):
 class JobRun:
     """One attempt to analyze one job."""
 
-    def __init__(self, job_id, runtime):
+    def __init__(self, job_id: str, runtime: Runtime) -> None:
         """Load the job and refuse runs that cannot succeed before recording an attempt."""
         self.job_id = job_id
         self.runtime = runtime
@@ -207,9 +208,9 @@ class JobRun:
 
     # Steps --------------------------------------------------------------------
 
-    def _load_config(self):
+    def _load_config(self) -> JobSnapshot:
         """Return the job's snapshot, creating one with current settings for older jobs."""
-        config = self.store.load_config(self.job_id)
+        config: JobSnapshot | None = self.store.load_config(self.job_id)
         if config is None:
             # Historic artifacts remain untouched. Their original settings are unknowable.
             config = self.runtime.new_snapshot({})
@@ -239,7 +240,7 @@ class JobRun:
         }
         self.artifacts.bind_identity(self.identity)
 
-    def _extract(self):
+    def _extract(self) -> ExtractionResult:
         """Read the PDF text (or reuse it) and build the source evidence ledger."""
 
         def extract():
@@ -258,7 +259,7 @@ class JobRun:
                 ensure_ascii=False,
             )
 
-        extracted = json.loads(
+        extracted: ExtractionResult = json.loads(
             self._step(
                 "extracted.json",
                 "extraction",
@@ -291,7 +292,7 @@ class JobRun:
         self.store.update_job(self.job_id, pages=extracted["page_count"])
         return extracted
 
-    def _extraction_progress(self, label):
+    def _extraction_progress(self, label: str) -> None:
         """Persist page progress at most once per second, except at phase boundaries.
 
         Keep every callback cancellable, even when its writes and logs are skipped.
@@ -314,11 +315,11 @@ class JobRun:
         self.extraction_phase = code
         self.extraction_persisted_at = current
 
-    def _split(self, extracted):
+    def _split(self, extracted: ExtractionResult) -> list[Chunk]:
         """Group the pages into sections that fit the section token budget."""
         self._phase("chunking", "Splitting document", 7)
         budget = self.config["chunk_tokens"]
-        chunks = json.loads(
+        chunks: list[Chunk] = json.loads(
             self._step(
                 "chunks.json",
                 "chunking",
@@ -344,9 +345,9 @@ class JobRun:
         event("sections_ready", job_id=self.job_id, total_chunks=len(chunks))
         return chunks
 
-    def _analyze_sections(self, chunks):
+    def _analyze_sections(self, chunks: Sequence[Chunk]) -> list[AnalysisNote]:
         """Ask the model for factual notes on each section, in document order."""
-        notes = []
+        notes: list[AnalysisNote] = []
         total = len(chunks)
         # _step invokes these callbacks synchronously before the next iteration.
         for index, chunk in enumerate(chunks):
@@ -650,7 +651,13 @@ class JobRun:
             atomic_json(self.preview_path, payload)
             self.preview_persisted_at = current
 
-    def _step(self, name, stage, dependencies, compute):
+    def _step(
+        self,
+        name: str,
+        stage: str,
+        dependencies: Mapping[str, object],
+        compute: Callable[[], str],
+    ) -> str:
         """Reuse a verified artifact, or run compute() and save its text.
 
         Every outcome (reused, done, failed or cancelled) is recorded with its
@@ -717,7 +724,14 @@ class JobRun:
             )
             raise
 
-    def _generate(self, stage, instruction, text, budget, source_pages):
+    def _generate(
+        self,
+        stage: str,
+        instruction: str,
+        text: str,
+        budget: int,
+        source_pages: Sequence[int],
+    ) -> str:
         """Call the model once within the call budget, publishing bounded previews."""
         self._generation_audit = None
         if self.calls >= self.config["max_calls"]:

@@ -13,12 +13,14 @@ import queue
 import threading
 import time
 from collections import OrderedDict
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import requests
 
 from .config import ConfigurationError
+from .contracts import ChatMessage, CompletionMetrics, JobConfig
 from .errors import Cancelled, ModelError, WorkerStopping
 
 
@@ -27,7 +29,7 @@ class CompletionResult:
     """The answer of one generation and its measurements, which contain no text."""
 
     content: str
-    metrics: dict
+    metrics: CompletionMetrics
 
 
 def numeric(value):
@@ -165,25 +167,32 @@ class ModelClient:
     preview_limit the number of characters kept for live previews.
     """
 
-    def __init__(self, base_url, key, config, prompt, preview_limit=12000):
+    def __init__(
+        self,
+        base_url: str,
+        key: str,
+        config: JobConfig,
+        prompt: str,
+        preview_limit: int = 12000,
+    ) -> None:
         self.base_url, self.config, self.prompt = base_url.rstrip("/"), config, prompt
         self.preview_limit = preview_limit
         self.session = requests.Session()
         if key:
             self.session.headers.update({"Authorization": f"Bearer {key}"})
-        self.model_name = None
+        self.model_name: str | None = None
         self.capabilities: dict[str, Any] = {
             "context_tokens": None,
             "status": "unknown",
         }
-        self.token_cache = OrderedDict()
+        self.token_cache: OrderedDict[bytes, int] = OrderedDict()
         self.tokenization_calls = 0
         self.tokenization_ms = 0.0
         self.tokenization_cache_hits = 0
-        self.last_result = None
+        self.last_result: CompletionResult | None = None
         self.cancel_check = lambda: False
         self.current_stage = "section"
-        self.current_metrics = {}
+        self.current_metrics: dict[str, Any] = {}
 
     def check_cancelled(self):
         """Raise Cancelled when the job's cancel_check() reports a cancellation request."""
@@ -304,7 +313,7 @@ class ModelClient:
         self.capabilities = result
         return result
 
-    def tokenize(self, text):
+    def tokenize(self, text: str) -> int:
         """Return the number of tokens in text, counted by the server's /tokenize.
 
         Counts are cached for this client: at most 1024 entries, keyed by SHA-256.
@@ -352,7 +361,7 @@ class ModelClient:
         self.model_name = items[0]["id"]
         return self.model_name
 
-    def messages(self, instruction, content):
+    def messages(self, instruction: str, content: str) -> list[ChatMessage]:
         """Build the system and user messages of one generation.
 
         With the "prompt" reasoning adapter, add /think or /no_think to the
@@ -366,7 +375,7 @@ class ModelClient:
             {"role": "user", "content": instruction + "\n\n" + content},
         ]
 
-    def prompt_size(self, instruction, content):
+    def prompt_size(self, instruction: str, content: str) -> tuple[int, str, int]:
         """Return (token count, counting method, safety margin) for a prompt.
 
         When apply_template is supported, count the chat template rendered by
@@ -374,7 +383,7 @@ class ModelClient:
         """
         messages = self.messages(instruction, content)
         if self.config.get("apply_template"):
-            template_request = {"messages": messages}
+            template_request: dict[str, object] = {"messages": messages}
             policy = self.config.get("thinking_" + self.current_stage, "inherit")
             if (
                 policy != "inherit"
@@ -400,7 +409,9 @@ class ModelClient:
             384,
         )
 
-    def fits(self, instruction, content, output_tokens):
+    def fits(
+        self, instruction: str, content: str, output_tokens: int
+    ) -> tuple[bool, int, str, int]:
         """Tell whether a prompt and output_tokens fit the context.
 
         Return (fits, prompt tokens, counting method, margin). The limit is the
@@ -512,7 +523,14 @@ class ModelClient:
                     ).start()
             reader.join(timeout=0.25)
 
-    def generate(self, instruction, content, max_tokens, *, on_update=None):
+    def generate(
+        self,
+        instruction: str,
+        content: str,
+        max_tokens: int,
+        *,
+        on_update: Callable[[str, str, bool], None] | None = None,
+    ) -> CompletionResult:
         """Stream one completion and return a CompletionResult.
 
         on_update(content, reasoning, completed) receives previews at most
@@ -582,9 +600,10 @@ class ModelClient:
                 "max_tokens": max_tokens,
                 "messages": self.messages(instruction, content),
             }
+            sampling: Mapping[str, object] = self.config
             for key in ("temperature", "top_p", "top_k", "min_p"):
                 if self.config.get(key) is not None:
-                    payload[key] = self.config[key]
+                    payload[key] = sampling[key]
             if self.config.get("usage_supported"):
                 payload["stream_options"] = {"include_usage": True}
             if (
@@ -699,7 +718,9 @@ class ModelClient:
                     "Model returned empty content; start a new job with adjusted budgets.",
                 )
             publish(force=True)
-            self.last_result = CompletionResult(answer, metrics)
+            self.last_result = CompletionResult(
+                answer, cast(CompletionMetrics, metrics)
+            )
             return self.last_result
         except WorkerStopping:
             metrics["stop_category"] = "interrupted"
@@ -715,7 +736,14 @@ class ModelClient:
             metrics["content_chars"] = splitter.content_chars
             metrics["reasoning_chars"] = reasoning_chars + splitter.reasoning_chars
 
-    def complete(self, instruction, content, max_tokens, *, on_update=None):
+    def complete(
+        self,
+        instruction: str,
+        content: str,
+        max_tokens: int,
+        *,
+        on_update: Callable[[str, str, bool], None] | None = None,
+    ) -> str:
         """Return only the answer text of generate()."""
         return self.generate(
             instruction, content, max_tokens, on_update=on_update

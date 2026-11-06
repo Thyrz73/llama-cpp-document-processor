@@ -1,6 +1,7 @@
 """Read deployment settings from the environment, naming the variable on error."""
 
 import os
+from collections.abc import Collection
 from urllib.parse import urlsplit
 
 TRUE_VALUES = ("1", "true", "yes", "on")
@@ -11,12 +12,14 @@ class SettingsError(ValueError):
     """Report an invalid environment variable without echoing secrets."""
 
 
-def _raw(name):
+def _raw(name: str) -> str | None:
     value = os.getenv(name, "").strip()
     return value or None
 
 
-def integer(name, default, *, minimum=1, maximum=None):
+def integer(
+    name: str, default: int, *, minimum: int = 1, maximum: int | None = None
+) -> int:
     """Return an integer setting within bounds; empty or unset uses default."""
     raw = _raw(name)
     if raw is None:
@@ -35,7 +38,7 @@ def integer(name, default, *, minimum=1, maximum=None):
     return value
 
 
-def flag(name, default):
+def flag(name: str, default: bool) -> bool:
     """Return a boolean setting; reject values that are neither true nor false."""
     raw = _raw(name)
     if raw is None:
@@ -49,7 +52,7 @@ def flag(name, default):
     )
 
 
-def choice(name, default, allowed):
+def choice(name: str, default: str, allowed: Collection[str]) -> str:
     """Return one of the allowed values; empty or unset uses default."""
     value = _raw(name) or default
     if value not in allowed:
@@ -57,7 +60,7 @@ def choice(name, default, allowed):
     return value
 
 
-def http_url(name, default):
+def http_url(name: str, default: str) -> str:
     """Return an http(s) base URL without a trailing slash."""
     value = (_raw(name) or default).rstrip("/")
     parts = urlsplit(value)

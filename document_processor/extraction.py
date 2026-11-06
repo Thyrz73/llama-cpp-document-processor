@@ -17,11 +17,14 @@ import re
 import subprocess
 import time
 from collections import OrderedDict, deque
-from typing import Any
+from collections.abc import Callable, Sequence
+from os import PathLike
+from typing import Any, Protocol
 
 import pymupdf
 from pypdf import PdfReader
 
+from .contracts import Chunk, ExtractionSettings, PageText, PdfExtraction
 from .errors import ProcessingError
 from .observability import current_job_id, event
 
@@ -29,7 +32,13 @@ from .observability import current_job_id, event
 MIN_USABLE_CHARS = 35
 
 
-def split_with_page(text, page, limit=5000):
+class Tokenizer(Protocol):
+    """Chunking requires only tokenization; cancellation remains an optional hook."""
+
+    def tokenize(self, text: str) -> int: ...
+
+
+def split_with_page(text: str, page: int, limit: int = 5000) -> list[PageText]:
     """Split text into fragments carrying the page number.
 
     text contains raw text and page is its unmodified page number. limit
@@ -37,7 +46,7 @@ def split_with_page(text, page, limit=5000):
     then line breaks and spaces when choosing a boundary. Return non-empty
     ``page``/``text`` dictionaries.
     """
-    out = []
+    out: list[PageText] = []
     text = text.strip()
     while text:
         if len(text) <= limit:
@@ -65,7 +74,9 @@ def split_with_page(text, page, limit=5000):
     return [v for v in out if v["text"]]
 
 
-def make_chunks(pages, model, budget):
+def make_chunks(
+    pages: Sequence[PageText], model: Tokenizer, budget: int
+) -> list[Chunk]:
     """Group passages into sections of at most ``budget`` tokens.
 
     pages is a list of ``page``/``text`` dictionaries from extract_pdf().
@@ -81,7 +92,7 @@ def make_chunks(pages, model, budget):
     failures and cancellation unchanged.
     """
 
-    def failed():
+    def failed() -> ProcessingError:
         return ProcessingError(
             "chunking_failed",
             "Unable to split a PDF passage into sufficiently small chunks.",
@@ -90,7 +101,7 @@ def make_chunks(pages, model, budget):
     if type(budget) is not int or budget < 1:
         raise failed()
 
-    units = []
+    units: list[PageText] = []
     for p in pages:
         # Reuse the natural cuts, restoring whitespace stripped by split_with_page().
         text, start = p["text"], 0
@@ -103,12 +114,12 @@ def make_chunks(pages, model, budget):
             start = end
         if not fragments and text:
             units.append({"page": p["page"], "text": text})
-    chunks = []
-    current: list[dict[str, Any]] = []
+    chunks: list[Chunk] = []
+    current: list[PageText] = []
     estimated = 0
     counts: OrderedDict[bytes, int] = OrderedDict()
 
-    def count(text):
+    def count(text: str) -> int:
         """Keep bounded count-only memoization; cache hits remain cancellable."""
         key = hashlib.sha256(text.encode("utf-8")).digest()
         if key in counts:
@@ -125,11 +136,11 @@ def make_chunks(pages, model, budget):
             counts.popitem(last=False)
         return value
 
-    def chunk_text(parts):
+    def chunk_text(parts: Sequence[PageText]) -> str:
         """Join parts with page markers."""
         return "\n\n".join(f"[Page {x['page']}]\n{x['text']}" for x in parts)
 
-    def emit(parts):
+    def emit(parts: Sequence[PageText]) -> None:
         """Exact validation only; each failed group becomes two strictly smaller groups."""
         pending_groups = [parts]
         while pending_groups:
@@ -190,7 +201,7 @@ def make_chunks(pages, model, budget):
     return chunks
 
 
-def normalize_extracted_text(text):
+def normalize_extracted_text(text: str | None) -> str:
     """Clean text while preserving its paragraphs.
 
     Treat None as empty text. Remove null characters, spaces after newlines,
@@ -200,7 +211,7 @@ def normalize_extracted_text(text):
     return re.sub(r"\n[ \t]+", "\n", text).strip()
 
 
-def text_is_usable(text):
+def text_is_usable(text: str) -> bool:
     """Estimate whether text is usable for analysis.
 
     Require MIN_USABLE_CHARS alphanumeric characters and limit Unicode
@@ -214,7 +225,7 @@ def text_is_usable(text):
     return replacement < max(5, alnum // 10)
 
 
-def ocr_page(page, number, settings):
+def ocr_page(page: Any, number: int, settings: ExtractionSettings) -> str:
     """Recognize a PyMuPDF page with local Tesseract.
 
     page must belong to an open document; number is used in error messages.
@@ -313,7 +324,11 @@ def ocr_page(page, number, settings):
     return normalize_extracted_text(text)
 
 
-def extract_pdf(pdf_path, settings, progress=None):
+def extract_pdf(
+    pdf_path: str | PathLike[str],
+    settings: ExtractionSettings,
+    progress: Callable[[str], None] | None = None,
+) -> PdfExtraction:
     """Extract a PDF and report pages with insufficient text.
 
     pdf_path identifies the source file and settings holds the job's
@@ -343,7 +358,9 @@ def extract_pdf(pdf_path, settings, progress=None):
             raise ProcessingError(
                 "page_limit", f"PDF has {count} pages (configured maximum exceeded)."
             )
-        pages, missing, ocr_pages = [], [], []
+        pages: list[PageText] = []
+        missing: list[int] = []
+        ocr_pages: list[int] = []
         alt_reader = None
         for number in range(1, count + 1):
             if progress:

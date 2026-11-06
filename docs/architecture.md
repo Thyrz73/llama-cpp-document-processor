@@ -34,6 +34,7 @@ There is one process, one worker thread and a few web threads. SQLite holds the 
 | `document_processor/compat.py` | Explicit adapters for old `import app` tests; never used by independently created apps. |
 | `document_processor/settings.py` | Immutable deployment scalars and paths, loaded explicitly by `Settings.from_env()`; fresh job defaults. |
 | `document_processor/environment.py` | Parses environment variables; errors name the variable. |
+| `document_processor/contracts.py` | Static job/snapshot, extraction, note and completion dictionary contracts; see [type contracts](type-contracts.md). |
 | `document_processor/config.py` | Turns job options into an immutable, validated configuration snapshot. |
 | `document_processor/profiles.py` | The `low`…`ultra` token budget profiles. |
 | `document_processor/prompts.py` | Task prompt templates, report header and language helpers. |
@@ -155,6 +156,7 @@ Run the commands from the README's Development section. Python tests use tempora
 - `test_public_configs.py`: bounded public-only configuration caching, fingerprint changes, invalidation, concurrent list reads and active jobs outside the visible history.
 - `test_database.py`, `test_worker_shutdown.py`: migrations, connection reuse/ownership, rollback, concurrent checkpoints, bounded shutdown, SQLite backup and WAL recovery after abrupt process exit.
 - `test_application.py`: per-app store/worker/cache isolation, route/method inventory, injected clients and workers, JSON/security/upload/live/report contracts, side-effect-free import and explicit lifecycle order.
+- `test_contracts.py`: JSON/fingerprint round-trips, historical snapshots, public projections, extraction/note provenance and incremental completion measurements.
 - `test_settings.py`: deployment defaults/overrides, validation stages, immutable values, isolated defaults, import behavior, compatibility globals, explicit injection and editable prompts.
 - `test_architecture.py`, `test_errors.py`, `test_environment.py`, `test_dependencies.py`: guards against import cycles, untranslated errors, configuration drift and diverging dependency locks. `test_environment.py` checks real HTTP shutdown after a completed job, plus the application SIGTERM path during a simulated worker transaction. Single-file checks apply to these quiescent test scenarios, not every production stop.
 - `test_polling.js`: the interface modules against a simulated browser: polling, rendering, live output, settings and history, run with Node.js.

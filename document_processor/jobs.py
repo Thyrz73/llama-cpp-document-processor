@@ -22,6 +22,7 @@ from pathlib import Path
 
 from . import database
 from .config import fingerprint, public_config
+from .contracts import PublicJobConfig
 from .errors import Cancelled, ProcessingError
 from .observability import event
 from .previews import PreviewCache
@@ -102,7 +103,9 @@ class JobStore:
         self._connections = database.ThreadConnections(self.db_path)
         self.previews = PreviewCache()
         self._public_config_lock = threading.Lock()
-        self._public_configs: OrderedDict[tuple[str, str], dict] = OrderedDict()
+        self._public_configs: OrderedDict[tuple[str, str], PublicJobConfig] = (
+            OrderedDict()
+        )
 
     def connect(self):
         """Open a transaction on the jobs database, on this thread's connection (see database.ThreadConnections).

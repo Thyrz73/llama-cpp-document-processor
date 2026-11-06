@@ -1,6 +1,9 @@
 """Versioned task templates; snapshots retain these strings for safe retries."""
 
 import re
+from collections.abc import Sequence
+
+from .contracts import JobSnapshot, ReportLanguage
 
 PROMPT_VERSION = 4
 TEMPLATES = {
@@ -70,7 +73,7 @@ TEMPLATES = {
 }
 
 
-def language_instruction(language):
+def language_instruction(language: str) -> str:
     """Return the sentence that sets the report language.
 
     "auto" asks for the language of the user's request; "fr" and "en" are
@@ -81,7 +84,7 @@ def language_instruction(language):
     return f"Write in { {'fr': 'French', 'en': 'English'}.get(language, language) }."
 
 
-def instruction(config, stage, question, extra=""):
+def instruction(config: JobSnapshot, stage: str, question: str, extra: str = "") -> str:
     """Build the instruction of one generation stage from the job snapshot.
 
     It combines the stage's task template, the report language, the detail
@@ -102,12 +105,12 @@ def instruction(config, stage, question, extra=""):
     return text + "\nUser request: " + question + "\n" + extra
 
 
-def is_french(language):
+def is_french(language: str) -> bool:
     """Tell whether a report language setting means French ("fr", "french" or "français")."""
     return language.lower() in ("fr", "french", "français")
 
 
-def resolve_report_language(language, question):
+def resolve_report_language(language: str, question: str) -> str:
     """Choose fr/en for deterministic text of a new job, using only its request.
 
     Explicit settings take precedence. For auto, compare distinct common
@@ -175,12 +178,19 @@ def resolve_report_language(language, question):
     return "fr" if len(words & french) > len(words & english) else "en"
 
 
-def deterministic_language(config):
+def deterministic_language(config: ReportLanguage) -> str:
     """Read the saved text language, retaining historical behavior for old snapshots."""
     return config.get("effective_report_language", config["report_language"])
 
 
-def report_header(config, filename, pages, chunks, missing, ocr_pages):
+def report_header(
+    config: ReportLanguage,
+    filename: str,
+    pages: int,
+    chunks: int,
+    missing: Sequence[int],
+    ocr_pages: Sequence[int],
+) -> str:
     """Return the Markdown header of the report, in the report language.
 
     It gives the PDF name, the page and section counts, and the pages that

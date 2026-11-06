@@ -11,10 +11,12 @@ never as instructions.
 import re
 import unicodedata
 from collections import deque
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, localcontext
 
 from .config import fingerprint
+from .contracts import AnalysisNote
 from .prompts import is_french
 
 VERSION = 1
@@ -281,7 +283,12 @@ def build_evidence(pages, page_count, missing=(), ocr_pages=()):
     }
 
 
-def note(text, pages, sections, warnings=()):
+def note(
+    text: str,
+    pages: Iterable[int],
+    sections: Iterable[int],
+    warnings: Iterable[str] = (),
+) -> AnalysisNote:
     """Return a note: model text with the pages, sections and warning codes it covers.
 
     This scope survives every merge level, even when the model omits citations.
@@ -294,7 +301,7 @@ def note(text, pages, sections, warnings=()):
     }
 
 
-def merge_note(text, parents):
+def merge_note(text: str, parents: Sequence[AnalysisNote]) -> AnalysisNote:
     """Return the note of a merge: its text, covering all the pages, sections and warnings of parents."""
     return note(
         text,

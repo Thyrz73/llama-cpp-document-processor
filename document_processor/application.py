@@ -5,6 +5,7 @@ from collections.abc import Callable
 from flask import Flask, request
 
 from .backend import BackendClient
+from .contracts import JobConfig
 from .jobs import JobStore
 from .observability import failure
 from .services import ROOT, Services
@@ -27,7 +28,7 @@ class ProcessorFlask(Flask):
 def create_app(
     settings: Settings,
     store: JobStore | None = None,
-    client_factory: Callable[[dict], BackendClient] | None = None,
+    client_factory: Callable[[JobConfig], BackendClient] | None = None,
     *,
     worker: Worker | None = None,
 ) -> Flask:

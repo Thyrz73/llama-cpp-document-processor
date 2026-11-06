@@ -10,9 +10,10 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Self
+from typing import Self
 
 from . import environment
+from .contracts import JobConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,7 +142,7 @@ class Settings:
         """Flask's request limit, including the existing multipart allowance."""
         return self.max_upload_bytes + 65536
 
-    def job_defaults(self) -> dict[str, Any]:
+    def job_defaults(self) -> JobConfig:
         """Build fresh job defaults; config.resolve() validates their joint limits."""
         return {
             "chunk_tokens": self.chunk_tokens,

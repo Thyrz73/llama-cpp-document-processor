@@ -9,6 +9,7 @@ input, model or tampered file always leads to recomputation.
 
 import json
 from pathlib import Path
+from typing import Any
 
 from .config import fingerprint
 from .errors import ProcessingError
@@ -31,7 +32,7 @@ class Artifacts:
         self.root = self.directory / "artifacts" / self.config_hash
         self.root.mkdir(parents=True, exist_ok=True)
         self.path = self.root / "manifest.json"
-        self.manifest = (
+        self.manifest: dict[str, Any] = (
             json.loads(self.path.read_text(encoding="utf-8"))
             if self.path.exists()
             else {

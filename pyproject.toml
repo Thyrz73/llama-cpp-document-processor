@@ -12,3 +12,31 @@ python_version = "3.12"
 files = ["app.py", "document_processor", "scripts"]
 # Also type-check bodies of functions that are not annotated yet.
 check_untyped_defs = true
+
+# Fully annotated, covered configuration/prompt code; transport and pipeline
+# typing remains incremental rather than enabling strictness repository-wide.
+[[tool.mypy.overrides]]
+module = [
+    "document_processor.contracts",
+    "document_processor.config",
+    "document_processor.prompts",
+    "document_processor.environment",
+    "document_processor.settings",
+]
+# Expand strict explicitly: the installed mypy treats strict=true as a global preset.
+# These per-module options must not change the rest of the repository.
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+disallow_untyped_calls = true
+disallow_untyped_decorators = true
+disallow_any_generics = true
+disallow_subclassing_any = true
+warn_return_any = true
+warn_unused_ignores = true
+no_implicit_reexport = true
+strict_equality = true
+extra_checks = true
+
+[[tool.mypy.overrides]]
+module = ["document_processor.extraction"]
+disallow_untyped_defs = true

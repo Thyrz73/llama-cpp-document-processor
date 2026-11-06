@@ -9,19 +9,22 @@ import hashlib
 import json
 import math
 import re
+from collections.abc import Mapping
+from typing import Any, cast
 
+from .contracts import JobConfig, PublicJobConfig
 from .profiles import PROFILE_VERSION, PROFILES
 
 
 class ConfigurationError(ValueError):
     """Report a public validation code without echoing untrusted values."""
 
-    def __init__(self, code, message):
+    def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
 
 
-def fingerprint(value):
+def fingerprint(value: object) -> str:
     """Return the SHA-256 of value encoded as canonical JSON, to detect changes.
 
     Keys are sorted, so equal values always give the same fingerprint. It is
@@ -37,7 +40,7 @@ def fingerprint(value):
     return hashlib.sha256(encoded).hexdigest()
 
 
-def parse_options(raw):
+def parse_options(raw: object) -> dict[str, Any]:
     """Decode the optional "options" form field: a JSON object of at most 8,192 characters."""
     if not raw:
         return {}
@@ -56,7 +59,11 @@ def parse_options(raw):
     return value
 
 
-def resolve(defaults, options=None, capabilities=None):
+def resolve(
+    defaults: JobConfig,
+    options: object = None,
+    capabilities: Mapping[str, object] | None = None,
+) -> JobConfig:
     """Return a job configuration built from the deployment defaults and the job's options.
 
     A chosen profile replaces the default token budgets, the detail level
@@ -74,7 +81,8 @@ def resolve(defaults, options=None, capabilities=None):
         "detail_level",
     }:
         raise ConfigurationError("invalid_options", "Unsupported job options.")
-    config = copy.deepcopy(defaults)
+    # Options remain dynamic inside the existing validator; no values are converted.
+    config = cast(dict[str, Any], copy.deepcopy(defaults))
     profile = options.get("profile", "legacy")
     if not isinstance(profile, str) or profile not in (*PROFILES, "legacy"):
         raise ConfigurationError("invalid_profile", "Unknown performance profile.")
@@ -188,10 +196,12 @@ def resolve(defaults, options=None, capabilities=None):
             "Budgets exceed the available context; reduce them before starting.",
         )
     config["warnings"] = warnings
-    return config
+    return cast(JobConfig, config)
 
 
-def public_config(config, stored_fingerprint=None):
+def public_config(
+    config: JobConfig, stored_fingerprint: str | None = None
+) -> PublicJobConfig:
     """Expose only job controls, never prompt text, credentials or local paths.
 
     stored_fingerprint is the value saved with the snapshot; passing it avoids
@@ -221,6 +231,8 @@ def public_config(config, stored_fingerprint=None):
         "step_timeout_seconds",
         "schema_version",
     }
-    result = {key: config[key] for key in fields if key in config}
+    # A read-only view permits the fixed allowlist without dynamic TypedDict indexing.
+    values: Mapping[str, object] = config
+    result = {key: values[key] for key in fields if key in config}
     result["fingerprint"] = stored_fingerprint or fingerprint(config)
-    return result
+    return cast(PublicJobConfig, result)

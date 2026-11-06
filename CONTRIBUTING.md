@@ -33,6 +33,15 @@ Bug reports, fixes and improvements are welcome. This guide describes the workfl
 
    Use Python 3.12 and install the locked tools with `.venv/bin/python -m pip install --require-hashes -r requirements-dev.txt` (Ruff 0.17.3 and MyPy 2.4.1).
 
+   MyPy applies stronger checks only to the modules listed in `pyproject.toml`. See the [dictionary contracts](docs/type-contracts.md) for required/optional fields and the remaining dynamic boundaries. After the normal `.venv/bin/mypy` check, verify the selected modules in full strict mode:
+
+   ```bash
+   .venv/bin/mypy --strict --follow-imports=silent \
+     -m document_processor.contracts -m document_processor.config \
+     -m document_processor.prompts -m document_processor.environment \
+     -m document_processor.settings
+   ```
+
    CI runs the same checks, and also checks syntax, an offline benchmark plan, Compose and Docker packaging.
 4. Add or update tests for the behavior you change, and update the documentation in the same pull request.
 
