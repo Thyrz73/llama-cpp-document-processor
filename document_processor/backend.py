@@ -4,6 +4,7 @@ import copy
 import hashlib
 import threading
 import time
+from contextlib import contextmanager
 from typing import Any
 
 from .errors import ModelError
@@ -65,6 +66,53 @@ class CapabilityCache:
         if self.entry.get("backend") == self.backend(client):
             self.entry = {"value": None, "expires": 0}
 
+    @contextmanager
+    def inspection(self, client):
+        """Own inspection synchronization, including cancellable acquisition."""
+        client.check_cancelled()
+        while not self.lock.acquire(timeout=0.2):
+            client.check_cancelled()
+        try:
+            client.check_cancelled()
+            yield
+        finally:
+            self.lock.release()
+
+    def diagnostics(self, create_client):
+        """Return (observation, refreshed) without acquiring a client's lock twice.
+
+        Clients are created only on misses. Recheck under the shared lock so
+        concurrent diagnostics coalesce, including raw injected clients. A client
+        bound to this cache uses its already-locked inspection implementation.
+        Identity inspections keep their separate, always-fresh entry point.
+        """
+        value = self.get()
+        if value is not None:
+            return value, False
+        client = create_client()
+        close_pending = True
+        try:
+            with self.inspection(client):
+                value = self.get()
+                if value is not None:
+                    return value, False
+                bound = (
+                    isinstance(client, DeploymentModelClient) and client._cache is self
+                )
+                if bound:
+                    value = client._inspect_capabilities_locked(for_identity=False)
+                else:
+                    value = client.inspect()
+                # Raw clients retain the original close-before-publication order.
+                close_pending = False
+                client.session.close()
+                if not bound:
+                    self.remember(value, client)
+                return value, True
+        finally:
+            if close_pending:
+                client.session.close()
+
 
 class DeploymentModelClient(BackendClient):
     """Bind the reusable backend adapter to this application's deployment settings."""
@@ -85,34 +133,32 @@ class DeploymentModelClient(BackendClient):
 
     def _inspect_capabilities(self, *, for_identity):
         """Serialize observations and publish fresh identity checks to the UI cache."""
-        self.check_cancelled()
-        while not self._cache.lock.acquire(timeout=0.2):
-            self.check_cancelled()
-        try:
-            self.check_cancelled()
-            previous = None if for_identity else self._cache.get(self)
-            if previous is not None and previous.get("status") == "unavailable":
-                self.capabilities = previous
-                self.model_name = None
-                return previous
-            model_name = (
-                self._cache.entry.get("model_name") if previous is not None else None
+        with self._cache.inspection(self):
+            return self._inspect_capabilities_locked(for_identity=for_identity)
+
+    def _inspect_capabilities_locked(self, *, for_identity):
+        """Inspect with this client's cache lock already held by CapabilityCache."""
+        previous = None if for_identity else self._cache.get(self)
+        if previous is not None and previous.get("status") == "unavailable":
+            self.capabilities = previous
+            self.model_name = None
+            return previous
+        model_name = (
+            self._cache.entry.get("model_name") if previous is not None else None
+        )
+        if for_identity:
+            try:
+                value = super().inspect_identity()
+            except ModelError:
+                self._cache.remember(self.capabilities, self)
+                raise
+        else:
+            value = super().inspect(
+                cached=(model_name, previous) if previous is not None else None
             )
-            if for_identity:
-                try:
-                    value = super().inspect_identity()
-                except ModelError:
-                    self._cache.remember(self.capabilities, self)
-                    raise
-            else:
-                value = super().inspect(
-                    cached=(model_name, previous) if previous is not None else None
-                )
-            if previous is None or self.model_name != model_name or value != previous:
-                self._cache.remember(value, self)
-            return value
-        finally:
-            self._cache.lock.release()
+        if previous is None or self.model_name != model_name or value != previous:
+            self._cache.remember(value, self)
+        return value
 
     def json_request(self, *args, **kwargs):
         """Invalidate cached properties on failed or malformed backend requests."""

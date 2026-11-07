@@ -7,7 +7,6 @@ from flask import Blueprint, jsonify, render_template, request
 
 from .. import config as job_config
 from .. import profiles
-from ..observability import event
 from . import get_services
 
 blueprint = Blueprint("system", __name__)
@@ -75,21 +74,7 @@ def diagnostics():
     The inspection is sanitized and never asks the model to generate anything.
     """
     services = get_services()
-    with services.capabilities.lock:
-        value = services.capabilities.get()
-        if value is None:
-            # Inspection needs no private system prompt and launches no completion.
-            client = services.diagnostic_client()
-            try:
-                value = client.inspect()
-                event(
-                    "backend_checked",
-                    status=value.get("status", "unknown"),
-                    source="diagnostics",
-                )
-            finally:
-                client.session.close()
-            services.capabilities.remember(value, client)
+    value = services.inspect_diagnostics()
     process_rss_kib = None
     try:
         matched = re.search(

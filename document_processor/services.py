@@ -10,6 +10,7 @@ from . import pipeline, prompts
 from .backend import BackendClient, CapabilityCache, DeploymentModelClient
 from .contracts import DiagnosticConfig, JobConfig, JobSnapshot
 from .jobs import JobStore
+from .observability import event
 from .settings import Settings
 from .worker import Worker
 
@@ -147,6 +148,17 @@ class Services:
         return self.backend_factory(
             self.settings.llama_base_url, self.settings.api_key, defaults, ""
         )
+
+    def inspect_diagnostics(self):
+        """Resolve display observations through the cache's inspection boundary."""
+        value, refreshed = self.capabilities.diagnostics(self.diagnostic_client)
+        if refreshed:
+            event(
+                "backend_checked",
+                status=value.get("status", "unknown"),
+                source="diagnostics",
+            )
+        return value
 
     def is_default_question(self, question):
         """Tell whether a request is one of the interface's default instructions."""
