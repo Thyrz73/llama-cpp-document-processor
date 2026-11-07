@@ -13,6 +13,7 @@ from urllib.parse import urlsplit
 import requests
 from requests.adapters import BaseAdapter
 from requests.utils import get_encoding_from_headers
+from support import sse_event
 
 os.environ.setdefault("DATA_DIR", tempfile.mkdtemp(prefix="pdf-encoding-test-"))
 os.environ.setdefault(
@@ -59,17 +60,14 @@ def response_for(body, content_type, fragment_size=1):
 
 
 def sse_body(text, channel="separated"):
-    def event(delta):
-        return {"choices": [{"delta": delta, "finish_reason": None}]}
-
     if channel == "separated":
-        events = [event({"reasoning_content": text}), event({"content": text})]
+        events = [sse_event({"reasoning_content": text}), sse_event({"content": text})]
     else:
         events = [
-            event({"content": part})
+            sse_event({"content": part})
             for part in ("<thi", "nk>" + text, "</thi", "nk>" + text)
         ]
-    events.append({"choices": [{"delta": {}, "finish_reason": "stop"}]})
+    events.append(sse_event({}, finish="stop"))
     # ensure_ascii=False is essential: escaped ASCII JSON hid the original bug.
     return (
         "".join(

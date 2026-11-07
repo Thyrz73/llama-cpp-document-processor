@@ -8,6 +8,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from support import WordCountModelMixin
+
 import app
 from document_processor import config, database, extraction, pipeline, prompts, worker
 from document_processor.errors import (
@@ -21,7 +23,7 @@ from document_processor.jobs import JobStore
 from document_processor.worker import Worker
 
 
-class FakeModel(app.ModelClient):
+class FakeModel(WordCountModelMixin, app.ModelClient):
     """Emulate a stable model without any HTTP request or language inference."""
 
     calls = []
@@ -38,15 +40,8 @@ class FakeModel(app.ModelClient):
         }
         return self.capabilities
 
-    def inspect_identity(self):
-        return self.inspect()
-
     def model(self):
         return self.identity
-
-    def tokenize(self, text):
-        self.tokenization_calls += 1
-        return len(text.split())
 
     def complete(self, instruction, content, max_tokens, *, on_update=None):
         self.calls.append((self.current_stage, self.config, instruction, max_tokens))

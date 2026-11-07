@@ -12,7 +12,8 @@ Bug reports, fixes and improvements are welcome. This guide describes the workfl
    .venv/bin/ruff format --check .
    .venv/bin/ruff check .
    .venv/bin/mypy
-   .venv/bin/python -m unittest discover -s tests
+   .venv/bin/python -m coverage run -m unittest discover -s tests
+   .venv/bin/python -m coverage report
    node --test tests/test_polling.js
    ```
 
@@ -31,7 +32,18 @@ Bug reports, fixes and improvements are welcome. This guide describes the workfl
 
    Apply Python formatting locally with `.venv/bin/ruff format .`. Ruff checks import sorting (`I`), bug-prone constructs (`B`), Python 3.12 modernization (`UP`) and simplifications (`SIM`), in addition to the core rules. Keep any rule exceptions local and explain why they preserve existing behavior.
 
-   Use Python 3.12 and install the locked tools with `.venv/bin/python -m pip install --require-hashes -r requirements-dev.txt` (Ruff 0.17.3 and MyPy 2.4.1).
+   Use Python 3.12 and install the locked tools with `.venv/bin/python -m pip install --require-hashes -r requirements-dev.txt` (Ruff 0.17.3, MyPy 2.4.1 and Coverage 7.17.2).
+
+   Coverage uses the settings in `pyproject.toml`: statements and branches in `app.py` and `document_processor`, including worker/reader threads. Tests, support doubles and benchmark scripts are outside the measured application. Separate test subprocesses still run but their coverage is not merged. Before consolidating fixtures, the 353-test Python 3.12.16 suite at `41ca1c5` measured **96.23% combined coverage** (2,994/3,087 statements, **96.99%**; 756/810 branches, **93.33%**). The initial CI minimum is **96%**, the integer floor of that measured baseline. Keep the same scope when comparing results; coverage measures execution, not correctness.
+
+   The commands above start a fresh measurement and enforce the minimum, exactly as CI does. Inspect uncovered lines with `coverage report`, or generate ignored local reports:
+
+   ```bash
+   .venv/bin/python -m coverage html
+   .venv/bin/python -m coverage xml
+   ```
+
+   `htmlcov/`, `.coverage*` and `coverage.xml` stay local. A plain `.venv/bin/python -m unittest discover -s tests` remains useful for a quick run; it does not refresh coverage.
 
    MyPy applies stronger checks only to the modules listed in `pyproject.toml`. See the [dictionary contracts](docs/type-contracts.md) for required/optional fields and the remaining dynamic boundaries. After the normal `.venv/bin/mypy` check, verify the selected modules in full strict mode:
 
@@ -44,6 +56,10 @@ Bug reports, fixes and improvements are welcome. This guide describes the workfl
 
    CI runs the same checks, and also checks syntax, an offline benchmark plan, Compose and Docker packaging.
 4. Add or update tests for the behavior you change, and update the documentation in the same pull request.
+
+## Shared Python test doubles
+
+`tests/support.py` supplies only a word-count/identity mixin, a chat delta constructor and a finite SSE response. It imports no application code and owns no mutable model state. `FakeModel` in `test_v2.py` and `WordModel` in `test_reliability.py` keep their identities, call records, failure controls and completion text next to their assertions; each suite resets its own controls. Live and metric tests share the SSE response while encoding tests retain their real Requests adapter, UTF-8 bodies and byte fragmentation. Test discovery names remain unchanged. Run a focused suite with `.venv/bin/python -m unittest discover -s tests -p test_live.py`.
 
 ## Commits
 

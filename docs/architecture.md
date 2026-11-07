@@ -123,6 +123,10 @@ Deterministic report copy is maintained in `report_text.py`; browser copy is mai
 
 Modules keep no state of their own and do nothing when imported; only `main.js` starts the interface. Their imports form no cycle (`tests/test_architecture.py`), and `tests/test_polling.js` runs the real modules against a simulated browser.
 
+Theme initialization deliberately keeps three small copies: the index page's inline pre-paint script, `theme.js` for later menu changes, and the report's synchronous `report.js`. Sharing a downloaded helper would add an initial request to the index page; ES module loading would defer the pre-paint assignment and risk a color flash. Moving the report to an inline helper would require changing its `script-src 'self'` CSP (or maintaining script hashes), adding more machinery than the duplicated preference lookup warrants.
+
+The existing scripts and CSP stay unchanged. All paths restore explicit light/dark from `localStorage`; missing, invalid and historical `system` values retain the existing light fallback, independent of OS preference. The Node theme scenarios compare the early page, module and report behavior.
+
 ## Design rules
 
 - **One owner per concern.** Job queries live in `jobs.py` and schema migrations in `database.py`. PDF handling lives in `extraction.py`, and llama.cpp access in `model_client.py`.
@@ -163,6 +167,8 @@ The application targets small machines. The defaults are 512 MB of memory and 0.
 ## Tests
 
 Run the commands from the README's Development section. Python tests use temporary data directories and simulated model responses, so they need no llama.cpp server. Notable suites:
+
+Shared deterministic mechanics live in `tests/support.py`; suite-specific responses, failure controls and assertions stay in their own modules. The [contributor guide](../CONTRIBUTING.md) documents the measured Python coverage baseline, its statement/branch scope, local reports and the CI minimum.
 
 - `test_v2.py`, `test_reliability.py`, `test_encoding.py`: full pipeline runs, artifact reuse, retries and cancellation.
 - `test_progress.py`: job states and progress, restart recovery and the worker loop.

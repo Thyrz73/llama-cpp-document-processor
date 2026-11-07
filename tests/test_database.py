@@ -195,18 +195,21 @@ class ThreadConnectionsTests(unittest.TestCase):
 
     def test_a_dropped_connection_is_closed_explicitly(self):
         closed = []
+        target_id = None
         real_close = sqlite3.Connection.close
 
         def spy(connection):
-            closed.append(True)
+            # gc.collect() may also finalize connections left by other tests.
+            if id(connection) == target_id:
+                closed.append(True)
             real_close(connection)
 
         # Python 3.13 warns about a connection that was never closed: nothing closes the ones of web server threads.
         connections = database.ThreadConnections(self.path)
         with patch.object(database._Connection, "close", spy):
-            with connections.transaction():
-                pass
-            del connections
+            with connections.transaction() as connection:
+                target_id = id(connection)
+            del connection, connections
             gc.collect()  # a connection is part of a reference cycle
         self.assertEqual(closed, [True])
 

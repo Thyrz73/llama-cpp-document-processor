@@ -7,39 +7,12 @@ import time
 import unittest
 from unittest.mock import patch
 
+from support import SSEStream as Stream
+
 import app
 from document_processor import model_client
 from document_processor.errors import Cancelled, ModelError, WorkerStopping
 from document_processor.model_client import ThinkingSplitter, collect_metrics
-
-
-class Stream:
-    """Expose arbitrary SSE lines, including malformed and interrupted streams."""
-
-    def __init__(self, events, done=True):
-        self.events, self.done = events, done
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args):
-        return False
-
-    def raise_for_status(self):
-        pass
-
-    def close(self):
-        pass
-
-    def iter_lines(self, **kwargs):
-        for event in self.events:
-            yield (
-                event
-                if isinstance(event, bytes)
-                else ("data: " + json.dumps(event)).encode()
-            )
-        if self.done:
-            yield b"data: [DONE]"
 
 
 def delta(text, finish=None, reasoning=None):

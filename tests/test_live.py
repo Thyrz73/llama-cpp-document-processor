@@ -17,6 +17,9 @@ os.environ.setdefault(
     str(Path(__file__).resolve().parents[1] / "config/system_prompt.example.txt"),
 )
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from support import SSEStream as FakeStream
+from support import sse_event as event
+
 import app
 from app import ModelClient
 from document_processor import pipeline, previews, reliability
@@ -24,41 +27,6 @@ from document_processor.errors import Cancelled, ModelError, WorkerStopping
 from document_processor.files import atomic_json, file_hash
 from document_processor.jobs import JobStore
 from document_processor.model_client import ThinkingSplitter
-
-
-class FakeStream:
-    """Simulate a streaming HTTP response."""
-
-    def __init__(self, events):
-        """Store events from the fake stream."""
-        self.events = events
-
-    def __enter__(self):
-        """Return the fake stream when entering a with block."""
-        return self
-
-    def __exit__(self, *args):
-        """Let exceptions propagate when leaving the with block."""
-        return False
-
-    def raise_for_status(self):
-        """Simulate a successful HTTP status without raising."""
-        return None
-
-    def iter_lines(self, **kwargs):
-        """Emit SSE events and their completion marker.
-
-        Accept kwargs used by requests without needing them for this fake
-        stream. Return an iterator of bytes.
-        """
-        for event in self.events:
-            yield ("data: " + json.dumps(event)).encode()
-        yield b"data: [DONE]"
-
-
-def event(delta, finish=None):
-    """Create an SSE event with delta and an optional finish reason."""
-    return {"choices": [{"delta": delta, "finish_reason": finish}]}
 
 
 class LiveTests(unittest.TestCase):

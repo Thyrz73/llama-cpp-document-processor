@@ -21,8 +21,10 @@ jobs:
         run: ruff check .
       - name: Type-check Python
         run: mypy
-      - name: Run tests
-        run: python -m unittest discover -s tests -v
+      - name: Run tests with Python coverage
+        run: python -m coverage run -m unittest discover -s tests -v
+      - name: Check Python coverage
+        run: python -m coverage report
       - name: Validate Python syntax
         run: python -m compileall -q app.py document_processor scripts tests
       - name: Check benchmark dry run

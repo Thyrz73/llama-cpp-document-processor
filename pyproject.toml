@@ -7,6 +7,19 @@ target-version = "py312"
 # List rules explicitly so results do not change with ruff's default set.
 select = ["E4", "E7", "E9", "F", "I", "B", "UP", "SIM"]
 
+[tool.coverage.run]
+branch = true
+source = ["app", "document_processor"]
+relative_files = true
+concurrency = ["thread"]
+
+[tool.coverage.report]
+precision = 2
+show_missing = true
+skip_covered = true
+# Python 3.12 baseline: 96.23% lines + branches; start at its integer floor.
+fail_under = 96
+
 [tool.mypy]
 python_version = "3.12"
 files = ["app.py", "document_processor", "scripts"]

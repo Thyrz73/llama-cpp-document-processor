@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pymupdf
+from support import WordCountModelMixin
 
 import app
 from document_processor import extraction, profiles, prompts
@@ -435,7 +436,7 @@ class EvidenceTests(unittest.TestCase):
         self.assertIn("[Page 4]", r.report_warnings(checks, "fr"))
 
 
-class WordModel(app.ModelClient):
+class WordModel(WordCountModelMixin, app.ModelClient):
     calls = []
     fail_final = False
     final_output = "École (A) : −12,9 % (−2,6 MWh) [Page 2].\nConclusion : l’intervention a entraîné la baisse. [Page 4]"
@@ -449,15 +450,8 @@ class WordModel(app.ModelClient):
         }
         return self.capabilities
 
-    def inspect_identity(self):
-        return self.inspect()
-
     def model(self):
         return "fake-quality"
-
-    def tokenize(self, text):
-        self.tokenization_calls += 1
-        return len(text.split())
 
     def complete(self, instruction, content, max_tokens, *, on_update=None):
         self.calls.append((self.current_stage, instruction, content, max_tokens))
