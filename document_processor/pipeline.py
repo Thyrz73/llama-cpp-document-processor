@@ -30,17 +30,18 @@ from .config import fingerprint
 from .contracts import AnalysisNote, Chunk, ExtractionResult, JobSnapshot
 from .errors import Cancelled, ProcessingError, WorkerStopping
 from .files import atomic_json, atomic_text, file_hash
-from .jobs import PREVIEW_FILE, REPORT_FILE, SOURCE_FILE, JobStore, now
+from .jobs import PREVIEW_FILE, SOURCE_FILE, JobStore, now
 from .model_client import ModelClient
 from .observability import event, failure, log
 from .previews import CHECKPOINT_SECONDS
+from .report_text import REPORT_FILE
 from .reports import report_filename
 
 # Stages that call the model. Their artifacts also depend on the text transport
 # and reliability versions, so fixing either forces a fresh generation.
 GENERATION_STAGES = ("section", "merge", "final")
 # Name of the final report artifact; reliability.report_warnings() reads its checks.
-FINAL_ARTIFACT = "rapport_final.md"
+FINAL_ARTIFACT = REPORT_FILE
 # A merge consolidates at most this many neighbouring notes.
 MERGE_GROUP_SIZE = 4
 # The final prompt receives at most this many notes.

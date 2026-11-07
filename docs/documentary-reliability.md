@@ -32,6 +32,8 @@ L’audit a précédé les modifications. Le pipeline V2 est déjà séquentiel,
 
 ## Modifications et fonctionnement
 
+Organisation actuelle : `evidence.py` porte l’extraction/sélection des preuves et la version 1 ; `checks.py` porte les contrôles mécaniques et leur normalisation temporaire ; `report_text.py` regroupe les messages FR/EN, l’en-tête et les avertissements déterministes ainsi que le nom physique `rapport_final.md`. `reliability.py` conserve les anciens imports par réexport explicite, et `prompts.report_header` reste disponible. Ce découpage ne change ni les données, ni l’ordre des avertissements, ni les empreintes ou la réutilisation des caches. Les consignes du modèle restent dans `prompts.py`, les traductions du navigateur dans `static/translations.json` ; aucun de ces textes n’est substitué à l’autre. Voir le [découpage courant](architecture.md#reliability-and-report-text) et les tests d’égalité avec les sorties antérieures dans `tests/test_reliability_contracts.py`.
+
 | Fichier / fonctions | Changement et effet | Coût supplémentaire |
 | --- | --- | --- |
 | `app.py` / `make_chunks` | Ajout de `parts`, passages exacts et pages physiques, indépendamment des marqueurs contenus dans le texte. Texte envoyé au modèle inchangé à cette étape. | Une copie des passages dans les données de découpage et sur disque. |

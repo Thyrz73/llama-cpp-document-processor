@@ -1,9 +1,11 @@
 """Versioned task templates; snapshots retain these strings for safe retries."""
 
 import re
-from collections.abc import Sequence
 
-from .contracts import JobSnapshot, ReportLanguage
+from .contracts import JobSnapshot
+from .report_text import deterministic_language as deterministic_language
+from .report_text import is_french as is_french
+from .report_text import report_header as report_header
 
 PROMPT_VERSION = 4
 TEMPLATES = {
@@ -105,11 +107,6 @@ def instruction(config: JobSnapshot, stage: str, question: str, extra: str = "")
     return text + "\nUser request: " + question + "\n" + extra
 
 
-def is_french(language: str) -> bool:
-    """Tell whether a report language setting means French ("fr", "french" or "français")."""
-    return language.lower() in ("fr", "french", "français")
-
-
 def resolve_report_language(language: str, question: str) -> str:
     """Choose fr/en for deterministic text of a new job, using only its request.
 
@@ -176,48 +173,3 @@ def resolve_report_language(language: str, question: str) -> str:
         ]
     )
     return "fr" if len(words & french) > len(words & english) else "en"
-
-
-def deterministic_language(config: ReportLanguage) -> str:
-    """Read the saved text language, retaining historical behavior for old snapshots."""
-    return config.get("effective_report_language", config["report_language"])
-
-
-def report_header(
-    config: ReportLanguage,
-    filename: str,
-    pages: int,
-    chunks: int,
-    missing: Sequence[int],
-    ocr_pages: Sequence[int],
-) -> str:
-    """Return the Markdown header of the report, in the report language.
-
-    It gives the PDF name, the page and section counts, and the pages that
-    needed OCR or still lack usable text.
-    """
-    french = is_french(deterministic_language(config))
-    title, page_label, chunk_label = (
-        ("Analyse de", "Pages PDF", "sections analysées")
-        if french
-        else ("Analysis of", "PDF pages", "analyzed chunks")
-    )
-    # A filename is untrusted text even though the browser renders it safely.
-    filename = (
-        filename.replace("\n", " ")
-        .replace("\r", " ")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-    )
-    header = f"# {title} {filename}\n\n*{page_label}: {pages} — {chunk_label}: {chunks}.*\n\n"
-    if missing:
-        label = (
-            "Texte insuffisant après extraction/OCR aux pages"
-            if french
-            else "Insufficient text after extraction/OCR on pages"
-        )
-        header += f"> {label}: {', '.join(map(str, missing))}.\n\n"
-    if ocr_pages:
-        label = "OCR utilisé aux pages" if french else "OCR used on pages"
-        header += f"*{label}: {', '.join(map(str, ocr_pages))}.*\n\n"
-    return header

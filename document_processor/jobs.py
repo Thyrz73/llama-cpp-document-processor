@@ -26,11 +26,11 @@ from .contracts import PublicJobConfig
 from .errors import Cancelled, ProcessingError
 from .observability import event
 from .previews import PreviewCache
+from .report_text import REPORT_FILE as REPORT_FILE
 
-# Files kept in each job directory. The report name predates the English
-# code base and is kept so existing installations keep working.
+# Files kept in each job directory. REPORT_FILE is re-exported for old callers;
+# report_text owns the historical name used by both jobs and artifacts.
 SOURCE_FILE = "source.pdf"
-REPORT_FILE = "rapport_final.md"
 PREVIEW_FILE = "live_preview.json"
 # More than two visible history pages; retain only sanitized public fields.
 PUBLIC_CONFIG_CACHE_SIZE = 256

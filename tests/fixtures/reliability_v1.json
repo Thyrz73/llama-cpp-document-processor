@@ -1,0 +1,197 @@
+{
+  "version": 1,
+  "templates_fingerprint": "e10defb25d1b8186c1284f1a259a0a5488a2bb8acb2c733550fb38e819a58a32",
+  "messages": {
+    "fr": {
+      "title": "Contrôles documentaires automatiques",
+      "nonexistent_page": "Référence à une page PDF inexistante",
+      "page_outside_input": "Page citée absente des entrées de cette étape",
+      "page_without_text": "Page citée sans texte extrait exploitable",
+      "malformed_page_reference": "Référence de page non interprétable",
+      "numeric_mismatch": "Écart numérique possible avec une ligne source",
+      "certainty_escalation_candidate": "Causalité potentiellement trop affirmative (signal lexical)",
+      "missing_information_escalation_candidate": "Absence de mention potentiellement transformée en absence de réalisation (signal lexical)",
+      "quote_page_mismatch": "Citation textuelle retrouvée sur une autre page source",
+      "notice": "Avertissements, sans correction automatique. L’existence d’une page ne valide pas le sens de la citation. Les calculs hors des formats reconnus et la cohérence scientifique ne sont pas vérifiés.",
+      "count": "signalement(s) dans les étapes intermédiaires"
+    },
+    "en": {
+      "title": "Automatic document checks",
+      "nonexistent_page": "Reference to a nonexistent PDF page",
+      "page_outside_input": "Cited page absent from this step’s inputs",
+      "page_without_text": "Cited page has no usable extracted text",
+      "malformed_page_reference": "Unparseable page reference",
+      "numeric_mismatch": "Possible numerical mismatch with a source row",
+      "certainty_escalation_candidate": "Potentially overstated causality (lexical signal)",
+      "missing_information_escalation_candidate": "Potential change from not mentioned to not performed (lexical signal)",
+      "quote_page_mismatch": "Exact quotation found on another source page",
+      "notice": "Warnings, without automatic correction. Page existence does not validate citation meaning. Calculations outside recognized formats and scientific consistency are unchecked.",
+      "count": "warning(s) in intermediate steps"
+    }
+  },
+  "cases": {
+    "french": {
+      "evidence": "1e4b12df00be20b5f1624f408fccb05df7188e9278baec7762d698f6a655e6cb",
+      "evidence_fingerprint": "0386bc0552aa9f33ade8b59d6a48a8abd71091d226e37100a1141487e1e454b4",
+      "blocks": "da57ab81e16699e8e727bf56a28d6126dbcce83ad380d4aa2dc684f8f1dece52",
+      "merged_note": "9af2072aaebb270ee9ee4cde384e0fb994cb2c73d6d9500c4fb849ad4eb26cd4",
+      "combined": "b78e28e28cb92e2654f6f107312ffb88d4de70ccd5f7d47d60287ec8f5478563",
+      "compact": "6d15edac05ecd5853cb929c046dbeccc5d0e25067d416203f7f334a197409658",
+      "prepare_input": "d31ead3dd4c7220d1d19fb623213e35719fc5dd05476ff3450d5640b6a856923",
+      "numeric": "2eab793d79bc1bf0d82c73e23dfe5a895aa85e8aa27964c97c85819ce2fcc2a4",
+      "quotes": "bfaf3937a6fea294a1a5b14bbce63c877086906c4bbdef59a550f8a34de3d5eb",
+      "certainty": "3657b493cb714ccd14f0f05a7b8f9c4ca73708f40a6761f688cf159ad381672c",
+      "audit": "129e2a0113c24161c54d0b46c28a66f65349d6f2f748107560c1217626abd4b1",
+      "quality": "576c07c5fd9fb7ed5a9a668c6aebdb35c1909c60f18c4279a382a9dfdcfe2d87",
+      "warnings": "8e8ad25002fcb81ac54afad3c02e4163e1ae1b0cae3ec2c5e37c364f5d79f617",
+      "headers": "7add83d0ec3ae45a484163e2d00cbbdf29ba02bc42a0fcab12cf8c5fad3ad2cc",
+      "saved_language_header": "11a631036819ed164ac9bebcf1e83302b543b86bd3d05f1dc8829ec77322a2ce"
+    },
+    "english": {
+      "evidence": "d15b243b8fd42f46b9b688b919c7d3e8280fd508d5c52e9516541be729b59f80",
+      "evidence_fingerprint": "05511a4c0eceb00611f34162a5aa1f285b60cc2f67725be250a11e66b7a942b6",
+      "blocks": "26485aaeae70453e19dd064b0d9e6ccd884e16f43b10617d5a1436c5232bef1a",
+      "merged_note": "9af2072aaebb270ee9ee4cde384e0fb994cb2c73d6d9500c4fb849ad4eb26cd4",
+      "combined": "9383191b080c5d362ae456d7b69998869ef18fcb6b148c8b1e427b9e2f7c7541",
+      "compact": "6d15edac05ecd5853cb929c046dbeccc5d0e25067d416203f7f334a197409658",
+      "prepare_input": "2e5f3ba8570728fe39206d0061c814510a3ac47f80d7eef7fe9ac4b3be6a62d9",
+      "numeric": "9fafb5cce8e128d6f84a87e7ebb8f7f35b38f743ac46a16adfaf845283f6a9cd",
+      "quotes": "bfaf3937a6fea294a1a5b14bbce63c877086906c4bbdef59a550f8a34de3d5eb",
+      "certainty": "3a84484b277320d726fc0fd52a406651203a1ebb635362c7260f3d19d7a2752b",
+      "audit": "11f9213faa3283f2dfc03f0236b3d064137d681cfc7860e217ac9a9ad62ac611",
+      "quality": "aad7f4b0c22100d030d585ca945b3c4194783bba14663be1d456fe396f81089b",
+      "warnings": "8db39865c6dd181782d6735dc349e477923bdf369be0be294c068fd7144b17ae",
+      "headers": "7add83d0ec3ae45a484163e2d00cbbdf29ba02bc42a0fcab12cf8c5fad3ad2cc",
+      "saved_language_header": "11a631036819ed164ac9bebcf1e83302b543b86bd3d05f1dc8829ec77322a2ce"
+    },
+    "ocr_unicode": {
+      "evidence": "664a07bb0385f3f7de35b4cab7b282f37073621d2baa650d1c9927be48c37def",
+      "evidence_fingerprint": "e1fd2f9b90f3ac50dfc09a5e92c8e0d823fe806b4c4110349be800551850d03e",
+      "blocks": "862455c9564178a87757b4a70a3afc5e15f4e14e8194000498811589f5659474",
+      "merged_note": "9af2072aaebb270ee9ee4cde384e0fb994cb2c73d6d9500c4fb849ad4eb26cd4",
+      "combined": "b29d439df40f2317ff9a94fb9720d26af45b6241bde225e5bd5006ec68c944f1",
+      "compact": "6d15edac05ecd5853cb929c046dbeccc5d0e25067d416203f7f334a197409658",
+      "prepare_input": "e572a27a8cccb25ca070597b26c5d7c9a5aaf80669a76dd69ccc25339c30f0f3",
+      "numeric": "9ac533d6f19ef9f1e8832b88368b7bad9ac7e41afe079c8649fa51ca59127b68",
+      "quotes": "88e928415a027f7020a8a385a764b35029d0475bb694389311b813cd8ee07da1",
+      "certainty": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "audit": "e74ea43afcb655c2e7712d69a3d4ef990e04af619e17d4d2c6c9616f8e6296f3",
+      "quality": "d6d436d7dd92a2c172e64ec8a70dd5f18d72e1311a95e25a9cb5f3dcf4136871",
+      "warnings": "de4511e468e224cae016b079dc269d1a0eebfcb1b3e93bd635e697a821024db0",
+      "headers": "00950ee46c535243709eed441a170147ff7b4a2c795ca17869f77a791a9290ac",
+      "saved_language_header": "16923b86d58ef0a6ef4ee972b2c0b048474383db08a1f85398b2234848d19f44"
+    },
+    "ambiguous_tables": {
+      "evidence": "4385eed31af09a9d1269be6981a36dc61727173597cbc7866b482e942f6bc990",
+      "evidence_fingerprint": "e310f295eb836960a24a4cc8035afeb0b859cdab5b302471de663fe056a32128",
+      "blocks": "dba208d89ef5bfb4c8cf252a59533f68e4ced323e94532162fe922572f1bce4b",
+      "merged_note": "9af2072aaebb270ee9ee4cde384e0fb994cb2c73d6d9500c4fb849ad4eb26cd4",
+      "combined": "4ca86079416136b2a053b68114f3596a38ce2b41681856b4e39a800a4e9923f5",
+      "compact": "6d15edac05ecd5853cb929c046dbeccc5d0e25067d416203f7f334a197409658",
+      "prepare_input": "e2a4542daf2c575477d059b856b71ba4e5396c26bac8a5b0f9e188c8950fb82b",
+      "numeric": "3006e96718a05e7708e317bee52a40e3ba2d44bbf36c750e3408fd8a93d5233f",
+      "quotes": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "certainty": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "audit": "6ea8a25bb9dbdf71d24f3ed8ddcd226e20e876dfbec91085c980efbee2386555",
+      "quality": "1d1af47dcda18c55241649de3711cdebb22ceb144141e333894105c5c64d41d5",
+      "warnings": "7bb7701ca88c19252c487b27ad640397002f53c80ab0f3d6706526137bc1722e",
+      "headers": "7add83d0ec3ae45a484163e2d00cbbdf29ba02bc42a0fcab12cf8c5fad3ad2cc",
+      "saved_language_header": "11a631036819ed164ac9bebcf1e83302b543b86bd3d05f1dc8829ec77322a2ce"
+    },
+    "empty_ocr": {
+      "evidence": "01b3382755b994bebeb36875990c1f28ddf32dd3ac8a5d18a8deb07435f14d59",
+      "evidence_fingerprint": "2198c035b09660a2a684633be49179972b0437cde320d40fe771503d93b7add0",
+      "blocks": "b0fbb6b61b3c15e2002fdba7735e2dec6b437ac1966d99551b4a921be8460733",
+      "merged_note": "fa3e0e3c464e771091ec1983150cf40e5759c09b1b0fca8ab64ec6e7d1f1f87b",
+      "combined": "77f3eb7b464d7759e6de641b95047e20735e7cc54b82580116c1aff26ef77f09",
+      "compact": "5681d46f83dcf771bdda099b6896456a1f1f1df4f317ebec9d9cb5d1c1171b46",
+      "prepare_input": "310a9d59cb08f56d9b3e840b1bb88cc286b1cd8c797ae2b2b92bd476514c2d37",
+      "numeric": "32109eeabaee6dc329425fab7e9de8ab219f9939195a2ee242c25974c239e82d",
+      "quotes": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "certainty": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "audit": "1cedd808041ae89e1ab49af508ba925df713d25298217464c0474ed84912340c",
+      "quality": "e0cc1929182994e157a0f2dd5b9ef05ae12a7fa908416f8c1605b3b9b06e2fe3",
+      "warnings": "139cc0edbb97cb195c81411bd976f827504f5be360e9ff195e37e82a069b337f",
+      "headers": "222fecbf356ee29d35add54f5f14ace638c976f8a10b8c1c1faddbd1837a4a01",
+      "saved_language_header": "dc0247a4ec79917b7dbb84f42d8d9981c7ec62c391de31891dc7b9b15766ce71"
+    }
+  },
+  "cache": {
+    "config": {
+      "pipeline_version": 2,
+      "report_language": "auto",
+      "system_prompt": "Test prompt only"
+    },
+    "files": {
+      "source_evidence.json": "{\"version\": 1, \"pdf_pages\": [1, 2, 3], \"text_pages\": [1, 2, 3], \"missing\": [], \"ocr_pages\": [], \"comparisons\": [{\"entity\": \"A · École\", \"before\": \"12.4\", \"after\": \"10.8\", \"unit\": \"MWh\", \"periods\": [\"Janvier–mars 2025\", \"Janvier–mars 2026\"], \"page\": 2, \"context\": \"Bâtiment | Janvier–mars 2025 | Janvier–mars 2026 | Variation\", \"variable\": \"Bâtiment | Janvier–mars 2025 | Janvier–mars 2026 | Variation\", \"conditions\": null, \"raw\": \"A · École | 12,4 MWh | 10,8 MWh | −12,9 %\", \"table\": \"7cef44341e743412\", \"status\": \"source_unspecified\", \"derived_status\": \"calculated\", \"delta\": \"-1.6\", \"relative_percent\": \"-12.90322580645161290322580645\", \"id\": \"4948e554ae84b586\", \"reported_percent\": \"-12.9\"}, {\"entity\": \"B · Médiathèque\", \"before\": \"8.0\", \"after\": \"8.6\", \"unit\": \"MWh\", \"periods\": [\"Janvier–mars 2025\", \"Janvier–mars 2026\"], \"page\": 2, \"context\": \"Bâtiment | Janvier–mars 2025 | Janvier–mars 2026 | Variation\", \"variable\": \"Bâtiment | Janvier–mars 2025 | Janvier–mars 2026 | Variation\", \"conditions\": null, \"raw\": \"B · Médiathèque | 8,0 MWh | 8,6 MWh | +7,5 %\", \"table\": \"7cef44341e743412\", \"status\": \"source_unspecified\", \"derived_status\": \"calculated\", \"delta\": \"0.6\", \"relative_percent\": \"7.500\", \"id\": \"b2b5ffad729e77c0\", \"reported_percent\": \"7.5\"}, {\"entity\": \"C · Atelier\", \"before\": \"15.5\", \"after\": \"13.9\", \"unit\": \"MWh\", \"periods\": [\"Janvier–mars 2025\", \"Janvier–mars 2026\"], \"page\": 2, \"context\": \"Bâtiment | Janvier–mars 2025 | Janvier–mars 2026 | Variation\", \"variable\": \"Bâtiment | Janvier–mars 2025 | Janvier–mars 2026 | Variation\", \"conditions\": null, \"raw\": \"C · Atelier | 15,5 MWh | 13,9 MWh | −10,3 %\", \"table\": \"7cef44341e743412\", \"status\": \"source_unspecified\", \"derived_status\": \"calculated\", \"delta\": \"-1.6\", \"relative_percent\": \"-10.32258064516129032258064516\", \"id\": \"fcf8604af5c72fb5\", \"reported_percent\": \"-10.3\"}, {\"entity\": \"TOTAL\", \"before\": \"35.9\", \"after\": \"33.3\", \"unit\": \"MWh\", \"periods\": [\"Janvier–mars 2025\", \"Janvier–mars 2026\"], \"page\": 2, \"context\": \"Bâtiment | Janvier–mars 2025 | Janvier–mars 2026 | Variation\", \"variable\": \"Bâtiment | Janvier–mars 2025 | Janvier–mars 2026 | Variation\", \"conditions\": null, \"raw\": \"TOTAL | 35,9 MWh | 33,3 MWh | −7,2 %\", \"table\": \"7cef44341e743412\", \"status\": \"source_unspecified\", \"derived_status\": \"calculated\", \"delta\": \"-2.6\", \"relative_percent\": \"-7.242339832869080779944289694\", \"id\": \"58f0be49fb766b47\", \"reported_percent\": \"-7.2\"}], \"reserves\": [{\"page\": 1, \"categories\": [\"fiction\"], \"text\": \"Document fictif.\", \"id\": \"c1aa10b57b169af0\"}, {\"page\": 1, \"categories\": [\"hypothesis\", \"missing_information\"], \"text\": \"Hypothèse H1 non vérifiée.\", \"id\": \"7899cf7ddbf42fd7\"}, {\"page\": 3, \"categories\": [\"forecast_observation\", \"causality_reserve\"], \"text\": \"Une baisse est observée après l’intervention, sans preuve de causalité.\", \"id\": \"d2ce75dbcbd81614\"}, {\"page\": 3, \"categories\": [\"missing_information\"], \"text\": \"Le protocole ne mentionne pas d’étalonnage des compteurs.\", \"id\": \"4e1ff988910440c8\"}]}",
+      "rapport_final.md": "École (A) : −12,9 % (−2,6 MWh) [Page 2].\nConclusion : l’intervention a entraîné la baisse. [Page 4]\n« Le protocole ne mentionne pas d’étalonnage des compteurs. » [Page 2]\nAucun étalonnage n’a été effectué. [Page 3]"
+    },
+    "dependencies": {
+      "source_evidence.json": {
+        "extraction": "aaa890b7cdc74e74a1bc90da4d2eedc1923b9c7bcd156a876d15be2264d45674",
+        "version": 1
+      },
+      "rapport_final.md": {
+        "notes": "cc43c704be675e129724ca4a55427364e52ab27e50293a04788e393a2a82262a",
+        "input": "b78e28e28cb92e2654f6f107312ffb88d4de70ccd5f7d47d60287ec8f5478563",
+        "instruction": "e02bdd3b209d96e4f871748a6f394a7fb88d1e1e65ce26ca2e6fd538a1d87281",
+        "identity": {
+          "model_id_hash": "test-model",
+          "template_hash": "test-template",
+          "engine_sampling_hash": "test-sampling"
+        },
+        "text_transport_version": 1,
+        "reliability_version": 1
+      }
+    },
+    "manifest": {
+      "version": 1,
+      "config_hash": "dd41a89be33e46f60f7d16d2aad0b622044215ca653c0fa212d4ea1eb2c993df",
+      "artifacts": {
+        "source_evidence.json": {
+          "dependencies": "8716d8ab9ff352555d821f861a2994036bf9ee5076d5f3dd6519df43725b6ddd",
+          "sha256": "2477d257a7119b271c16b90108f322f3dd2b4468442d2640196cf5610c55c9f7",
+          "complete": true
+        },
+        "rapport_final.md": {
+          "dependencies": "95e34dee1aef6bb21dbc1ee68bb88591c50ffe06313a1e1ab48154b4ddfaaa7d",
+          "sha256": "c3826dd29ec77eef2f90f1a8c19484530f99f88cac6e8bbb4c76ea203f6e1a34",
+          "complete": true
+        }
+      },
+      "identity": null
+    }
+  },
+  "reference_commit": "79ec64cfd687d5e45376ca6dd63aa2932d88797b",
+  "issue_order": {
+    "french": [
+      "nonexistent_page",
+      "numeric_mismatch",
+      "certainty_escalation_candidate",
+      "missing_information_escalation_candidate",
+      "quote_page_mismatch"
+    ],
+    "english": [
+      "malformed_page_reference",
+      "numeric_mismatch",
+      "certainty_escalation_candidate",
+      "missing_information_escalation_candidate",
+      "quote_page_mismatch"
+    ],
+    "ocr_unicode": [
+      "page_outside_input",
+      "page_without_text",
+      "nonexistent_page",
+      "numeric_mismatch",
+      "quote_page_mismatch"
+    ],
+    "ambiguous_tables": [
+      "numeric_mismatch"
+    ],
+    "empty_ocr": [
+      "page_without_text",
+      "nonexistent_page",
+      "page_without_text"
+    ]
+  }
+}

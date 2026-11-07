@@ -6,8 +6,8 @@ from flask import Blueprint, abort, make_response, render_template, request, sen
 from werkzeug.exceptions import Conflict, NotFound
 
 from .. import reports
-from ..jobs import REPORT_FILE
 from ..observability import event
+from ..report_text import REPORT_FILE
 from . import get_services, job_directory
 
 blueprint = Blueprint("reports", __name__)

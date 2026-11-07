@@ -37,7 +37,8 @@ There is one process, one worker thread and a few web threads. SQLite holds the 
 | `document_processor/contracts.py` | Static job/snapshot, extraction, note and completion dictionary contracts; see [type contracts](type-contracts.md). |
 | `document_processor/config.py` | Turns job options into an immutable, validated configuration snapshot. |
 | `document_processor/profiles.py` | The `low`…`ultra` token budget profiles. |
-| `document_processor/prompts.py` | Task prompt templates, report header and language helpers. |
+| `document_processor/prompts.py` | Versioned model instructions and request-language selection; compatibility exports for report text helpers. |
+| `document_processor/report_text.py` | Deterministic FR/EN report header/warnings, report-language helpers and the historical physical report filename. |
 | `document_processor/errors.py` | Public error types: each carries a stable code translated by the interface. |
 | `document_processor/observability.py` | Structured log events and the "job being processed" log context. |
 | `document_processor/files.py` | Atomic file writes and file hashing. |
@@ -46,7 +47,9 @@ There is one process, one worker thread and a few web threads. SQLite holds the 
 | `document_processor/artifacts.py` | Reuses intermediate results only when their inputs and content still match. |
 | `document_processor/extraction.py` | PDF text with PyMuPDF, pypdf fallback, Tesseract OCR, section splitting. |
 | `document_processor/model_client.py` | llama.cpp HTTP client, independent `StreamParser`/typed `StreamState`, tokenization, deadlines and cancellation. |
-| `document_processor/reliability.py` | Mechanical checks of citations, numbers and certainty wording. |
+| `document_processor/reliability.py` | Temporary explicit re-exports for old reliability imports. |
+| `document_processor/evidence.py` | Versioned physical-page evidence, decimal arithmetic, note provenance and bounded evidence selection for prompts. |
+| `document_processor/checks.py` | Attempt-local evidence normalization and mechanical citation, number, quotation and certainty checks. |
 | `document_processor/reports.py` | Report download names and safe Markdown rendering. |
 | `document_processor/pipeline.py` | `JobRun`: the analysis steps of one job. |
 | `document_processor/previews.py` | Thread-safe bounded live-preview cache; JSON checkpoints remain the restart/process fallback. |
@@ -95,6 +98,14 @@ Blueprints namespace internal Flask endpoints (`system.index`, `jobs.create_job`
 Backend diagnostics use the application-owned `CapabilityCache` in `backend.py`: 30 seconds for success with a known context, 5 seconds otherwise. `inspect()` allows TTL observations for display; `inspect_identity()` always reads `/v1/models` and `/props` afresh at the beginning of each attempt, before artifact compatibility checks. Its result is reused within the attempt and supplies the UI cache. A lock serializes inspections; jobs can cancel while waiting for it. Backend failures invalidate observations; callers receive copies, and cache reads never renew expiration. Profiles, preview and creation only read the cache and retain `engine_context_unknown` when no valid context is known. Tests in `test_capabilities.py` and `test_backend_identity.py` simulate time and HTTP responses without a real backend.
 
 Existing artifacts require known model, template and engine-sampling hashes in both their manifest and the fresh identity. A mismatch or unverifiable identity raises the existing `identity_changed` error before any artifact read, without rewriting the manifest or snapshot. Limited-property backends can run a new analysis, but cannot reuse artifacts with unknown identity fields. The version field remains optional and is compared when recorded previously.
+
+## Reliability and report text
+
+`evidence.py` owns the unchanged version-1 source evidence; `checks.py` depends on it, and both are re-exported by `reliability.py`. Checks retain citation/numeric/certainty/quotation warning order and report mechanical signals with `semantic_validation=False`. Normalized evidence is reused only for the same source object and version within an attempt. Instrument private helpers in their owning module (`checks._normalized` and `checks.VERSION`); the facade uses ordinary imports rather than forwarding assignments.
+
+`report_text.py` groups `MESSAGES`, `report_header()` and `report_warnings()` with the single `REPORT_FILE = "rapport_final.md"` definition. `jobs.REPORT_FILE`, `pipeline.FINAL_ARTIFACT`, `reliability.MESSAGES`/`report_warnings` and the old `prompts` report/language helpers remain compatible exports. The filename, evidence IDs, JSON field/order, artifact dependencies and hashes remain unchanged, so no reliability-version bump or cache invalidation is needed.
+
+Deterministic report copy is maintained in `report_text.py`; browser copy is maintained in `static/translations.json`. Both cover FR/EN, but the browser catalog is never loaded to build model instructions or render report metadata. `prompts.TEMPLATES`, `PROMPT_VERSION`, language instructions and the LLM's generated text are unchanged. `tests/fixtures/reliability_v1.json` records pre-split serialized output hashes, warning order, messages and an old artifact manifest from commit `79ec64c`; `test_reliability_contracts.py` compares the existing French/English, number, citation, Unicode and OCR fixtures against that baseline and reads its cache without rewriting it.
 
 ## Browser interface
 
@@ -159,6 +170,7 @@ Run the commands from the README's Development section. Python tests use tempora
 - `test_database.py`, `test_worker_shutdown.py`: migrations, connection reuse/ownership, rollback, concurrent checkpoints, bounded shutdown, SQLite backup and WAL recovery after abrupt process exit.
 - `test_application.py`: per-app store/worker/cache isolation, route/method inventory, injected clients and workers, JSON/security/upload/live/report contracts, side-effect-free import and explicit lifecycle order.
 - `test_contracts.py`: JSON/fingerprint round-trips, historical snapshots, public projections, extraction/note provenance and incremental completion measurements.
+- `test_reliability_contracts.py`, `test_audit_reuse.py`: pre-split serialized output/hash equality, report aliases/languages, historical manifest reuse and attempt-local normalization/audit reuse.
 - `test_stream_parser.py`, `test_stream_metrics.py`: deterministic parser sequences, stable errors/metrics/budgets, fragmented thinking, HTTP cleanup, immediate cancellation, single-reader ownership and rejection of partial artifacts. `test_encoding.py` also fragments actual response bytes, including UTF-8 characters, before HTTP line reassembly.
 - `test_settings.py`: deployment defaults/overrides, validation stages, immutable values, isolated defaults, import behavior, compatibility globals, explicit injection and editable prompts.
 - `test_architecture.py`, `test_errors.py`, `test_environment.py`, `test_dependencies.py`: guards against import cycles, untranslated errors, configuration drift and diverging dependency locks. `test_environment.py` checks real HTTP shutdown after a completed job, plus the application SIGTERM path during a simulated worker transaction. Single-file checks apply to these quiescent test scenarios, not every production stop.

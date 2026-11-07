@@ -16,7 +16,7 @@ os.environ.setdefault(
     str(Path(__file__).resolve().parents[1] / "config/system_prompt.example.txt"),
 )
 
-from document_processor import pipeline
+from document_processor import checks, pipeline
 from document_processor import reliability as r
 from document_processor.artifacts import Artifacts
 
@@ -149,7 +149,7 @@ class AuditReuseTests(unittest.TestCase):
     ):
         evidence = fixtures.evidence()
         before = json.dumps(evidence, ensure_ascii=False)
-        with patch.object(r, "_normalized", wraps=r._normalized) as normalize:
+        with patch.object(checks, "_normalized", wraps=checks._normalized) as normalize:
             prepared = r.prepare_evidence(evidence)
             self.assertIs(r.prepare_evidence(evidence, prepared), prepared)
             first = r.audit(ANSWER, evidence, [1, 2, 3], prepared=prepared)
@@ -163,7 +163,7 @@ class AuditReuseTests(unittest.TestCase):
         self.assertEqual(json.dumps(evidence, ensure_ascii=False), before)
         other = copy.deepcopy(evidence)
         self.assertIsNot(r.prepare_evidence(other, prepared), prepared)
-        with patch.object(r, "VERSION", r.VERSION + 1):
+        with patch.object(checks, "VERSION", checks.VERSION + 1):
             self.assertIsNot(r.prepare_evidence(evidence, prepared), prepared)
 
     def test_prepared_nfkc_entities_and_quotes_match_existing_unicode_behavior(self):
