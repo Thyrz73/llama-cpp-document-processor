@@ -153,6 +153,195 @@ class ThinkingSplitter:
         self.pending = ""
 
 
+@dataclass(frozen=True)
+class StreamState:
+    """A preview of the parsed channels, with the generation's shared metrics.
+
+    completed means finish() validated a nonempty, untruncated answer. Receiving
+    [DONE] alone does not make a partial answer safe to publish as final.
+    """
+
+    content: str
+    reasoning: str
+    metrics: CompletionMetrics
+    completed: bool
+
+
+class StreamParser:
+    """Parse complete SSE lines without HTTP, threads or preview scheduling.
+
+    The transport assembles fragmented wire bytes into lines. feed() decodes
+    UTF-8 and JSON, collects deltas and measurements, and reports whether a
+    JSON event was consumed. finish() validates completion after [DONE] or EOF.
+    Text is assembled only for state snapshots and the final answer; counters
+    remain incremental so small deltas do not repeatedly scan the whole answer.
+    """
+
+    def __init__(
+        self,
+        *,
+        preview_limit: int = 12000,
+        initial_thinking: bool = False,
+        thinking_policy: object = "inherit",
+        started: float | None = None,
+        clock: Callable[[], float] | None = None,
+    ) -> None:
+        self._clock = time.monotonic if clock is None else clock
+        self._started = self._clock() if started is None else started
+        self._preview_limit = preview_limit
+        self._initial_thinking = initial_thinking
+        self._splitter = ThinkingSplitter(
+            initial_thinking=initial_thinking and thinking_policy != "off",
+            reasoning_limit=preview_limit,
+        )
+        self._reasoning = ""
+        self._reasoning_chars = 0
+        self._finish_reason: object = None
+        self.done = False
+        self.completed = False
+        self.metrics: dict[str, Any] = {
+            key: None
+            for key in (
+                "prompt_tokens",
+                "output_tokens",
+                "reasoning_tokens",
+                "useful_tokens",
+                "cached_prompt_tokens",
+                "evaluated_prompt_tokens",
+                "prefill_ms",
+                "decode_ms",
+                "first_event_ms",
+                "first_content_ms",
+                "finish_reason",
+            )
+        }
+
+    def feed(self, line: bytes | str | None) -> bool:
+        """Consume one transport line; stop accepting events after [DONE]."""
+        if not line or self.done or self.completed:
+            return False
+        if not isinstance(line, str):
+            try:
+                line = line.decode("utf-8")
+            except UnicodeDecodeError:
+                raise ModelError(
+                    "invalid_stream_encoding", "The model stream is not valid UTF-8."
+                ) from None
+        if not line.startswith("data:"):
+            return False
+        message = line[5:].strip()
+        if message == "[DONE]":
+            self.done = True
+            return False
+        try:
+            event = json.loads(message)
+        except ValueError:
+            raise ModelError(
+                "invalid_stream", "Malformed llama.cpp streaming response."
+            ) from None
+        self._event(event)
+        self._check_size()
+        return True
+
+    def _event(self, event: object) -> None:
+        if not isinstance(event, dict) or "error" in event:
+            raise ModelError("stream_error", "The backend reported a streaming error.")
+        if self.metrics["first_event_ms"] is None:
+            self.metrics["first_event_ms"] = (self._clock() - self._started) * 1000
+        collect_metrics(event, self.metrics)
+        choices = event.get("choices") or []
+        if not isinstance(choices, list):
+            raise ModelError("invalid_stream", "Malformed streaming choices.")
+        for choice in choices:
+            if not isinstance(choice, dict):
+                raise ModelError("invalid_stream", "Malformed streaming choice.")
+            self._choice(choice)
+
+    def _choice(self, choice: dict[str, Any]) -> None:
+        delta = choice.get("delta") or {}
+        if not isinstance(delta, dict):
+            raise ModelError("invalid_stream", "Malformed streaming delta.")
+        part = delta.get("reasoning_content") or delta.get("reasoning")
+        # Server-separated reasoning has already applied the template's parser;
+        # do not classify its useful content a second time, even with policy off.
+        if isinstance(part, str) and part and self._initial_thinking:
+            self._splitter.inside_think = False
+        if isinstance(delta.get("content"), str):
+            self._splitter.feed(delta["content"])
+            if (
+                self._splitter.content_parts
+                and self.metrics["first_content_ms"] is None
+            ):
+                self.metrics["first_content_ms"] = (
+                    self._clock() - self._started
+                ) * 1000
+        if isinstance(part, str):
+            self._reasoning_chars += len(part)
+            self._reasoning = (self._reasoning + part)[-self._preview_limit :]
+        if choice.get("finish_reason"):
+            self._finish_reason = choice["finish_reason"]
+
+    def _check_size(self) -> None:
+        if self._splitter.content_chars > 4_000_000:
+            raise ModelError(
+                "output_too_large", "The generated response exceeded the safety limit."
+            )
+
+    def finish(self) -> str:
+        """Flush pending text and return only a validated final answer."""
+        self._splitter.finish()
+        # A trailing partial tag is ordinary text once finish() flushes it.
+        self._check_size()
+        self.metrics["finish_reason"] = (
+            self._finish_reason
+            if self._finish_reason in ("stop", "length", "content_filter", "tool_calls")
+            else None
+        )
+        if self._finish_reason == "length":
+            raise ModelError(
+                "output_limit",
+                "Model response hit max_tokens or the context limit; start a new job with adjusted budgets.",
+            )
+        if self._finish_reason not in (None, "stop"):
+            raise ModelError(
+                "unsupported_finish",
+                "The backend returned an unsupported completion reason.",
+            )
+        if not self.done and self._finish_reason is None:
+            raise ModelError(
+                "incomplete_stream", "llama.cpp stream closed before completion."
+            )
+        self.metrics["stop_category"] = (
+            "stop" if self._finish_reason == "stop" else "done_without_reason"
+        )
+        answer = self._splitter.content.strip()
+        if not answer:
+            raise ModelError(
+                "empty_output",
+                "Model returned empty content; start a new job with adjusted budgets.",
+            )
+        self.completed = True
+        return answer
+
+    def update_counts(self) -> None:
+        """Update measurements without assembling the accumulated text."""
+        self.metrics["content_chars"] = self._splitter.content_chars
+        self.metrics["reasoning_chars"] = (
+            self._reasoning_chars + self._splitter.reasoning_chars
+        )
+
+    @property
+    def state(self) -> StreamState:
+        """Assemble a preview on demand, retaining only the reasoning tail."""
+        self.update_counts()
+        return StreamState(
+            self._splitter.content,
+            (self._splitter.reasoning + self._reasoning)[-self._preview_limit :],
+            cast(CompletionMetrics, self.metrics),
+            self.completed,
+        )
+
+
 # Only one generation streams at a time. A cancelled read may take time to
 # close, so the next generation waits until the previous reader has exited,
 # even if the server ignores the disconnection.
@@ -540,34 +729,19 @@ class ModelClient:
         is never saved.
         """
         started = time.monotonic()
-        metrics: dict[str, Any] = {
-            key: None
-            for key in (
-                "prompt_tokens",
-                "output_tokens",
-                "reasoning_tokens",
-                "useful_tokens",
-                "cached_prompt_tokens",
-                "evaluated_prompt_tokens",
-                "prefill_ms",
-                "decode_ms",
-                "first_event_ms",
-                "first_content_ms",
-                "finish_reason",
-            )
-        }
+        policy = self.config.get("thinking_" + self.current_stage, "inherit")
+        parser = StreamParser(
+            preview_limit=self.preview_limit,
+            initial_thinking=self.config.get("initial_thinking", False),
+            thinking_policy=policy,
+            started=started,
+        )
+        metrics = parser.metrics
         metrics["output_budget"] = max_tokens
         metrics["request_started_at"] = time.time()
         self.current_metrics = metrics
         self.last_result = None
-        policy = self.config.get("thinking_" + self.current_stage, "inherit")
-        splitter = ThinkingSplitter(
-            initial_thinking=self.config.get("initial_thinking", False)
-            and policy != "off",
-            reasoning_limit=self.preview_limit,
-        )
-        reasoning, reasoning_chars = "", 0
-        latest, completed, finish_reason = 0.0, False, None
+        latest = 0.0
 
         def publish(force=False):
             """Send the previews to on_update, at most every 0.8 seconds unless force is set."""
@@ -575,13 +749,8 @@ class ModelClient:
             if on_update is None or (not force and time.monotonic() - latest < 0.8):
                 return
             latest = time.monotonic()
-            metrics["content_chars"] = splitter.content_chars
-            metrics["reasoning_chars"] = reasoning_chars + splitter.reasoning_chars
-            on_update(
-                splitter.content,
-                (splitter.reasoning + reasoning)[-self.preview_limit :],
-                completed,
-            )
+            state = parser.state
+            on_update(state.content, state.reasoning, state.completed)
 
         try:
             self.check_cancelled()
@@ -612,111 +781,11 @@ class ModelClient:
             ):
                 payload["chat_template_kwargs"] = {"enable_thinking": policy == "on"}
             for line in self.stream_lines(payload):
-                if not line:
-                    continue
-                if not isinstance(line, str):
-                    try:
-                        line = line.decode("utf-8")
-                    except UnicodeDecodeError:
-                        raise ModelError(
-                            "invalid_stream_encoding",
-                            "The model stream is not valid UTF-8.",
-                        ) from None
-                if not line.startswith("data:"):
-                    continue
-                message = line[5:].strip()
-                if message == "[DONE]":
-                    completed = True
+                if parser.feed(line):
+                    publish()
+                if parser.done:
                     break
-                try:
-                    event = json.loads(message)
-                except ValueError:
-                    raise ModelError(
-                        "invalid_stream", "Malformed llama.cpp streaming response."
-                    ) from None
-                if not isinstance(event, dict) or "error" in event:
-                    raise ModelError(
-                        "stream_error", "The backend reported a streaming error."
-                    )
-                if metrics["first_event_ms"] is None:
-                    metrics["first_event_ms"] = (time.monotonic() - started) * 1000
-                collect_metrics(event, metrics)
-                choices = event.get("choices") or []
-                if not isinstance(choices, list):
-                    raise ModelError("invalid_stream", "Malformed streaming choices.")
-                for choice in choices:
-                    if not isinstance(choice, dict):
-                        raise ModelError(
-                            "invalid_stream", "Malformed streaming choice."
-                        )
-                    delta = choice.get("delta") or {}
-                    if not isinstance(delta, dict):
-                        raise ModelError("invalid_stream", "Malformed streaming delta.")
-                    part = delta.get("reasoning_content") or delta.get("reasoning")
-                    # A server-separated channel has already applied its template's
-                    # reasoning parser; do not classify its useful content a second time.
-                    if (
-                        isinstance(part, str)
-                        and part
-                        and self.config.get("initial_thinking")
-                    ):
-                        splitter.inside_think = False
-                    if isinstance(delta.get("content"), str):
-                        splitter.feed(delta["content"])
-                        if (
-                            splitter.content_parts
-                            and metrics["first_content_ms"] is None
-                        ):
-                            metrics["first_content_ms"] = (
-                                time.monotonic() - started
-                            ) * 1000
-                    if isinstance(part, str):
-                        reasoning_chars += len(part)
-                        reasoning = (reasoning + part)[-self.preview_limit :]
-                    if choice.get("finish_reason"):
-                        finish_reason = choice["finish_reason"]
-                if splitter.content_chars > 4_000_000:
-                    raise ModelError(
-                        "output_too_large",
-                        "The generated response exceeded the safety limit.",
-                    )
-                publish()
-            splitter.finish()
-            # A trailing partial tag is ordinary text once finish() flushes it.
-            if splitter.content_chars > 4_000_000:
-                raise ModelError(
-                    "output_too_large",
-                    "The generated response exceeded the safety limit.",
-                )
-            metrics["finish_reason"] = (
-                finish_reason
-                if finish_reason in ("stop", "length", "content_filter", "tool_calls")
-                else None
-            )
-            if finish_reason == "length":
-                raise ModelError(
-                    "output_limit",
-                    "Model response hit max_tokens or the context limit; start a new job with adjusted budgets.",
-                )
-            if finish_reason not in (None, "stop"):
-                raise ModelError(
-                    "unsupported_finish",
-                    "The backend returned an unsupported completion reason.",
-                )
-            if not completed and finish_reason is None:
-                raise ModelError(
-                    "incomplete_stream", "llama.cpp stream closed before completion."
-                )
-            completed = True
-            metrics["stop_category"] = (
-                "stop" if finish_reason == "stop" else "done_without_reason"
-            )
-            answer = splitter.content.strip()
-            if not answer:
-                raise ModelError(
-                    "empty_output",
-                    "Model returned empty content; start a new job with adjusted budgets.",
-                )
+            answer = parser.finish()
             publish(force=True)
             self.last_result = CompletionResult(
                 answer, cast(CompletionMetrics, metrics)
@@ -733,8 +802,7 @@ class ModelClient:
             raise
         finally:
             metrics["request_ms"] = (time.monotonic() - started) * 1000
-            metrics["content_chars"] = splitter.content_chars
-            metrics["reasoning_chars"] = reasoning_chars + splitter.reasoning_chars
+            parser.update_counts()
 
     def complete(
         self,
