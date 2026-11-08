@@ -102,9 +102,13 @@ class Worker:
         self._wakeup.set()
 
     def notify_cancelled(self, job_id):
-        """Make a cancellation already committed to SQLite visible to the running job."""
+        """Validate a committed cancellation against the captured execution signal."""
         signal = self._signals.get(job_id)
-        if signal is not None:
+        # Capture before the SQLite read: a delayed notification must see a
+        # still-persisted cancellation. If the attempt ends and another starts
+        # after that read, setting this retained object cannot signal the new
+        # attempt. Never look up the signal again after validating the flag.
+        if signal is not None and self.store.read_cancellation(job_id):
             signal.event.set()
         self.wake()
 

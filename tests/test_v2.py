@@ -655,7 +655,11 @@ class V2Tests(unittest.TestCase):
                 self.assertEqual(
                     self.client.post(f"/api/jobs/{job_id}/cancel").status_code, 202
                 )
-                observed.append((cancellation_requested(job_id), reads.call_count))
+                # The API validates its notification; streaming does not reread.
+                self.assertEqual(reads.call_count, 2)
+                reads.reset_mock()
+                checks = [cancellation_requested(job_id) for _ in range(500)]
+                observed.append((checks[-1], reads.call_count))
             raise Cancelled()
 
         runner = Worker(app.store, analyze)
@@ -665,8 +669,9 @@ class V2Tests(unittest.TestCase):
             patch.object(worker, "CANCEL_RECHECK_SECONDS", 3600),
         ):
             runner.run_claimed(identifier)
-        # 500 checks open SQLite once; the API request is then seen without a new read.
-        self.assertEqual(observed, [(False, 1), (True, 1)])
+        # Streaming reads once before cancellation and never after its signal;
+        # the additional validation read belongs to the API request only.
+        self.assertEqual(observed, [(False, 1), (True, 0)])
         self.assertEqual(app.store.get_job(identifier)["status"], "cancelled")
         self.assertEqual(runner._signals, {})
 
