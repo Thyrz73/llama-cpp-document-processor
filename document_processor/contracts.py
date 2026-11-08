@@ -7,6 +7,22 @@ and decoding JSON still follows the existing config/store/transport validation.
 from typing import NotRequired, Required, TypedDict
 
 
+class ConfigurationRevision(TypedDict):
+    """One verified private snapshot from a job's persisted history."""
+
+    revision: int
+    fingerprint: str
+    snapshot: dict[str, object]
+
+
+class ArtifactHistory(TypedDict):
+    """A consistent, bounded view for artifact compatibility checks."""
+
+    original: dict[str, object]
+    current: ConfigurationRevision
+    previous: list[ConfigurationRevision]
+
+
 class ExtractionSettings(TypedDict):
     enabled: bool
     languages: str

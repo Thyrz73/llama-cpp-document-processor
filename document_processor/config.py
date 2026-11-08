@@ -24,6 +24,9 @@ INTEGER_LIMITS = {
     "step_timeout_seconds": (1, 86400),
 }
 RESUME_BUDGETS = {"analysis_tokens", "merge_tokens", "final_tokens"}
+# These describe validation/UI state only. Keep profile, prompt, version,
+# extraction, context and unknown fields in the exact semantic comparison.
+ARTIFACT_METADATA = {"warnings", "customized"}
 
 
 class ConfigurationError(ValueError):
@@ -48,6 +51,32 @@ def fingerprint(value: object) -> str:
         allow_nan=False,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def compatible_artifact_config(
+    previous: Mapping[str, object], current: Mapping[str, object]
+) -> bool:
+    """Allow only valid, nondecreasing output budgets and known UI metadata.
+
+    This is only a configuration gate. Exact step dependencies, source,
+    backend identity and content must still be verified by the artifact reader.
+    Never use this reduced comparison as a storage/configuration fingerprint.
+    """
+    for name in RESUME_BUDGETS:
+        before, after = previous.get(name), current.get(name)
+        minimum, maximum = INTEGER_LIMITS[name]
+        if (
+            type(before) is not int
+            or type(after) is not int
+            or not minimum <= before <= after <= maximum
+        ):
+            return False
+    ignored = RESUME_BUDGETS | ARTIFACT_METADATA
+    return fingerprint(
+        {key: value for key, value in previous.items() if key not in ignored}
+    ) == fingerprint(
+        {key: value for key, value in current.items() if key not in ignored}
+    )
 
 
 def parse_options(raw: object) -> dict[str, Any]:

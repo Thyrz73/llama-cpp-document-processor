@@ -22,7 +22,7 @@ from pathlib import Path
 
 from . import database
 from .config import fingerprint, increase_budgets, public_config
-from .contracts import PublicJobConfig
+from .contracts import ArtifactHistory, ConfigurationRevision, PublicJobConfig
 from .errors import Cancelled, ProcessingError
 from .observability import event
 from .previews import PreviewCache
@@ -34,6 +34,8 @@ SOURCE_FILE = "source.pdf"
 PREVIEW_FILE = "live_preview.json"
 # More than two visible history pages; retain only sanitized public fields.
 PUBLIC_CONFIG_CACHE_SIZE = 256
+# Hard ceiling for cross-revision artifact lookup, including revision 0.
+MAX_ARTIFACT_REVISIONS = 32
 
 # Columns that update_job() may change; every other column is fixed at creation.
 UPDATABLE_COLUMNS = {
@@ -739,6 +741,54 @@ class JobStore:
                 raise LookupError("Job attempt not found.")
             row = self._config_row(con, job_id, run["revision"])
         return None if row is None else self._decode_config(row)
+
+    def load_artifact_history(
+        self, job_id: str, *, revision: int, limit: int = MAX_ARTIFACT_REVISIONS
+    ) -> ArtifactHistory:
+        """Verify this job's original, target and at most limit older snapshots.
+
+        Read them in one transaction, newest first, using the revision primary
+        key rather than scanning directories or loading the entire history.
+        Revision 0 consumes a slot when it fits; never search beyond the bound.
+        A corrupt stored snapshot raises config_integrity, as load_config does.
+        Selection is irrelevant: the caller must pin the intended revision.
+        """
+        if type(limit) is not int or not 1 <= limit <= MAX_ARTIFACT_REVISIONS:
+            raise ValueError("Invalid artifact revision lookup limit.")
+        with self.connect() as con:
+            con.execute("BEGIN")
+            original = self._config_row(con, job_id, 0)
+            current = self._config_row(con, job_id, revision)
+            if original is None or current is None:
+                raise LookupError("Job configuration snapshot not found.")
+            rows = con.execute(
+                "SELECT revision, snapshot, fingerprint FROM job_config_revisions "
+                "WHERE job_id=? AND revision<? ORDER BY revision DESC LIMIT ?",
+                (job_id, revision, limit),
+            ).fetchall()
+
+        def decode(row, number) -> ConfigurationRevision:
+            snapshot = self._decode_config(row)
+            if not isinstance(snapshot, dict):
+                raise ProcessingError(
+                    "config_integrity",
+                    "Stored job configuration failed its integrity check.",
+                )
+            return {
+                "revision": number,
+                "fingerprint": row["fingerprint"],
+                "snapshot": snapshot,
+            }
+
+        first = decode(original, 0)
+        previous = [decode(row, row["revision"]) for row in rows]
+        if revision > 0 and len(previous) < limit:
+            previous.append(first)
+        return {
+            "original": first["snapshot"],
+            "current": decode(current, revision),
+            "previous": previous,
+        }
 
     def attempt_count(self, job_id):
         """Return how many attempts were started for job_id."""
