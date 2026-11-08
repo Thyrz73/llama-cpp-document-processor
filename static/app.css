@@ -271,7 +271,10 @@ button {
   font-size: 0.82rem;
   font-weight: 550;
   line-height: 1.35;
-  transition: background-color 150ms, border-color 150ms, color 150ms;
+  transition:
+    background-color 150ms,
+    border-color 150ms,
+    color 150ms;
 }
 button:hover:not(:disabled) {
   background: var(--accent-soft);
@@ -385,7 +388,8 @@ button:disabled {
   height: 14px;
   flex-shrink: 0;
   background: currentColor;
-  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M1 3h1m3 0h9M1 8h1m3 0h9M1 13h1m3 0h9' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E") center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M1 3h1m3 0h9M1 8h1m3 0h9M1 13h1m3 0h9' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E")
+    center / contain no-repeat;
 }
 .job-status {
   display: flex;
@@ -415,7 +419,9 @@ button:disabled {
   background: var(--field);
   color: var(--accent);
   cursor: pointer;
-  transition: border-color 0.15s, background-color 0.15s;
+  transition:
+    border-color 0.15s,
+    background-color 0.15s;
 }
 .job-group-history input[type="checkbox"]::before {
   content: "";
@@ -491,7 +497,9 @@ button:disabled {
   border: 0;
   background: transparent;
   color: color-mix(in srgb, var(--danger) 80%, var(--muted));
-  transition: color 150ms, background-color 150ms;
+  transition:
+    color 150ms,
+    background-color 150ms;
 }
 .job-group-history .button-danger.button-icon:hover:not(:disabled) {
   color: var(--danger-hover);
@@ -531,7 +539,7 @@ button:disabled {
   margin-top: auto;
   padding-top: 16px;
 }
-.history-notice {
+.jobs-notice {
   padding: 12px;
   margin: 12px 0;
   border: 1px solid var(--border);

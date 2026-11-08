@@ -12,13 +12,27 @@
     <main class="report-page">
       <header class="panel report-header">
         <h1 class="name">{{ report_name }}</h1>
-        <nav class="actions report-navigation" aria-label="{{ t('Report actions') }}">
-          <a class="report-button button-secondary" href="{{ url_for('index') }}">{{ t('Back to analyses') }}</a>
-          {% if available %}<a class="report-button report-download" href="{{ url_for('report', job_id=job_id) }}" download>{{ t('Download') }}</a>{% endif %}
+        <nav
+          class="actions report-navigation"
+          aria-label="{{ t('Report actions') }}"
+        >
+          <a
+            class="report-button button-secondary"
+            href="{{ url_for('system.index') }}"
+            >{{ t('Back to analyses') }}</a
+          >
+          {% if available %}<a
+            class="report-button report-download"
+            href="{{ url_for('reports.report', job_id=job_id) }}"
+            download
+            >{{ t('Download') }}</a
+          >{% endif %}
         </nav>
       </header>
-      {% if message %}<p class="panel" role="status">{{ t(message) }}</p>{% endif %}
-      {% if content %}<article class="panel markdown-body">{{ content|safe }}</article>{% endif %}
+      {% if message %}<p class="panel" role="status">{{ t(message) }}</p>{%
+      endif %} {% if content %}<article class="panel markdown-body"
+        >{{ content|safe }}</article
+      >{% endif %}
     </main>
   </body>
 </html>

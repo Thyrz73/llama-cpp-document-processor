@@ -1,4 +1,4 @@
-"""Keep application profiles in one place, outside the user config mount."""
+"""Performance profiles: the token budgets a new job can choose in the interface."""
 
 PROFILE_VERSION = 2
 PROFILES = {
@@ -29,9 +29,16 @@ PROFILES = {
 }
 
 
-
 def catalog():
-    """Return independent public definitions; no profile is hardware-calibrated."""
-    return [{"id": name, "experimental": True, "calibrated": False,
-             "version": PROFILE_VERSION, "parameters": dict(values),
-             "concurrency": 1} for name, values in PROFILES.items()]
+    """Return the profiles as published by /api/profiles; none is calibrated for a given machine."""
+    return [
+        {
+            "id": name,
+            "experimental": True,
+            "calibrated": False,
+            "version": PROFILE_VERSION,
+            "parameters": dict(values),
+            "concurrency": 1,
+        }
+        for name, values in PROFILES.items()
+    ]

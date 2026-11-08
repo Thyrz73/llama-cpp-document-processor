@@ -6,5 +6,6 @@
   } catch (_) {
     // Keep the light default when browser storage is unavailable.
   }
-  document.documentElement.dataset.theme = preferred === "dark" ? "dark" : "light";
+  document.documentElement.dataset.theme =
+    preferred === "dark" ? "dark" : "light";
 })();

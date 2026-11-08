@@ -1,5 +1,12 @@
 """Versioned task templates; snapshots retain these strings for safe retries."""
 
+import re
+
+from .contracts import JobSnapshot
+from .report_text import deterministic_language as deterministic_language
+from .report_text import is_french as is_french
+from .report_text import report_header as report_header
+
 PROMPT_VERSION = 4
 TEMPLATES = {
     "section": (
@@ -68,36 +75,101 @@ TEMPLATES = {
 }
 
 
-def language_instruction(language):
-    """Keep report language independent of the browser's interface language."""
+def language_instruction(language: str) -> str:
+    """Return the sentence that sets the report language.
+
+    "auto" asks for the language of the user's request; "fr" and "en" are
+    spelled out, and any other value is used as a language name.
+    """
     if language == "auto":
         return "Write in the same language as the user's request."
     return f"Write in { {'fr': 'French', 'en': 'English'}.get(language, language) }."
 
 
-def instruction(config, stage, question, extra=""):
-    """Build an instruction exclusively from the immutable job snapshot."""
-    detail = {"concise": "Be concise without losing essential evidence.",
-              "standard": "Use a balanced level of detail.",
-              "detailed": "Explain the documented methods and evidence in detail."}
-    text = config["templates"][stage] + " " + language_instruction(config["report_language"])
+def instruction(config: JobSnapshot, stage: str, question: str, extra: str = "") -> str:
+    """Build the instruction of one generation stage from the job snapshot.
+
+    It combines the stage's task template, the report language, the detail
+    level (final stage only), the user's request and extra.
+    """
+    detail = {
+        "concise": "Be concise without losing essential evidence.",
+        "standard": "Use a balanced level of detail.",
+        "detailed": "Explain the documented methods and evidence in detail.",
+    }
+    text = (
+        config["templates"][stage]
+        + " "
+        + language_instruction(config["report_language"])
+    )
     if stage == "final":
         text += " " + detail[config["detail_level"]]
     return text + "\nUser request: " + question + "\n" + extra
 
 
-def report_header(config, filename, pages, chunks, missing, ocr_pages):
-    """Localize metadata without changing the stable Markdown output filename."""
-    french = config["report_language"].lower() in ("fr", "french", "français")
-    title, page_label, chunk_label = (("Analyse de", "Pages PDF", "sections analysées")
-                                     if french else ("Analysis of", "PDF pages", "analyzed chunks"))
-    # A filename is untrusted text even though the browser renders it safely.
-    filename = filename.replace("\n", " ").replace("\r", " ").replace("<", "&lt;").replace(">", "&gt;")
-    header = f"# {title} {filename}\n\n*{page_label}: {pages} — {chunk_label}: {chunks}.*\n\n"
-    if missing:
-        label = "Texte insuffisant après extraction/OCR aux pages" if french else "Insufficient text after extraction/OCR on pages"
-        header += f"> {label}: {', '.join(map(str, missing))}.\n\n"
-    if ocr_pages:
-        label = "OCR utilisé aux pages" if french else "OCR used on pages"
-        header += f"*{label}: {', '.join(map(str, ocr_pages))}.*\n\n"
-    return header
+def resolve_report_language(language: str, question: str) -> str:
+    """Choose fr/en for deterministic text of a new job, using only its request.
+
+    Explicit settings take precedence. For auto, compare distinct common
+    French and English request words; ties and unrecognized requests use en.
+    This is a small heuristic, not PDF language detection. Save the result
+    in the snapshot so retries never need to run the heuristic again.
+    """
+    if language != "auto":
+        return "fr" if is_french(language) else "en"
+    words = set(re.findall(r"[^\W\d_]+", question.casefold()))
+    french = set(
+        [
+            "analysez",
+            "analyser",
+            "résume",
+            "résumez",
+            "résumer",
+            "résumé",
+            "synthèse",
+            "décris",
+            "décrivez",
+            "explique",
+            "expliquez",
+            "le",
+            "la",
+            "les",
+            "des",
+            "du",
+            "ce",
+            "cette",
+            "ces",
+            "un",
+            "une",
+            "et",
+            "dans",
+            "avec",
+            "pour",
+            "méthodes",
+            "résultats",
+            "conclusions",
+        ]
+    )
+    english = set(
+        [
+            "analyze",
+            "summarize",
+            "summarise",
+            "summary",
+            "describe",
+            "explain",
+            "the",
+            "this",
+            "these",
+            "a",
+            "an",
+            "and",
+            "in",
+            "with",
+            "for",
+            "methods",
+            "results",
+            "conclusions",
+        ]
+    )
+    return "fr" if len(words & french) > len(words & english) else "en"

@@ -8,7 +8,7 @@ There is no authentication or per-user isolation. Browser POSTs from another ori
 
 | Method and path | Behavior |
 | --- | --- |
-| `GET /api/health` | Web app liveness only; no model or worker check |
+| `GET /api/health` | Web app liveness and application version; no model or worker check |
 | `GET /api/jobs` | `jobs`: latest 100; `has_active_jobs`: activity across the whole queue |
 | `GET /api/jobs/<id>` | Job status, progress, phase, question, filename and public configuration |
 | `POST /api/jobs` | Multipart PDF upload; returns 201 with ID, queued status and configuration |
@@ -22,13 +22,17 @@ There is no authentication or per-user isolation. Browser POSTs from another ori
 | `GET /api/jobs/<id>/metrics` | Attempts, step records and summary counts |
 | `GET /api/profiles` | Profiles, environment defaults and cached backend capabilities |
 | `POST /api/config/preview` | JSON options; returns preliminary configuration without creating a job |
-| `GET /api/diagnostics` | Read-only backend inspection, cached for 30 seconds; no inference |
+| `GET /api/diagnostics` | Read-only backend inspection, cached for 30 seconds (5 seconds for failures/unknown context); no inference |
 
 Missing jobs return 404. Report access returns 409 unless the job is done and 404 if the file is missing or outside its authorized directory. Empty reports download as empty Markdown and show a message in the reader. Downloads keep `text/markdown; charset=utf-8` and set attachment `filename` and UTF-8 `filename*` parameters. The internal filename remains `rapport_final.md`.
 
+Health returns HTTP 200 with `{"status":"ok","version":"2.0.0"}`. The additive `version` field comes from `document_processor.__version__`; `status` and liveness semantics are unchanged. It does not check SQLite, the worker or llama.cpp. Clients should tolerate additional JSON fields.
+
 The reader escapes raw HTML, rejects executable link schemes, disables images and sends a restrictive Content Security Policy. Previews over 1 MiB return an HTML page with status 413 and an original download link. The reader also provides localized HTML messages for missing, unreadable and unfinished reports. Download errors retain the JSON API format. No arbitrary file or intermediate artifact route is exposed.
 
-Job responses additionally include `report_name` (null for old jobs until first report access), `report_available` for completed jobs, and `question_custom` (`1` for explicitly customized instructions, `0` for known defaults, null when historical origin is unknown). `question` preserves the original submitted text, including whitespace; the model still receives the same trimmed instructions as before. Configuration snapshots and system prompts remain private.
+Job responses additionally include `report_name` (null for old jobs until first report access), `report_available` for completed jobs, and `question_custom` (`1` for explicitly customized instructions, `0` for known default instructions, including older jobs whose saved request is a default, null when an older job's origin is unknown). `question` preserves the original submitted text, including whitespace; the model still receives the same trimmed instructions as before. Configuration snapshots and system prompts remain private.
+
+`GET /api/jobs` caches only immutable public configurations by job ID and stored fingerprint, with a process-local limit of 256 entries. The response format is unchanged: job state and `has_active_jobs` are always fresh, including active jobs outside the latest 100. Fingerprint changes, snapshot creation, deletion and startup/migration recovery invalidate cached observations. Private snapshots are loaded only on a cache miss; individual job details continue to verify snapshot integrity.
 
 ## Creating a job
 
@@ -54,15 +58,21 @@ Options:
 
 Reasoning policies are `inherit`, `on` or `off`; on/off requires an administrator-configured adapter. Context ceilings, endpoints, credentials and concurrency cannot be set per job. Unsupported options and invalid values return 400.
 
-Preview accepts the options object directly as JSON. Both preview and creation use cached capabilities without probing the backend. The full prompt is checked against context limits before generation.
+Preview accepts the options object directly as JSON. Profiles, preview and creation use the same cached capabilities without probing the backend. Successful observations with a known context expire after 30 seconds; failures and unknown contexts expire after 5 seconds. Reads do not extend expiration. Diagnostics reuse unexpired observations. These TTL observations are for display and preliminary validation, never artifact compatibility. The full prompt is checked against context limits before generation.
+
+The cache is private, in memory, and scoped to the backend URL and credentials. Failed or malformed job requests, tokenization or generation invalidate it; cancellation and configuration validation do not. Context stays unknown after an unavailable or invalid response. Diagnostics can be stale for up to the applicable TTL. No background polling or disk persistence is used.
+
+Every analysis attempt separately verifies `/v1/models` and `/props` afresh, before binding or reusing artifacts. This observation supplies the attempt's client and refreshes the display cache without a second inspection. A changed identity refuses reuse with `identity_changed`. Reuse also requires known model, template and engine-sampling hashes in both the existing manifest and the fresh observation; unknown fields are never upgraded to make old artifacts compatible. Historical snapshots and manifests remain unchanged on refusal. A backend with limited properties can still run a new analysis, but its artifacts cannot be reused if these identity fields are unverifiable. The backend must remain stable throughout an attempt; there is no continuous identity monitoring.
 
 ## Progress, retries and cancellation
 
 Statuses are `queued`, `running`, `done`, `failed`, `cancelled`. `progress_percent` measures workflow progress, not remaining time; done is always shown as 100. `phase_code` and `phase_args` support interface translation.
 
+Failed jobs store a stable `error_code` and a displayable `error`, for example `encrypted_pdf`, `page_limit`, `no_usable_text`, `ocr_missing`, `deadline` or `identity_changed`. The interface translates known codes. Unexpected internal errors use `analysis_failed` with a generic message; their details are logged without private text.
+
 Retry returns 200 when queued, 409 for an incompatible status or an exhausted attempt limit, and 400 for a nonempty body. It preserves saved budgets and prompts. Jobs predating snapshots get `legacy_recomputed` and current settings when processed. Create a new job to use new settings.
 
-Cancel returns 202 when accepted, 200 if already cancelled and 409 for done/failed jobs. Queued jobs become cancelled immediately. Running jobs keep their status with `cancel_requested=true` until cancellation takes effect. OCR finishes or times out first; remote engine release depends on the backend.
+Cancel returns 202 when accepted, 200 if already cancelled and 409 for done/failed jobs. Queued jobs become cancelled immediately. Running jobs keep their status with `cancel_requested=true` until cancellation takes effect. The running job sees an accepted request at its next cooperative check: each phase change, tokenizer call or streamed token, and every 0.2 seconds while it waits for the model. These checks are answered in memory; SQLite is reread at most once per second. OCR finishes or times out first; remote engine release depends on the backend.
 
 After cancellation or a generation deadline, the next generation waits cooperatively for the previous HTTP reader to exit. Cleanup does not cause subsequent jobs to fail, and cancellation remains available while waiting. The next generation's deadline starts after this wait; request/step duration metrics still include elapsed waiting time. If response headers have not arrived, cleanup may wait for the existing network timeout.
 
@@ -83,6 +93,8 @@ Both endpoints reuse the existing same-origin POST protection and the applicatio
 ## Live output, metrics and diagnostics
 
 Live output keeps only the latest pass, with bounded content and reasoning. The `reasoning` field is empty unless `?include_reasoning=true` is supplied. Only emitted reasoning is available; it may be incomplete. Disabling live output leaves generation streaming enabled.
+
+The live route reads the process-local preview cache first, then the compatible `live_preview.json` checkpoint. In the current shared Flask/worker process, memory updates at the existing 0.8-second stream cadence. Disk is written at generation start/end, phase/pass transitions and every 20 seconds while text or reasoning is active. A separate reader process sees those checkpoints; the route never caches disk reads. Failed/cancelled generations preserve the latest published partial output as inactive. Restart recovery and retries reject previous-attempt output as a current stream. The checkpoint's internal attempt identifier is omitted from the public JSON; persistent pipeline artifacts are unchanged.
 
 Metrics accept `?limit=200&before=<step-id>`: limit is 1–500, steps are newest first, and `next_before` identifies the next page. Responses include up to 100 attempts, queue/execution durations, step reuse/failure status and available backend measurements.
 

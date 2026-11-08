@@ -14,9 +14,17 @@ jobs:
       - name: Install Tesseract
         run: sudo apt-get update && sudo apt-get install -y tesseract-ocr tesseract-ocr-eng tesseract-ocr-fra
       - name: Install Python dependencies
-        run: python -m pip install -r requirements.txt
-      - name: Run tests
-        run: python -m unittest discover -s tests -v
+        run: python -m pip install --require-hashes -r requirements-dev.txt
+      - name: Check Python formatting
+        run: ruff format --check .
+      - name: Lint Python
+        run: ruff check .
+      - name: Type-check Python
+        run: mypy
+      - name: Run tests with Python coverage
+        run: python -m coverage run -m unittest discover -s tests -v
+      - name: Check Python coverage
+        run: python -m coverage report
       - name: Validate Python syntax
         run: python -m compileall -q app.py document_processor scripts tests
       - name: Check benchmark dry run
@@ -24,12 +32,22 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+          cache: npm
+      - name: Install frontend development tools
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Check frontend formatting
+        run: npm run format:check
       - name: Run browser polling tests
-        run: node tests/test_polling.js
+        run: npm test
       - name: Validate frontend syntax and Compose
         run: |
-          node --check static/app.js
-          node --check static/report.js
+          for file in static/js/*.js static/report.js tests/test_polling.js tests/helpers/*.js; do node --check "$file"; done
           docker compose config --quiet
       - name: Check application packaging
         run: docker build -t document-processor:test .
+      - name: Smoke-test runtime image without a model
+        run: |
+          docker run --rm -i --init --network none \
+            --memory 512m --memory-swap 512m --cpus 0.75 --pids-limit 64 \
+            -e OMP_THREAD_LIMIT=1 \
+            document-processor:test python - < tests/smoke_container.py

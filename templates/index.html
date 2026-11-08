@@ -9,8 +9,7 @@
     <script>
       // Apply the remembered theme before rendering to avoid a color flash.
       (function () {
-        const preferred =
-          localStorage.getItem("document-processor-theme");
+        const preferred = localStorage.getItem("document-processor-theme");
         document.documentElement.dataset.theme =
           preferred === "dark" ? "dark" : "light";
       })();
@@ -54,8 +53,8 @@
           class="muted"
           data-i18n="Analyze large PDFs locally with your llama.cpp model. Jobs continue on your server even if you close the browser."
         >
-          Analyze large PDFs locally with your llama.cpp model. Jobs continue
-          on your server even if you close the browser.
+          Analyze large PDFs locally with your llama.cpp model. Jobs continue on
+          your server even if you close the browser.
         </p>
       </header>
       <section class="panel">
@@ -317,7 +316,13 @@ Analyze this entire document: objectives, methods, results, key figures, assumpt
           </button>
         </div>
         <div id="jobsError" class="error" role="status" hidden></div>
-        <div id="historyNotice" class="history-notice" role="status" aria-live="polite" hidden></div>
+        <div
+          id="jobsNotice"
+          class="jobs-notice"
+          role="status"
+          aria-live="polite"
+          hidden
+        ></div>
         <div id="jobs">Loading…</div>
       </section>
       <section class="panel">
@@ -348,18 +353,38 @@ Analyze this entire document: objectives, methods, results, key figures, assumpt
         generation preview · Reports persist on disk.
       </footer>
     </main>
-    <dialog id="deleteDialog" aria-labelledby="deleteTitle" aria-describedby="deleteMessage">
+    <dialog
+      id="deleteDialog"
+      aria-labelledby="deleteTitle"
+      aria-describedby="deleteMessage"
+    >
       <h2 id="deleteTitle"></h2>
       <p id="deleteMessage"></p>
       <p id="deleteDocument" class="name"></p>
       <div class="dialog-actions">
-        <button id="deleteCancel" type="button" class="button-secondary" data-i18n="Cancel" autofocus>Cancel</button>
-        <button id="deleteConfirm" type="button" class="button-danger" data-i18n="Delete">Delete</button>
+        <button
+          id="deleteCancel"
+          type="button"
+          class="button-secondary"
+          data-i18n="Cancel"
+          autofocus
+          >Cancel</button
+        >
+        <button
+          id="deleteConfirm"
+          type="button"
+          class="button-danger"
+          data-i18n="Delete"
+          >Delete</button
+        >
       </div>
     </dialog>
     <script id="translations" type="application/json">
       {{ translations|tojson }}
     </script>
-    <script src="{{ url_for('static', filename='app.js') }}" defer></script>
+    <script
+      type="module"
+      src="{{ url_for('static', filename='js/main.js') }}"
+    ></script>
   </body>
 </html>

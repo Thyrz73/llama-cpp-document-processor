@@ -1,0 +1,8 @@
+# Development tools; runtime versions are constrained to the deployed lock.
+-c requirements.txt
+-r requirements.in
+coverage>=7.17,<8
+mypy>=2.4,<3
+ruff>=0.17,<0.18
+types-requests
+types-waitress

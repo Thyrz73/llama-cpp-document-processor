@@ -1,24 +1,88 @@
-"""Sequential, resumable document processing with explicit artifact dependencies."""
+"""Analyze one job: extract its PDF, write notes per section, merge them, save the report.
 
+JobRun.execute() runs these steps in order:
+
+1. prepare  check the llama.cpp backend and bind its identity to the artifacts;
+2. extract  read the PDF text, with OCR when needed (extraction.py);
+3. split    group the pages into sections that fit the section token budget;
+4. analyze  ask the model for factual notes on each section;
+5. merge    consolidate notes, level by level, until they fit the final prompt;
+6. write    ask the model for the final Markdown report;
+7. save     publish the report and mark the job done.
+
+Steps 2 to 6 save their results as verified artifacts (artifacts.py), so a
+retry reuses finished work instead of calling the model again. Mechanical
+checks (reliability.py) run on every generated text, including reused ones.
+"""
+
+import copy
 import json
 import logging
 import re
 import time
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from typing import Any
 
-from . import jobs, prompts, reliability
+from . import extraction, prompts, reliability
+from .artifacts import Artifacts
 from .config import fingerprint
-from .model_client import Cancelled, ModelError
-from .observability import event
+from .contracts import AnalysisNote, Chunk, ExtractionResult, JobSnapshot
+from .errors import Cancelled, ProcessingError, WorkerStopping
+from .files import atomic_json, atomic_text, file_hash
+from .jobs import PREVIEW_FILE, SOURCE_FILE, JobStore, now
+from .model_client import ModelClient
+from .observability import event, failure, log
+from .previews import CHECKPOINT_SECONDS
+from .report_text import REPORT_FILE
 from .reports import report_filename
 
+# Stages that call the model. Their artifacts also depend on the text transport
+# and reliability versions, so fixing either forces a fresh generation.
+GENERATION_STAGES = ("section", "merge", "final")
+# Name of the final report artifact; reliability.report_warnings() reads its checks.
+FINAL_ARTIFACT = REPORT_FILE
+# A merge consolidates at most this many neighbouring notes.
+MERGE_GROUP_SIZE = 4
+# The final prompt receives at most this many notes.
+MAX_FINAL_NOTES = 4
+# Every merge level must reduce the number of notes, so this limit is only a
+# safety net: 32 levels of groups of 4 already exceed any realistic PDF.
+MAX_MERGE_LEVELS = 32
+# Ordinary extraction updates share one persistence budget (SQLite, preview and logs).
+EXTRACTION_PROGRESS_SECONDS = 1.0
+# Any number in raw text, for the historical "missing numeric items" counter.
+RAW_NUMBER = re.compile(r"(?<!\w)[+-]?\d+(?:[.,]\d+)?")
 
-def plan_groups(notes, fits, max_group=4):
+
+@dataclass(frozen=True)
+class Runtime:
+    """Everything the pipeline needs from the application.
+
+    app.analyze_job() builds one for each run from the deployment settings;
+    tests can build their own to run the pipeline without the web app.
+    """
+
+    store: JobStore
+    # Creates a configuration snapshot for jobs saved before snapshots existed.
+    new_snapshot: Callable[[dict[str, object]], JobSnapshot]
+    # Returns a client for the deployment's llama.cpp server, bound to a job configuration.
+    model_client: Callable[[JobSnapshot], ModelClient]
+    # Tells whether the job's cancellation was requested; called very often.
+    cancellation_requested: Callable[[str], bool]
+    # Whether to write live_preview.json, and how many characters each channel keeps.
+    live_output: bool
+    preview_chars: int
+
+
+def plan_groups(notes, fits, max_group=MERGE_GROUP_SIZE):
     """Partition in order, never silently dropping a note that does not fit.
 
     A singleton may pass through unchanged, but at least one group must reduce
     the note count. The caller enforces a level/call budget as a second guard.
     """
-    groups, current = [], []
+    groups: list[list[Any]] = []
+    current: list[Any] = []
     for note in notes:
         candidate = current + [note]
         if current and (len(candidate) > max_group or not fits(candidate)):
@@ -29,292 +93,764 @@ def plan_groups(notes, fits, max_group=4):
     if current:
         groups.append(current)
     if not any(len(group) > 1 for group in groups):
-        raise ModelError("merge_impossible", "Notes cannot be merged within the context budget. Start a new job with adjusted budgets.")
+        raise ProcessingError(
+            "merge_impossible",
+            "Notes cannot be merged within the context budget. Start a new job with adjusted budgets.",
+        )
     return groups
 
 
-def run(job_id, runtime):
-    """Execute through injected application services, allowing isolated regression tests."""
-    r = runtime
-    directory = r.job_dir(job_id)
-    job = r.get_job(job_id)
-    question = job["question"].strip()
-    config = jobs.load_config(r.db_conn, job_id)
-    if config is None:
-        # Historic artifacts remain untouched. Their original settings are unknowable.
-        config = r.new_snapshot({})
-        config["warnings"].append("legacy_recomputed")
-        config["source_hash"] = jobs.file_hash(directory / "source.pdf")
-        with r.db_conn() as con:
-            jobs.save_config(con, job_id, config)
-    if config.get("pipeline_version") != 2:
-        raise ModelError("pipeline_incompatible", "This job requires a different pipeline version. Start a new analysis.")
-    if jobs.file_hash(directory / "source.pdf") != config["source_hash"]:
-        raise ModelError("source_changed", "The source PDF changed. Start a new analysis.")
-    with r.db_conn() as con:
-        attempts = con.execute("SELECT COUNT(*) FROM job_runs WHERE job_id=?", (job_id,)).fetchone()[0]
-    if attempts >= config["max_attempts"]:
-        raise ModelError("retry_limit", "The retry limit was reached. Start a new analysis.")
-    artifacts = jobs.Artifacts(directory, config, r.atomic_json, r.atomic_text)
-    recorder = jobs.Recorder(r.db_conn, job_id, job.get("queued_at") or job["created_at"])
-    model = r.ModelClient(config)
-    model.cancel_check = lambda: r.cancellation_requested(job_id)
-    calls = 0
-    preview_path = directory / "live_preview.json"
-    phase_args = {}
-    quality = {"version": reliability.VERSION, "steps": {}}
-    last_percent = None
+def run(job_id: str, runtime: Runtime) -> None:
+    """Analyze job_id with the services provided by runtime (see Runtime)."""
+    JobRun(job_id, runtime).execute()
 
-    def phase(code, label, percent=None, **args):
+
+class JobRun:
+    """One attempt to analyze one job."""
+
+    def __init__(self, job_id: str, runtime: Runtime) -> None:
+        """Load the job and refuse runs that cannot succeed before recording an attempt."""
+        self.job_id = job_id
+        self.runtime = runtime
+        self.store = runtime.store
+        self.directory = self.store.job_dir(job_id)
+        self.job = self.store.get_job(job_id)
+        self.question = self.job["question"].strip()
+        self.config = self._load_config()
+        if self.config.get("pipeline_version") != 2:
+            raise ProcessingError(
+                "pipeline_incompatible",
+                "This job requires a different pipeline version. Start a new analysis.",
+            )
+        if file_hash(self.directory / SOURCE_FILE) != self.config["source_hash"]:
+            raise ProcessingError(
+                "source_changed", "The source PDF changed. Start a new analysis."
+            )
+        if self.store.attempt_count(job_id) >= self.config["max_attempts"]:
+            raise ProcessingError(
+                "retry_limit", "The retry limit was reached. Start a new analysis."
+            )
+        self.artifacts = Artifacts(self.directory, self.config)
+        # Create the client before recording the attempt, so a failure here
+        # cannot leave an attempt that looks active forever.
+        self.model = runtime.model_client(self.config)
+        self.model.cancel_check = lambda: runtime.cancellation_requested(job_id)
+        self.recorder = self.store.start_attempt(
+            job_id, self.job.get("queued_at") or self.job["created_at"]
+        )
+        self.preview_path = self.directory / PREVIEW_FILE
+        self.preview_payload: dict[str, Any] | None = None
+        self.preview_persisted_at = float("-inf")
+        self.calls = 0
+        self.last_percent: int | None = None
+        self.extraction_phase: str | None = None
+        self.extraction_persisted_at = float("-inf")
+        self.phase_args: dict[str, Any] = {}
+        # Last stage label written by _phase(); previews reuse it without a database read.
+        self.phase_label = self.job["stage"]
+        self.quality: dict[str, Any] = {"version": reliability.VERSION, "steps": {}}
+        self.identity: dict[str, Any] | None = None  # set by _prepare()
+        self.evidence: dict[str, Any] | None = None  # set by _extract()
+        self._prepared_evidence: reliability.PreparedEvidence | None = None
+        self._generation_audit: (
+            tuple[str, tuple[int, ...], int, dict | None, dict] | None
+        ) = None
+
+    def execute(self):
+        """Run every step, then record how the attempt ended and close the client."""
+        status = "failed"
+        try:
+            self._prepare()
+            extracted = self._extract()
+            chunks = self._split(extracted)
+            notes = self._analyze_sections(chunks)
+            final_instruction = prompts.instruction(
+                self.config,
+                "final",
+                self.question,
+                f"Pages with insufficient extracted/OCR text: {extracted['missing']}. "
+                f"OCR pages: {extracted['ocr_pages']}.",
+            )
+            notes, final_text, evidence_limit = self._merge_until_final_fits(
+                notes, final_instruction
+            )
+            final = self._write_final(
+                notes, final_text, evidence_limit, final_instruction, len(chunks)
+            )
+            self._save_report(final, extracted, len(chunks))
+            status = "done"
+            log.info(
+                "job_finished job_id=%s pages=%d chunks=%d calls=%d",
+                self.job_id,
+                extracted["page_count"],
+                len(chunks),
+                self.calls,
+            )
+        except WorkerStopping:
+            status = "interrupted"
+            raise
+        except Cancelled:
+            status = "cancelled"
+            raise
+        finally:
+            self.store.previews.discard(self.job_id)
+            model = self.model
+            self.recorder.provenance(
+                {
+                    **model.capabilities,
+                    "tokenization_calls": model.tokenization_calls,
+                    "tokenization_ms": model.tokenization_ms,
+                    "tokenization_cache_hits": model.tokenization_cache_hits,
+                    "generation_calls": self.calls,
+                }
+            )
+            self.recorder.finish(status)
+            model.session.close()
+
+    # Steps --------------------------------------------------------------------
+
+    def _load_config(self) -> JobSnapshot:
+        """Return the job's snapshot, creating one with current settings for older jobs."""
+        config: JobSnapshot | None = self.store.load_config(self.job_id)
+        if config is None:
+            # Historic artifacts remain untouched. Their original settings are unknowable.
+            config = self.runtime.new_snapshot({})
+            config["warnings"].append("legacy_recomputed")
+            config["source_hash"] = file_hash(self.directory / SOURCE_FILE)
+            self.store.save_config(self.job_id, config)
+        return config
+
+    def _prepare(self):
+        """Inspect the backend and refuse to reuse notes written by another model."""
+        self._phase("preparing", "Preparing document", 2)
+        capabilities = self.model.inspect_identity()
+        event(
+            "backend_checked",
+            job_id=self.job_id,
+            status=capabilities.get("status", "unknown"),
+        )
+        self.recorder.provenance(capabilities)
+        # A name is only a weak identity. Unknown fields remain unknown in diagnostics.
+        self.identity = {
+            "model_id_hash": fingerprint(self.model.model()),
+            "template_hash": capabilities.get("template_hash"),
+            "engine_sampling_hash": fingerprint(capabilities["sampling"])
+            if capabilities.get("sampling")
+            else None,
+            "version": capabilities.get("version"),
+        }
+        self.artifacts.bind_identity(self.identity)
+
+    def _extract(self) -> ExtractionResult:
+        """Read the PDF text (or reuse it) and build the source evidence ledger."""
+
+        def extract():
+            pages, count, missing, ocr = extraction.extract_pdf(
+                self.directory / SOURCE_FILE,
+                self.config["extraction"],
+                progress=self._extraction_progress,
+            )
+            return json.dumps(
+                {
+                    "pages": pages,
+                    "page_count": count,
+                    "missing": missing,
+                    "ocr_pages": ocr,
+                },
+                ensure_ascii=False,
+            )
+
+        extracted: ExtractionResult = json.loads(
+            self._step(
+                "extracted.json",
+                "extraction",
+                {
+                    "source": self.config["source_hash"],
+                    "extraction": self.config["extraction"],
+                },
+                extract,
+            )
+        )
+        evidence_dependencies = {
+            "extraction": fingerprint(extracted),
+            "version": reliability.VERSION,
+        }
+        evidence_json = self.artifacts.read(
+            "source_evidence.json", evidence_dependencies
+        )
+        if evidence_json is None:
+            evidence = reliability.build_evidence(
+                extracted["pages"],
+                extracted["page_count"],
+                extracted["missing"],
+                extracted["ocr_pages"],
+            )
+            evidence_json = json.dumps(evidence, ensure_ascii=False)
+            self.artifacts.write(
+                "source_evidence.json", evidence_json, evidence_dependencies
+            )
+        self.evidence = json.loads(evidence_json)
+        self.store.update_job(self.job_id, pages=extracted["page_count"])
+        return extracted
+
+    def _extraction_progress(self, label: str) -> None:
+        """Persist page progress at most once per second, except at phase boundaries.
+
+        Keep every callback cancellable, even when its writes and logs are skipped.
+        The first/last page and every extraction/OCR transition bypass the timer.
+        """
+        matched = re.search(r"page (\d+)/(\d+)", label)
+        args = {"index": int(matched[1]), "total": int(matched[2])} if matched else {}
+        code = "ocr" if label.startswith("OCR") else "extraction"
+        current = time.monotonic()
+        last_page = bool(args) and args["index"] == args["total"]
+        if (
+            code == self.extraction_phase
+            and not last_page
+            and current - self.extraction_persisted_at < EXTRACTION_PROGRESS_SECONDS
+        ):
+            self.model.check_cancelled()
+            return
+        percent = 2 + round(5 * args.get("index", 0) / max(1, args.get("total", 1)))
+        self._phase(code, label, max(self.last_percent or 0, percent), **args)
+        self.extraction_phase = code
+        self.extraction_persisted_at = current
+
+    def _split(self, extracted: ExtractionResult) -> list[Chunk]:
+        """Group the pages into sections that fit the section token budget."""
+        self._phase("chunking", "Splitting document", 7)
+        budget = self.config["chunk_tokens"]
+        chunks: list[Chunk] = json.loads(
+            self._step(
+                "chunks.json",
+                "chunking",
+                {
+                    "extracted": fingerprint(extracted),
+                    "budget": budget,
+                    "identity": self.identity,
+                    "chunk_format_version": 3,
+                },
+                lambda: json.dumps(
+                    extraction.make_chunks(extracted["pages"], self.model, budget),
+                    ensure_ascii=False,
+                ),
+            )
+        )
+        if not chunks:
+            raise ProcessingError(
+                "empty_document", "Document contains no analyzable text."
+            )
+        self.store.update_job(
+            self.job_id, total_chunks=len(chunks), progress_percent=10
+        )
+        event("sections_ready", job_id=self.job_id, total_chunks=len(chunks))
+        return chunks
+
+    def _analyze_sections(self, chunks: Sequence[Chunk]) -> list[AnalysisNote]:
+        """Ask the model for factual notes on each section, in document order."""
+        notes: list[AnalysisNote] = []
+        total = len(chunks)
+        # _step invokes these callbacks synchronously before the next iteration.
+        for index, chunk in enumerate(chunks):
+            self._phase(
+                "section",
+                f"Analyzing section {index + 1}/{total}",
+                10 + round(70 * index / total),
+                index=index + 1,
+                total=total,
+                pages=chunk["pages"],
+            )
+            instruction = prompts.instruction(
+                self.config,
+                "section",
+                self.question,
+                f"Excerpt {index + 1} of {total}. Physical PDF pages: {chunk['pages']}. "
+                "Page references inside source prose are not extraction metadata.",
+            )
+            name = f"analysis_{index:04d}.md"
+            answer = self._step(
+                name,
+                "section",
+                {
+                    "chunk": fingerprint(chunk),
+                    "instruction": fingerprint(instruction),
+                    "identity": self.identity,
+                },
+                lambda: self._generate(
+                    "section",
+                    instruction,  # noqa: B023
+                    chunk["text"],  # noqa: B023
+                    self.config["analysis_tokens"],
+                    chunk["pages"],  # noqa: B023
+                ),
+            )
+            check = self._check(name, answer, chunk["pages"], [index])
+            notes.append(
+                reliability.note(
+                    answer,
+                    chunk["pages"],
+                    [index],
+                    (issue["code"] for issue in check["issues"]),
+                )
+            )
+            self.store.update_job(
+                self.job_id,
+                done_chunks=index + 1,
+                progress_percent=10 + round(70 * (index + 1) / total),
+            )
+        return notes
+
+    def _merge_until_final_fits(self, notes, final_instruction):
+        """Merge notes level by level until the final prompt fits them.
+
+        Return (notes, final_text, final_evidence_limit). The loop ends as soon
+        as at most MAX_FINAL_NOTES notes fit the final prompt. It cannot run
+        forever: every level must reduce the number of notes (see
+        _merge_level) and MAX_MERGE_LEVELS bounds the number of levels.
+        """
+        merge_instruction = prompts.instruction(self.config, "merge", self.question)
+        level = 0
+        while True:
+            self.model.current_stage = "final"
+            final_text, final_fits, final_evidence_limit = reliability.prepare_input(
+                notes,
+                self.evidence,
+                lambda text: self.model.fits(
+                    final_instruction, text, self.config["final_tokens"]
+                )[0],
+            )
+            if len(notes) <= MAX_FINAL_NOTES and final_fits:
+                return notes, final_text, final_evidence_limit
+            if len(notes) < 2 or level >= MAX_MERGE_LEVELS:
+                raise ProcessingError(
+                    "merge_impossible",
+                    "The final report cannot fit the configured context.",
+                )
+            notes = self._merge_level(notes, level, merge_instruction)
+            level += 1
+
+    def _merge_level(self, notes, level, merge_instruction):
+        """Consolidate neighbouring notes once; return the shorter list of notes."""
+        self.model.current_stage = "merge"
+        evidence_limits = {}
+
+        def group_fits(group):
+            """Tell plan_groups whether a group fits the merge prompt; remember its evidence limit."""
+            _, fits, limit = reliability.prepare_input(
+                group,
+                self.evidence,
+                lambda text: self.model.fits(
+                    merge_instruction, text, self.config["merge_tokens"]
+                )[0],
+            )
+            evidence_limits[fingerprint(group)] = limit
+            return fits
+
+        groups = plan_groups(notes, group_fits)
+        reduced = []
+        # _step invokes these callbacks synchronously before the next iteration.
+        for index, group in enumerate(groups):
+            if len(group) == 1:
+                reduced.append(group[0])
+                continue
+            self._phase(
+                "merge",
+                f"Merging level {level + 1}, group {index + 1}/{len(groups)}",
+                min(94, 81 + level * 4),
+                level=level + 1,
+                index=index + 1,
+                total=len(groups),
+            )
+            evidence_limit = evidence_limits[fingerprint(group)]
+            text = reliability.combined(group, self.evidence, evidence_limit)
+            name = f"merge_{level:02d}_{index:04d}.md"
+            source_pages = sorted({page for item in group for page in item["pages"]})
+            answer = self._step(
+                name,
+                "merge",
+                {
+                    "notes": fingerprint(group),
+                    "input": fingerprint(text),
+                    "instruction": fingerprint(merge_instruction),
+                    "identity": self.identity,
+                },
+                lambda: self._generate(
+                    "merge",
+                    merge_instruction,
+                    text,  # noqa: B023
+                    self.config["merge_tokens"],
+                    source_pages,  # noqa: B023
+                ),
+            )
+            merged = reliability.merge_note(answer, group)
+            check = self._check(
+                name, answer, merged["pages"], merged["sections"], evidence_limit
+            )
+            merged["warning_codes"] = sorted(
+                set(merged["warning_codes"])
+                | {issue["code"] for issue in check["issues"]}
+            )
+            reduced.append(merged)
+        if len(reduced) >= len(notes):
+            raise ProcessingError(
+                "merge_impossible", "The merge plan did not reduce its input."
+            )
+        return reduced
+
+    def _write_final(
+        self, notes, final_text, evidence_limit, final_instruction, chunk_count
+    ):
+        """Ask the model for the final Markdown report (or reuse it) and check it."""
+        self._phase("final", "Writing final report", 95)
+        source_pages = sorted({page for item in notes for page in item["pages"]})
+        final = self._step(
+            FINAL_ARTIFACT,
+            "final",
+            {
+                "notes": fingerprint(notes),
+                "input": fingerprint(final_text),
+                "instruction": fingerprint(final_instruction),
+                "identity": self.identity,
+            },
+            lambda: self._generate(
+                "final",
+                final_instruction,
+                final_text,
+                self.config["final_tokens"],
+                source_pages,
+            ),
+        )
+        self._check(
+            FINAL_ARTIFACT, final, source_pages, range(chunk_count), evidence_limit
+        )
+        return final
+
+    def _save_report(self, final, extracted, chunk_count):
+        """Publish the report with its header and warnings, then mark the job done.
+
+        A retry archives the previous report first. Marking the job done raises
+        Cancelled instead if a cancellation arrived in the meantime.
+        """
+        self._phase("saving", "Saving report", 99)
+        handle = self.recorder.start("saving", "report")
+        try:
+            header = prompts.report_header(
+                self.config,
+                self.job["filename"],
+                extracted["page_count"],
+                chunk_count,
+                extracted["missing"],
+                extracted["ocr_pages"],
+            )
+            report_path = self.directory / REPORT_FILE
+            if report_path.is_file():
+                archive = self.directory / "previous_reports"
+                archive.mkdir(exist_ok=True)
+                atomic_text(
+                    archive / (file_hash(report_path) + ".md"),
+                    report_path.read_text(encoding="utf-8"),
+                )
+            report_text = (
+                header
+                + final
+                + "\n"
+                + reliability.report_warnings(
+                    self.quality, prompts.deterministic_language(self.config)
+                )
+            )
+            atomic_text(report_path, report_text)
+            name = report_filename(final, self.job["filename"])
+            self.model.check_cancelled()
+            self.store.update_job(
+                self.job_id,
+                status="done",
+                stage="Analysis completed",
+                phase_code="done",
+                error="",
+                error_code="",
+                report_name=name,
+            )
+            event(
+                "report_saved",
+                job_id=self.job_id,
+                stage="saving",
+                filename=name,
+                bytes=report_path.stat().st_size,
+            )
+            self.recorder.end(handle, "done")
+        except WorkerStopping:
+            self.recorder.end(handle, "interrupted", {"stop_category": "interrupted"})
+            raise
+        except Cancelled:
+            self.recorder.end(handle, "cancelled", {"error_code": "cancelled"})
+            raise
+        except Exception:
+            self.recorder.end(handle, "failed", {"error_code": "report_save_failed"})
+            raise
+
+    # Helpers ------------------------------------------------------------------
+
+    def _phase(self, code, label, percent=None, **args):
         """Persist stable phase identifiers alongside the historical English label."""
-        nonlocal phase_args, last_percent
-        model.check_cancelled()
-        phase_args = args
+        self.model.check_cancelled()
+        self.phase_args, self.phase_label = args, label
         values = {"stage": label, "phase_code": code, "phase_args": json.dumps(args)}
-        if percent is not None and percent != last_percent:
+        if percent is not None and percent != self.last_percent:
             values["progress_percent"] = percent
-            last_percent = percent
-        r.update_job(job_id, **values)
+            self.last_percent = percent
+        self.store.update_job(self.job_id, **values)
         # Page extraction can be frequent: phase changes belong in INFO, page detail in DEBUG.
-        event("job_phase", logging.DEBUG if code in ("extraction", "ocr") else logging.INFO,
-              job_id=job_id, stage=code, progress_percent=percent, **args)
-        if r.LIVE_OUTPUT_ENABLED and code != "saving":
-            r.atomic_json(preview_path, {"phase": label, "phase_code": code, "phase_args": args,
-                                        "content": "", "reasoning": "", "active": False,
-                                        "updated_at": jobs.now(), "metrics": {}})
+        event(
+            "job_phase",
+            logging.DEBUG if code in ("extraction", "ocr") else logging.INFO,
+            job_id=self.job_id,
+            stage=code,
+            progress_percent=percent,
+            **args,
+        )
+        if code != "saving":
+            self._write_preview(
+                code,
+                force=code not in ("extraction", "ocr")
+                or bool(args)
+                and args.get("index") == args.get("total"),
+                content="",
+                reasoning="",
+                active=False,
+                metrics={},
+            )
 
-    def saved_step(name, stage, dependencies, compute):
-        """Reuse verified text or record the complete outcome of a fresh computation."""
+    def _write_preview(self, phase_code, *, force=False, **fields):
+        """Refresh memory immediately; checkpoint boundaries and active text every 20s."""
+        if not self.runtime.live_output:
+            return
+        payload = {
+            "phase": self.phase_label,
+            "phase_code": phase_code,
+            "phase_args": self.phase_args,
+            "updated_at": now(),
+            "_attempt_id": self.recorder.run_id,
+            **fields,
+        }
+        for field in ("content", "reasoning"):
+            payload[field] = payload.get(field, "")[-self.runtime.preview_chars :]
+        previous = self.preview_payload or {}
+        boundary = any(
+            payload.get(key) != previous.get(key)
+            for key in ("phase_code", "active", "started_at")
+        )
+        current = time.monotonic()
+        checkpoint = (
+            payload.get("active")
+            and (payload["content"] or payload["reasoning"])
+            and current - self.preview_persisted_at >= CHECKPOINT_SECONDS
+        )
+        # Cache owns a copy of the bounded payload, including nested metrics.
+        self.store.previews.put(self.job_id, payload, self.runtime.preview_chars)
+        self.preview_payload = payload
+        if force or boundary or checkpoint:
+            atomic_json(self.preview_path, payload)
+            self.preview_persisted_at = current
+
+    def _step(
+        self,
+        name: str,
+        stage: str,
+        dependencies: Mapping[str, object],
+        compute: Callable[[], str],
+    ) -> str:
+        """Reuse a verified artifact, or run compute() and save its text.
+
+        Every outcome (reused, done, failed or cancelled) is recorded with its
+        measurements, so failed attempts remain visible in the metrics.
+        """
+        model = self.model
         model.check_cancelled()
-        if stage in ("section", "merge", "final"):
+        generation = stage in GENERATION_STAGES
+        if generation:
+            # Reused artifacts must be audited in this attempt, even if their text
+            # happens to match a generation from an earlier step.
+            self._generation_audit = None
             model.current_metrics = {}
             # Pre-fix artifacts may contain Latin-1-decoded UTF-8 even when
             # their file hashes are valid. Recompute on an explicit retry;
             # never try to repair their Unicode strings heuristically.
-            dependencies = {**dependencies, "text_transport_version": 1,
-                            "reliability_version": reliability.VERSION}
-        handle = recorder.start(stage, name)
+            dependencies = {
+                **dependencies,
+                "text_transport_version": 1,
+                "reliability_version": reliability.VERSION,
+            }
+        handle = self.recorder.start(stage, name)
         before_calls, before_ms = model.tokenization_calls, model.tokenization_ms
         before_hits = model.tokenization_cache_hits
         try:
-            cached = artifacts.read(name, dependencies)
+            cached = self.artifacts.read(name, dependencies)
             if cached is not None:
-                recorder.end(handle, "reused", {"artifact_reused": True})
-                if r.LIVE_OUTPUT_ENABLED and stage in ("section", "merge", "final"):
-                    r.atomic_json(preview_path, {"phase": r.get_job(job_id)["stage"], "phase_code": stage,
-                        "phase_args": phase_args, "content": cached[-r.LIVE_PREVIEW_CHARS:],
-                        "content_chars": len(cached), "reasoning": "", "reasoning_chars": 0,
-                        "active": False, "updated_at": jobs.now(), "metrics": {"artifact_reused": True}})
+                self.recorder.end(handle, "reused", {"artifact_reused": True})
+                if generation:
+                    self._write_preview(
+                        stage,
+                        force=True,
+                        content=cached[-self.runtime.preview_chars :],
+                        content_chars=len(cached),
+                        reasoning="",
+                        reasoning_chars=0,
+                        active=False,
+                        metrics={"artifact_reused": True},
+                    )
                 return cached
             result = compute()
             model.check_cancelled()
-            artifacts.write(name, result, dependencies)
-            measurements = dict(model.current_metrics) if stage in ("section", "merge", "final") else {}
-            measurements.update(tokenization_calls=model.tokenization_calls - before_calls,
-                                tokenization_ms=model.tokenization_ms - before_ms,
-                                tokenization_cache_hits=model.tokenization_cache_hits - before_hits)
-            recorder.end(handle, "done", measurements)
+            self.artifacts.write(name, result, dependencies)
+            measurements = dict(model.current_metrics) if generation else {}
+            measurements.update(
+                tokenization_calls=model.tokenization_calls - before_calls,
+                tokenization_ms=model.tokenization_ms - before_ms,
+                tokenization_cache_hits=model.tokenization_cache_hits - before_hits,
+            )
+            self.recorder.end(handle, "done", measurements)
             return result
+        except WorkerStopping:
+            measurements = dict(model.current_metrics) if generation else {}
+            measurements["stop_category"] = "interrupted"
+            self.recorder.end(handle, "interrupted", measurements)
+            raise
         except Exception as exc:
-            measurements = dict(model.current_metrics) if stage in ("section", "merge", "final") else {}
+            measurements = dict(model.current_metrics) if generation else {}
             measurements["error_code"] = getattr(exc, "code", "step_failed")
-            recorder.end(handle, "cancelled" if isinstance(exc, Cancelled) else "failed", measurements)
+            self.recorder.end(
+                handle,
+                "cancelled" if isinstance(exc, Cancelled) else "failed",
+                measurements,
+            )
             raise
 
-    def generate(stage, instructions, text, budget, source_pages):
-        """Enforce the job call budget and publish only bounded preview channels."""
-        nonlocal calls
-        if calls >= config["max_calls"]:
-            raise ModelError("call_limit", "The job exceeded its generation-call limit.")
-        calls += 1
+    def _generate(
+        self,
+        stage: str,
+        instruction: str,
+        text: str,
+        budget: int,
+        source_pages: Sequence[int],
+    ) -> str:
+        """Call the model once within the call budget, publishing bounded previews."""
+        self._generation_audit = None
+        if self.calls >= self.config["max_calls"]:
+            raise ProcessingError(
+                "call_limit", "The job exceeded its generation-call limit."
+            )
+        self.calls += 1
+        model = self.model
         model.current_stage = stage
-        started = time.monotonic()
-        started_at = jobs.now()
+        started, started_at = time.monotonic(), now()
         model.current_metrics = {}
+        limit = self.runtime.preview_chars
 
         def live(content, reasoning, completed):
             """Write a cheap public preview, keeping useful text and reasoning separate."""
-            if not r.LIVE_OUTPUT_ENABLED:
+            if not self.runtime.live_output:
                 return
             stats = dict(model.current_metrics)
-            r.atomic_json(preview_path, {
-                "phase": r.get_job(job_id)["stage"], "phase_code": stage, "phase_args": phase_args,
-                "content": content[-r.LIVE_PREVIEW_CHARS:], "reasoning": reasoning[-r.LIVE_PREVIEW_CHARS:],
-                "content_chars": stats.get("content_chars", len(content)),
-                "reasoning_chars": stats.get("reasoning_chars", len(reasoning)),
-                "active": not completed, "updated_at": jobs.now(),
-                "started_at": started_at,
-                "elapsed_seconds": round(time.monotonic() - started, 1), "metrics": stats})
+            self._write_preview(
+                stage,
+                force=completed,
+                content=content[-limit:],
+                reasoning=reasoning[-limit:],
+                content_chars=stats.get("content_chars", len(content)),
+                reasoning_chars=stats.get("reasoning_chars", len(reasoning)),
+                active=not completed,
+                started_at=started_at,
+                elapsed_seconds=round(time.monotonic() - started, 1),
+                metrics=stats,
+            )
 
         live("", "", False)
-        answer = model.complete(instructions, text, budget, on_update=live)
+        try:
+            answer = model.complete(instruction, text, budget, on_update=live)
+        except Exception:
+            # The stream need not emit a final callback on failure, cancellation or shutdown.
+            # Flush the last useful bounded text, retaining the original processing error.
+            if self.runtime.live_output and self.preview_payload is not None:
+                fields = {
+                    key: self.preview_payload[key]
+                    for key in (
+                        "content",
+                        "reasoning",
+                        "content_chars",
+                        "reasoning_chars",
+                        "started_at",
+                        "elapsed_seconds",
+                    )
+                    if key in self.preview_payload
+                }
+                try:
+                    self._write_preview(
+                        stage,
+                        force=True,
+                        **fields,
+                        active=False,
+                        metrics=dict(model.current_metrics),
+                    )
+                except OSError as exc:
+                    failure("preview_checkpoint_failed", exc, job_id=self.job_id)
+            raise
         # Public metrics contain counts only; detailed source values stay local.
-        check = reliability.audit(answer, evidence, source_pages)
+        source_pages = tuple(sorted(set(source_pages)))
+        check = self._audit(answer, source_pages)
+        self._generation_audit = (
+            answer,
+            source_pages,
+            reliability.VERSION,
+            self.evidence,
+            check,
+        )
         # Retain historical recall counters for benchmark/API compatibility.
         # These raw-string differences are not numerical or citation validation.
-        references = set(re.findall(r"\[Page (\d+)\]", text))
-        output_references = set(re.findall(r"\[Page (\d+)\]", answer))
-        numbers = set(re.findall(r"(?<!\w)[+-]?\d+(?:[.,]\d+)?", text))
-        output_numbers = set(re.findall(r"(?<!\w)[+-]?\d+(?:[.,]\d+)?", answer))
+        references = set(reliability.PAGE_REFERENCE.findall(text))
+        output_references = set(reliability.PAGE_REFERENCE.findall(answer))
+        numbers = set(RAW_NUMBER.findall(text))
+        output_numbers = set(RAW_NUMBER.findall(answer))
         model.current_metrics["quality_checks"] = {
-            "source": "mechanical_warning_only", "semantic_validation": False,
+            "source": "mechanical_warning_only",
+            "semantic_validation": False,
             "warnings": len(check["issues"]),
             "numeric_checks": check["numeric"]["checked"],
             "missing_page_references": len(references - output_references),
             "unseen_page_references": len(output_references - references),
-            "missing_numeric_items": len(numbers - output_numbers)}
+            "missing_numeric_items": len(numbers - output_numbers),
+        }
         return answer
 
-    def check_step(name, text, source_pages, sections, evidence_limit=None):
-        """Recheck even reused generations; persist trusted scope outside Markdown."""
-        check = reliability.audit(text, evidence, source_pages)
-        check.update(input_pages=sorted(set(source_pages)), source_sections=sorted(set(sections)))
+    def _audit(self, text, source_pages):
+        """Share only normalization of this attempt's unchanged source evidence."""
+        self._prepared_evidence = reliability.prepare_evidence(
+            self.evidence, self._prepared_evidence
+        )
+        return reliability.audit(
+            text, self.evidence, source_pages, prepared=self._prepared_evidence
+        )
+
+    def _check(self, name, text, source_pages, sections, evidence_limit=None):
+        """Run the reliability checks on a generated text, new or reused, and save the results.
+
+        The results, with the pages and sections the step covered, go to
+        quality_checks.json rather than into the Markdown text.
+        """
+        source_pages = tuple(sorted(set(source_pages)))
+        pending, self._generation_audit = self._generation_audit, None
+        if (
+            pending is not None
+            and pending[:3] == (text, source_pages, reliability.VERSION)
+            and pending[3] is self.evidence
+        ):
+            check = copy.deepcopy(pending[4])
+        else:
+            check = self._audit(text, source_pages)
+        check.update(
+            input_pages=sorted(set(source_pages)), source_sections=sorted(set(sections))
+        )
         if evidence_limit is not None:
             check["evidence_prompt_limit"] = evidence_limit
-        quality["steps"][name] = check
-        r.atomic_json(artifacts.root / "quality_checks.json", quality)
+        self.quality["steps"][name] = check
+        atomic_json(self.artifacts.root / "quality_checks.json", self.quality)
         return check
-
-    status = "failed"
-    try:
-        phase("preparing", "Preparing document", 2)
-        capabilities = model.inspect()
-        event("backend_checked", job_id=job_id, status=capabilities.get("status", "unknown"))
-        recorder.provenance(capabilities)
-        # A name is only a weak identity. Unknown fields remain unknown in diagnostics.
-        identity = {"model_id_hash": fingerprint(model.model()),
-                    "template_hash": capabilities.get("template_hash"),
-                    "engine_sampling_hash": fingerprint(capabilities["sampling"]) if capabilities.get("sampling") else None,
-                    "version": capabilities.get("version")}
-        artifacts.bind_identity(identity)
-
-        def extract():
-            """Serialize extraction metadata together with its exact page mapping."""
-            def progress(label):
-                matched = re.search(r"page (\d+)/(\d+)", label)
-                args = {"index": int(matched[1]), "total": int(matched[2])} if matched else {}
-                phase("ocr" if label.startswith("OCR") else "extraction", label,
-                      2 + round(5 * args.get("index", 0) / max(1, args.get("total", 1))), **args)
-            pages, count, missing, ocr = r.extract_pdf(directory / "source.pdf", progress=progress,
-                                                      settings=config["extraction"])
-            return json.dumps({"pages": pages, "page_count": count, "missing": missing, "ocr_pages": ocr}, ensure_ascii=False)
-
-        extracted = json.loads(saved_step("extracted.json", "extraction",
-                               {"source": config["source_hash"], "extraction": config["extraction"]}, extract))
-        pages, page_count = extracted["pages"], extracted["page_count"]
-        missing, ocr_pages = extracted["missing"], extracted["ocr_pages"]
-        evidence_dependencies = {"extraction": fingerprint(extracted), "version": reliability.VERSION}
-        evidence_json = artifacts.read("source_evidence.json", evidence_dependencies)
-        if evidence_json is None:
-            evidence_json = json.dumps(reliability.build_evidence(pages, page_count, missing, ocr_pages), ensure_ascii=False)
-            artifacts.write("source_evidence.json", evidence_json, evidence_dependencies)
-        evidence = json.loads(evidence_json)
-        r.update_job(job_id, pages=page_count)
-        phase("chunking", "Splitting document", 7)
-        chunks = json.loads(saved_step("chunks.json", "chunking",
-                            {"extracted": fingerprint(extracted), "budget": config["chunk_tokens"], "identity": identity,
-                             "chunk_format_version": 2},
-                            lambda: json.dumps(r.make_chunks(pages, model, budget=config["chunk_tokens"]), ensure_ascii=False)))
-        if not chunks:
-            raise ModelError("empty_document", "Document contains no analyzable text.")
-        r.update_job(job_id, total_chunks=len(chunks), progress_percent=10)
-        event("sections_ready", job_id=job_id, total_chunks=len(chunks))
-        notes = []
-        for i, chunk in enumerate(chunks):
-            phase("section", f"Analyzing section {i + 1}/{len(chunks)}", 10 + round(70 * i / len(chunks)),
-                  index=i + 1, total=len(chunks), pages=chunk["pages"])
-            instruction = prompts.instruction(config, "section", question,
-                f"Excerpt {i + 1} of {len(chunks)}. Physical PDF pages: {chunk['pages']}. "
-                "Page references inside source prose are not extraction metadata.")
-            name = f"analysis_{i:04d}.md"
-            text = chunk["text"]
-            answer = saved_step(name, "section",
-                         {"chunk": fingerprint(chunk), "instruction": fingerprint(instruction), "identity": identity},
-                         lambda: generate("section", instruction, text, config["analysis_tokens"], chunk["pages"]))
-            check = check_step(name, answer, chunk["pages"], [i])
-            notes.append(reliability.note(answer, chunk["pages"], [i],
-                                          (issue["code"] for issue in check["issues"])))
-            r.update_job(job_id, done_chunks=i + 1, progress_percent=10 + round(70 * (i + 1) / len(chunks)))
-
-        warnings = f"Pages with insufficient extracted/OCR text: {missing}. OCR pages: {ocr_pages}."
-        final_instruction = prompts.instruction(config, "final", question, warnings)
-        merge_instruction = prompts.instruction(config, "merge", question)
-        level = 0
-        while True:
-            model.current_stage = "final"
-            final_text, final_fits, final_evidence_limit = reliability.prepare_input(notes, evidence,
-                lambda text: model.fits(final_instruction, text, config["final_tokens"])[0])
-            if len(notes) <= 4 and final_fits:
-                break
-            if len(notes) < 2 or level >= 32:
-                raise ModelError("merge_impossible", "The final report cannot fit the configured context.")
-            model.current_stage = "merge"
-            merge_evidence_limits = {}
-            def merge_fits(group):
-                _, fits, limit = reliability.prepare_input(group, evidence,
-                    lambda text: model.fits(merge_instruction, text, config["merge_tokens"])[0])
-                merge_evidence_limits[fingerprint(group)] = limit
-                return fits
-            groups = plan_groups(notes, merge_fits)
-            reduced = []
-            for index, group in enumerate(groups):
-                if len(group) == 1:
-                    reduced.append(group[0])
-                    continue
-                phase("merge", f"Merging level {level + 1}, group {index + 1}/{len(groups)}",
-                      min(94, 81 + level * 4), level=level + 1, index=index + 1, total=len(groups))
-                evidence_limit = merge_evidence_limits[fingerprint(group)]
-                text = reliability.combined(group, evidence, evidence_limit)
-                name = f"merge_{level:02d}_{index:04d}.md"
-                source_pages = sorted({page for item in group for page in item["pages"]})
-                answer = saved_step(name, "merge",
-                               {"notes": fingerprint(group), "input": fingerprint(text),
-                                "instruction": fingerprint(merge_instruction), "identity": identity},
-                               lambda: generate("merge", merge_instruction, text, config["merge_tokens"], source_pages))
-                merged = reliability.merge_note(answer, group)
-                check = check_step(name, answer, merged["pages"], merged["sections"], evidence_limit)
-                merged["warning_codes"] = sorted(set(merged["warning_codes"]) | {issue["code"] for issue in check["issues"]})
-                reduced.append(merged)
-            if len(reduced) >= len(notes):
-                raise ModelError("merge_impossible", "The merge plan did not reduce its input.")
-            notes, level = reduced, level + 1
-
-        phase("final", "Writing final report", 95)
-        source_pages = sorted({page for item in notes for page in item["pages"]})
-        final = saved_step("rapport_final.md", "final",
-                           {"notes": fingerprint(notes), "input": fingerprint(final_text),
-                            "instruction": fingerprint(final_instruction), "identity": identity},
-                           lambda: generate("final", final_instruction, final_text, config["final_tokens"], source_pages))
-        check_step("rapport_final.md", final, source_pages, range(len(chunks)), final_evidence_limit)
-        phase("saving", "Saving report", 99)
-        handle = recorder.start("saving", "report")
-        try:
-            header = prompts.report_header(config, job["filename"], page_count, len(chunks), missing, ocr_pages)
-            previous_report = directory / "rapport_final.md"
-            if previous_report.is_file():
-                archive = directory / "previous_reports"
-                archive.mkdir(exist_ok=True)
-                r.atomic_text(archive / (jobs.file_hash(previous_report) + ".md"), previous_report.read_text(encoding="utf-8"))
-            report_text = header + final + "\n" + reliability.report_warnings(quality, config["report_language"])
-            r.atomic_text(directory / "rapport_final.md", report_text)
-            name = report_filename(final, job["filename"])
-            model.check_cancelled()
-            r.update_job(job_id, status="done", stage="Analysis completed", phase_code="done", error="", error_code="",
-                         report_name=name)
-            event("report_saved", job_id=job_id, stage="saving", filename=name,
-                  bytes=(directory / "rapport_final.md").stat().st_size)
-            recorder.end(handle, "done")
-        except Exception:
-            recorder.end(handle, "failed", {"error_code": "report_save_failed"})
-            raise
-        status = "done"
-        r.log.info("job_finished job_id=%s pages=%d chunks=%d calls=%d", job_id, page_count, len(chunks), calls)
-    except Cancelled:
-        status = "cancelled"
-        raise
-    finally:
-        recorder.provenance({**model.capabilities,
-            "tokenization_calls": model.tokenization_calls, "tokenization_ms": model.tokenization_ms,
-            "tokenization_cache_hits": model.tokenization_cache_hits, "generation_calls": calls})
-        recorder.finish(status)
-        model.session.close()

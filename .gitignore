@@ -20,7 +20,11 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
 .coverage
+.coverage.*
+coverage.xml
 htmlcov/
 .venv/
 venv/
@@ -35,14 +39,11 @@ venv/
 *.bak-*
 *.swp
 
-# Local deployment guide
-GUIDE_DEPLOIEMENT_DOCUMENT_PROCESSOR.md
-GUIDE_DEPLOIEMENT_DOCUMENT_PROCESSOR.md:Zone.Identifier
-DEPLOIEMENT_MANUEL_DOCUMENT_PROCESSOR.md
+# Personal notes, guides and test documents: keep them in local/
+/local/
 
-# Local audit and planning documents
-AUDIT_OPTIMISATION_LLAMA_CPP_SYNTHESE.md
-AUDIT_OPTIMISATION_LLAMA_CPP_SYNTHESE.md:Zone.Identifier
-PLAN_COMPLET_CODEX_DOCUMENT_PROCESSOR_V2.md
-PLAN_COMPLET_CODEX_DOCUMENT_PROCESSOR_V2.md:Zone.Identifier
-PDF_TEST_ANALYSE_FR_DOCUMENT_PROCESSOR.pdf
+# Windows download markers, created when files are copied into WSL
+*:Zone.Identifier
+
+# Frontend development tools
+node_modules/

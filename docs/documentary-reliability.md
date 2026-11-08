@@ -1,5 +1,7 @@
 # Fiabilité documentaire — audit et compte rendu d’implémentation
 
+> Ce rapport décrit le code au moment de l’audit. Les emplacements cités (`app.py`, `run`, `generate`…) ont été réorganisés depuis : voir l’[architecture actuelle](architecture.md).
+
 Validation locale du 2 novembre 2026. Aucun déploiement, appel à un modèle réel, changement de serveur, commit ou push.
 
 ## Diagnostic de l’existant
@@ -29,6 +31,8 @@ L’audit a précédé les modifications. Le pipeline V2 est déjà séquentiel,
 **Causes plausibles, non démontrées :** taille du modèle, ordre d’extraction des tableaux, compression successive et longueur des consignes peuvent contribuer aux erreurs. Sans exécution comparative de Qwen et sans rapports historiques complets, on ne peut pas attribuer une erreur précise à l’un de ces facteurs.
 
 ## Modifications et fonctionnement
+
+Organisation actuelle : `evidence.py` porte l’extraction/sélection des preuves et la version 1 ; `checks.py` porte les contrôles mécaniques et leur normalisation temporaire ; `report_text.py` regroupe les messages FR/EN, l’en-tête et les avertissements déterministes ainsi que le nom physique `rapport_final.md`. `reliability.py` conserve les anciens imports par réexport explicite, et `prompts.report_header` reste disponible. Ce découpage ne change ni les données, ni l’ordre des avertissements, ni les empreintes ou la réutilisation des caches. Les consignes du modèle restent dans `prompts.py`, les traductions du navigateur dans `static/translations.json` ; aucun de ces textes n’est substitué à l’autre. Voir le [découpage courant](architecture.md#reliability-and-report-text) et les tests d’égalité avec les sorties antérieures dans `tests/test_reliability_contracts.py`.
 
 | Fichier / fonctions | Changement et effet | Coût supplémentaire |
 | --- | --- | --- |
@@ -161,7 +165,7 @@ Justifier les pénalités et conserver les rapports pour comparaison. Aucun scor
 .venv/bin/python -m compileall -q app.py document_processor scripts tests
 .venv/bin/python scripts/benchmark.py --variants docs/benchmark-variants.example.json --repeat 1
 node tests/test_polling.js
-node --check static/app.js
+for file in static/js/*.js; do node --check "$file"; done
 git diff --check
 ```
 
