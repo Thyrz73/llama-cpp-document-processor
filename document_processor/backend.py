@@ -83,7 +83,7 @@ class CapabilityCache:
 
         Clients are created only on misses. Recheck under the shared lock so
         concurrent diagnostics coalesce, including raw injected clients. A client
-        bound to this cache uses its already-locked inspection implementation.
+        bound to this cache borrows the inspection context for its public method.
         Identity inspections keep their separate, always-fresh entry point.
         """
         value = self.get()
@@ -99,15 +99,11 @@ class CapabilityCache:
                 bound = (
                     isinstance(client, DeploymentModelClient) and client._cache is self
                 )
-                if bound:
-                    value = client._inspect_capabilities_locked(for_identity=False)
-                else:
-                    value = client.inspect()
-                # Raw clients retain the original close-before-publication order.
+                value = client._inspect_in_context(self) if bound else client.inspect()
+                # Publish only the public method's final result, after closing.
                 close_pending = False
                 client.session.close()
-                if not bound:
-                    self.remember(value, client)
+                self.remember(value, client)
                 return value, True
         finally:
             if close_pending:
@@ -121,7 +117,23 @@ class DeploymentModelClient(BackendClient):
         self, base_url, key, config, prompt, preview_limit=12000, *, capabilities
     ):
         self._cache = capabilities
+        self._inspection_context = threading.local()
         super().__init__(base_url, key, config, prompt, preview_limit)
+
+    def _inspect_in_context(self, cache):
+        """Call public overrides while borrowing a context already owned by cache.
+
+        CapabilityCache calls this only while holding its inspection lock. The
+        thread-local context lets super().inspect() join that operation without
+        acquiring again; it neither makes the lock reentrant nor affects another
+        thread/client. Restore it even when the override raises.
+        """
+        previous = getattr(self._inspection_context, "cache", None)
+        self._inspection_context.cache = cache
+        try:
+            return self.inspect()
+        finally:
+            self._inspection_context.cache = previous
 
     def inspect(self, *, cached=None):
         """Read capabilities for display, allowing the shared TTL cache."""
@@ -133,10 +145,17 @@ class DeploymentModelClient(BackendClient):
 
     def _inspect_capabilities(self, *, for_identity):
         """Serialize observations and publish fresh identity checks to the UI cache."""
+        if getattr(self._inspection_context, "cache", None) is self._cache:
+            self.check_cancelled()
+            # The caller commits the override's complete result, never an
+            # intermediate super() result or one followed by an exception.
+            return self._inspect_capabilities_locked(
+                for_identity=for_identity, publish=False
+            )
         with self._cache.inspection(self):
             return self._inspect_capabilities_locked(for_identity=for_identity)
 
-    def _inspect_capabilities_locked(self, *, for_identity):
+    def _inspect_capabilities_locked(self, *, for_identity, publish=True):
         """Inspect with this client's cache lock already held by CapabilityCache."""
         previous = None if for_identity else self._cache.get(self)
         if previous is not None and previous.get("status") == "unavailable":
@@ -150,13 +169,16 @@ class DeploymentModelClient(BackendClient):
             try:
                 value = super().inspect_identity()
             except ModelError:
-                self._cache.remember(self.capabilities, self)
+                if publish:
+                    self._cache.remember(self.capabilities, self)
                 raise
         else:
             value = super().inspect(
                 cached=(model_name, previous) if previous is not None else None
             )
-        if previous is None or self.model_name != model_name or value != previous:
+        if publish and (
+            previous is None or self.model_name != model_name or value != previous
+        ):
             self._cache.remember(value, self)
         return value
 

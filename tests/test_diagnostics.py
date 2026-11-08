@@ -63,10 +63,10 @@ class DiagnosticTests(unittest.TestCase):
         self.application = self.make_app()
         self.addCleanup(self.finish_threads)
 
-    def make_app(self, *, cached=True, injected=True):
+    def make_app(self, *, cached=True, injected=True, client_class=None):
         def factory(config):
             kwargs = {"capabilities": self.services.capabilities} if cached else {}
-            cls = DeploymentModelClient if cached else BackendClient
+            cls = client_class or (DeploymentModelClient if cached else BackendClient)
             client = cls(
                 self.settings.llama_base_url,
                 self.settings.api_key,
@@ -249,7 +249,7 @@ class DiagnosticTests(unittest.TestCase):
         self.assertEqual(self.diagnostics()["context_tokens"], 8192)
         self.assertEqual(self.calls, ["/v1/models", "/props"] * 2)
 
-    def concurrent_diagnostics(self):
+    def concurrent_diagnostics(self, expected_calls=("/v1/models", "/props")):
         self.release.clear()
         tasks = [self.start_task(self.diagnostic_request) for _ in range(5)]
         try:
@@ -258,11 +258,192 @@ class DiagnosticTests(unittest.TestCase):
             self.release.set()
         values = [self.result(task) for task in tasks]
         self.assertTrue(all(value == values[0] for value in values))
-        self.assertEqual(self.calls, ["/v1/models", "/props"])
-        self.assertEqual(self.max_inflight, 1)
+        self.assertEqual(self.calls, list(expected_calls))
+        self.assertEqual(self.max_inflight, 1 if expected_calls else 0)
         for client in self.clients:
             client.session.close.assert_called_once()
         self.assertFalse(self.services.capabilities.lock.locked())
+        return values
+
+    def test_public_override_returns_8192_without_backend_calls_and_obeys_ttl(self):
+        inspections = []
+
+        class CustomClient(DeploymentModelClient):
+            def inspect(client, *, cached=None):
+                inspections.append(client)
+                return {"status": "available", "context_tokens": 8192}
+
+        self.application = self.make_app(client_class=CustomClient)
+        first = self.diagnostics()
+        self.assertEqual(first["context_tokens"], 8192)
+        self.now = 129
+        self.assertEqual(self.diagnostics(), first)
+        self.assertEqual(len(inspections), 1)
+        self.assertEqual(self.services.capabilities.entry["expires"], 130)
+        self.now = 130
+        self.assertEqual(self.diagnostics(), first)
+        self.assertEqual(len(inspections), 2)
+        self.assertEqual(self.services.capabilities.entry["expires"], 160)
+        self.assertEqual(self.calls, [])
+        for client in self.clients:
+            client.session.close.assert_called_once()
+
+    def test_override_delegating_to_super_acquires_once_and_caches_final_result(self):
+        inspections = []
+
+        class CustomClient(DeploymentModelClient):
+            def inspect(client, *, cached=None):
+                inspections.append(client)
+                value = super().inspect(cached=cached)
+                value["context_tokens"] = 8192
+                return value
+
+        self.application = self.make_app(client_class=CustomClient)
+        with patch.object(
+            self.services.capabilities,
+            "inspection",
+            wraps=self.services.capabilities.inspection,
+        ) as inspection:
+            first = self.diagnostics()
+            self.assertEqual(first["context_tokens"], 8192)
+            self.assertEqual(self.diagnostics(), first)
+            self.assertEqual(inspection.call_count, 1)
+            # An ordinary inspection after the delegated call must acquire again.
+            client = self.analysis_client()
+            client.inspect_identity()
+            self.assertEqual(inspection.call_count, 2)
+        self.assertEqual(len(inspections), 1)
+        self.assertEqual(self.calls, ["/v1/models", "/props"] * 2)
+
+    def test_concurrent_public_overrides_coalesce_without_network(self):
+        inspections = []
+        test = self
+
+        class CustomClient(DeploymentModelClient):
+            def inspect(client, *, cached=None):
+                inspections.append(client)
+                test.entered.set()
+                test.assertTrue(test.release.wait(2))
+                return {"status": "available", "context_tokens": 8192}
+
+        self.application = self.make_app(client_class=CustomClient)
+        values = self.concurrent_diagnostics(expected_calls=())
+        self.assertEqual(values[0]["context_tokens"], 8192)
+        self.assertEqual(len(inspections), 1)
+
+    def test_super_result_is_not_visible_until_the_public_override_finishes(self):
+        inspections = []
+        parent_finished, finish_override = threading.Event(), threading.Event()
+        test = self
+
+        class CustomClient(DeploymentModelClient):
+            def inspect(client, *, cached=None):
+                inspections.append(client)
+                value = super().inspect(cached=cached)
+                parent_finished.set()
+                test.assertTrue(finish_override.wait(2))
+                value["context_tokens"] = 8192
+                return value
+
+        self.application = self.make_app(client_class=CustomClient)
+        tasks = [self.start_task(self.diagnostic_request)]
+        try:
+            self.assertTrue(parent_finished.wait(1))
+            self.assertIsNone(self.services.capabilities.get())
+            tasks += [self.start_task(self.diagnostic_request) for _ in range(4)]
+        finally:
+            finish_override.set()
+        values = [self.result(task) for task in tasks]
+        self.assertTrue(all(value["context_tokens"] == 8192 for value in values))
+        self.assertEqual(len(inspections), 1)
+        self.assertEqual(self.calls, ["/v1/models", "/props"])
+        for client in self.clients:
+            client.session.close.assert_called_once()
+
+    def test_failed_override_discards_parent_result_and_restores_inspection_context(
+        self,
+    ):
+        fail = True
+
+        class CustomClient(DeploymentModelClient):
+            def inspect(client, *, cached=None):
+                value = super().inspect(cached=cached)
+                if fail:
+                    raise RuntimeError("PRIVATE_OVERRIDE_ERROR")
+                value["context_tokens"] = 8192
+                return value
+
+        self.application = self.make_app(client_class=CustomClient)
+
+        def attempt_then_inspect_identity():
+            with self.application.test_client() as http:
+                response = http.get("/api/diagnostics")
+            empty = self.services.capabilities.get() is None
+            # Same client and thread: the failed HTTP callback must not leave a
+            # borrowed context that bypasses acquisition on its next inspection.
+            identity = self.clients[0].inspect_identity()
+            return response.status_code, response.get_json(), empty, identity
+
+        with patch.object(
+            self.services.capabilities,
+            "inspection",
+            wraps=self.services.capabilities.inspection,
+        ) as inspection:
+            status, body, empty, identity = self.result(
+                self.start_task(attempt_then_inspect_identity)
+            )
+            self.assertEqual(inspection.call_count, 2)
+        self.assertEqual(status, 500)
+        self.assertEqual(body["error_code"], "http_500")
+        self.assertNotIn("PRIVATE", json.dumps(body))
+        self.assertTrue(empty)
+        self.assertEqual(identity["context_tokens"], 16384)
+        self.services.capabilities.invalidate(self.clients[0])
+        fail = False
+        self.assertEqual(self.diagnostics()["context_tokens"], 8192)
+        self.assertEqual(self.calls, ["/v1/models", "/props"] * 3)
+        for client in self.clients:
+            client.session.close.assert_called_once()
+        self.assertFalse(self.services.capabilities.lock.locked())
+
+    def test_another_thread_cannot_borrow_the_diagnostic_clients_context(self):
+        parent_finished, finish_override = threading.Event(), threading.Event()
+        identity_waiting = threading.Event()
+        test = self
+
+        class CustomClient(DeploymentModelClient):
+            def inspect(client, *, cached=None):
+                value = super().inspect(cached=cached)
+                parent_finished.set()
+                test.assertTrue(finish_override.wait(2))
+                return value
+
+        self.application = self.make_app(client_class=CustomClient)
+        original = self.services.capabilities.inspection
+
+        def inspection(client):
+            if parent_finished.is_set():
+                identity_waiting.set()
+            return original(client)
+
+        with patch.object(
+            self.services.capabilities, "inspection", side_effect=inspection
+        ):
+            diagnostic = self.start_task(self.diagnostic_request)
+            try:
+                self.assertTrue(parent_finished.wait(1))
+                # Reuse the same instance in another thread to test ownership,
+                # rather than merely relying on per-request client construction.
+                identity = self.start_task(self.clients[0].inspect_identity)
+                self.assertTrue(identity_waiting.wait(1))
+                self.assertFalse(identity[0].is_set())
+                self.assertEqual(self.calls, ["/v1/models", "/props"])
+            finally:
+                finish_override.set()
+            self.assertEqual(self.result(diagnostic)["status"], "available")
+            self.assertEqual(self.result(identity)["status"], "available")
+        self.assertEqual(self.calls, ["/v1/models", "/props"] * 2)
+        self.assertEqual(self.max_inflight, 1)
 
     def test_simultaneous_real_cached_clients_coalesce_one_inspection(self):
         self.concurrent_diagnostics()
