@@ -263,6 +263,14 @@ def _add_configuration_revisions(con):
             REFERENCES job_config_revisions(job_id, revision))""")
 
 
+def _index_attempt_configuration_references(con):
+    """Version 6: index child references checked when deleting configuration revisions."""
+    con.execute(
+        "CREATE INDEX IF NOT EXISTS job_run_config_revisions_by_revision "
+        "ON job_run_config_revisions(job_id, revision)"
+    )
+
+
 # Ordered (version, migration) pairs. Append only; never edit a released migration.
 MIGRATIONS = (
     (1, _create_jobs),
@@ -270,6 +278,7 @@ MIGRATIONS = (
     (3, _add_report_names_and_prompt_origin),
     (4, _index_job_order_and_status),
     (5, _add_configuration_revisions),
+    (6, _index_attempt_configuration_references),
 )
 
 

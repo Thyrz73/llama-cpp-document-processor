@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from document_processor import database
 from document_processor.config import fingerprint
-from document_processor.jobs import JobStore
+from document_processor.jobs import REPORT_FILE, JobStore
 
 INDEXES = {
     "jobs_by_created": ("created_at", "id"),
@@ -238,6 +238,174 @@ class JobIndexTests(unittest.TestCase):
         self.assertEqual(self.store.claim_next_job(), f"{999:032x}")
         self.assertEqual(self.store.claim_next_job(), f"{1000:032x}")
         self.assertIsNone(self.store.claim_next_job())
+
+
+class RevisionReferenceIndexTests(unittest.TestCase):
+    INDEX = "job_run_config_revisions_by_revision"
+    TABLES = (
+        "jobs",
+        "job_configs",
+        "job_runs",
+        "job_steps",
+        "job_config_revisions",
+        "job_config_selections",
+        "job_run_config_revisions",
+    )
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.store = JobStore(Path(temporary.name))
+        self.addCleanup(self.store.close)
+        with patch.object(database, "MIGRATIONS", database.MIGRATIONS[:5]):
+            database.initialize(self.store.db_path)
+        populate(self.store, 5)
+        self.identifiers = [f"{number:032x}" for number in (1, 2)]
+        for identifier in self.identifiers:
+            original = self.store.load_config(identifier)
+            for budget in (1024, 2048):
+                self.store.save_config_revision(
+                    identifier, {**original, "merge_tokens": budget}
+                )
+            self.store.update_job(identifier, status="failed")
+            self.assertEqual(
+                self.store.requeue(identifier, 3, config_revision=1), ("queued", 2)
+            )
+            recorder = self.store.start_attempt(identifier, "2026-01-01T00:00:00+00:00")
+            recorder.end(recorder.start("merge", "revision-test"), "done")
+            recorder.finish("failed")
+            self.store.update_job(identifier, status="failed")
+
+    def contents(self):
+        with self.store.connect() as con:
+            return {
+                table: [
+                    tuple(row)
+                    for row in con.execute(f"SELECT * FROM {table} ORDER BY 1, 2")
+                ]
+                for table in self.TABLES
+            }
+
+    def test_v6_upgrade_preserves_all_rows_and_files_and_is_idempotent(self):
+        report = self.store.job_dir(self.identifiers[0]) / REPORT_FILE
+        report.parent.mkdir(parents=True)
+        report.write_bytes(b"Historical report")
+        before = self.contents()
+        metrics = [self.store.metrics(identifier) for identifier in self.identifiers]
+        database.initialize(self.store.db_path)
+        database.initialize(self.store.db_path)
+        with self.store.connect() as con:
+            # Reapplying v6 with its index already present must also be safe.
+            con.execute("DELETE FROM schema_migrations WHERE version=6")
+        database.initialize(self.store.db_path)
+        self.assertEqual(self.contents(), before)
+        self.assertEqual(report.read_bytes(), b"Historical report")
+        self.assertEqual(
+            [self.store.metrics(identifier) for identifier in self.identifiers], metrics
+        )
+        with self.store.connect() as con:
+            indexes = {
+                row["name"]: tuple(
+                    column["name"]
+                    for column in con.execute(f"PRAGMA index_info({row['name']})")
+                )
+                for row in con.execute("PRAGMA index_list(job_run_config_revisions)")
+            }
+            self.assertEqual(indexes, {self.INDEX: ("job_id", "revision")})
+            self.assertEqual(
+                [
+                    row[0]
+                    for row in con.execute(
+                        "SELECT version FROM schema_migrations ORDER BY version"
+                    )
+                ],
+                [version for version, _ in database.MIGRATIONS],
+            )
+            self.assertEqual(con.execute("PRAGMA foreign_key_check").fetchall(), [])
+            self.assertEqual(con.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+
+    def test_v6_indexes_the_actual_foreign_key_check_and_preserves_cascade_deletion(
+        self,
+    ):
+        identifier, other = self.identifiers
+        query = "EXPLAIN QUERY PLAN DELETE FROM job_config_revisions WHERE job_id=? AND revision=?"
+        with database.connect(self.store.db_path) as con:
+            before = " ".join(
+                row["detail"] for row in con.execute(query, (identifier, 1))
+            )
+        self.assertIn("SCAN job_run_config_revisions", before)
+        database.initialize(self.store.db_path)
+        with database.connect(self.store.db_path) as con:
+            after = " ".join(
+                row["detail"] for row in con.execute(query, (identifier, 1))
+            )
+        self.assertIn(self.INDEX, after)
+        self.assertIn("job_id=? AND revision=?", after)
+        self.assertNotIn("SCAN job_run_config_revisions", after)
+        with self.assertRaises(sqlite3.IntegrityError), self.store.connect() as con:
+            con.execute(
+                "DELETE FROM job_config_revisions WHERE job_id=? AND revision=1",
+                (identifier,),
+            )
+        other_metrics = self.store.metrics(other)
+        other_config = self.store.load_config(other)
+        self.assertIsNone(self.store.delete_job(identifier))
+        self.assertEqual(self.store.metrics(other), other_metrics)
+        self.assertEqual(self.store.load_config(other), other_config)
+        with self.store.connect() as con:
+            for table in self.TABLES:
+                column = "id" if table == "jobs" else "job_id"
+                self.assertEqual(
+                    con.execute(
+                        f"SELECT COUNT(*) FROM {table} WHERE {column}=?", (identifier,)
+                    ).fetchone()[0],
+                    0,
+                )
+            self.assertEqual(con.execute("PRAGMA foreign_key_check").fetchall(), [])
+
+    def test_failed_v6_migration_rolls_back_the_index_and_can_be_retried(self):
+        before = self.contents()
+
+        migrate = dict(database.MIGRATIONS)[6]
+
+        def broken(con):
+            migrate(con)
+            raise sqlite3.OperationalError("Simulated index migration failure")
+
+        with (
+            patch.object(
+                database, "MIGRATIONS", database.MIGRATIONS[:5] + ((6, broken),)
+            ),
+            self.assertRaises(sqlite3.OperationalError),
+        ):
+            database.initialize(self.store.db_path)
+        self.assertEqual(self.contents(), before)
+        with self.store.connect() as con:
+            self.assertNotIn(
+                self.INDEX,
+                {
+                    row["name"]
+                    for row in con.execute(
+                        "PRAGMA index_list(job_run_config_revisions)"
+                    )
+                },
+            )
+            self.assertEqual(
+                con.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0],
+                5,
+            )
+        database.initialize(self.store.db_path)
+        self.assertEqual(self.contents(), before)
+        with self.store.connect() as con:
+            self.assertIn(
+                self.INDEX,
+                {
+                    row["name"]
+                    for row in con.execute(
+                        "PRAGMA index_list(job_run_config_revisions)"
+                    )
+                },
+            )
 
 
 if __name__ == "__main__":

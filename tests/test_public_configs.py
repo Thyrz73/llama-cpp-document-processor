@@ -2,6 +2,7 @@
 
 import json
 import tempfile
+import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -194,6 +195,73 @@ class PublicConfigCacheTests(unittest.TestCase):
             results = list(pool.map(read, range(12)))
         self.assertEqual(convert.call_count, 6)
         self.assertTrue(all(result == results[0] for result in results))
+
+    def assert_consistent_list_during_requeue(self, *, warm_cache):
+        identifier = self.create(1)
+        self.store.update_job(identifier, status="failed")
+        revised = {**self.snapshot, "merge_tokens": self.snapshot["merge_tokens"] + 256}
+        revision = self.store.save_config_revision(identifier, revised)
+        if warm_cache:
+            self.store.list_jobs()
+        reading, committed = threading.Event(), threading.Event()
+        observations = []
+        discard = self.store._discard_public_config
+
+        def invalidate(job_id):
+            # requeue has committed, but invalidation must wait for the reader's cache lock.
+            committed.set()
+            discard(job_id)
+
+        def write():
+            try:
+                self.assertTrue(
+                    reading.wait(5), "Reader did not reach the query barrier"
+                )
+                return self.store.requeue(identifier, 3, config_revision=revision)
+            finally:
+                self.store.close(checkpoint=False)
+
+        def trace(statement):
+            boundary = "SELECT EXISTS" if warm_cache else "SELECT original.job_id"
+            if statement.startswith(boundary):
+                reading.set()
+                # Trace callback exceptions are swallowed by SQLite; assert outside it.
+                observations.append(committed.wait(5))
+
+        with (
+            patch.object(self.store, "_discard_public_config", side_effect=invalidate),
+            ThreadPoolExecutor(max_workers=1) as pool,
+        ):
+            writer = pool.submit(write)
+            with self.store.connect() as con:
+                con.set_trace_callback(trace)
+            try:
+                first, active = self.store.list_jobs()
+            finally:
+                with self.store.connect() as con:
+                    con.set_trace_callback(None)
+                    self.assertFalse(con.in_transaction)
+            self.assertEqual(writer.result(timeout=5), ("queued", 0))
+
+        self.assertEqual(
+            observations, [True], "Writer must commit while the list is reading"
+        )
+        self.assertEqual(first[0]["status"], "failed")
+        self.assertFalse(active)
+        self.assertEqual(first[0]["configuration"], config.public_config(self.snapshot))
+        self.assertFalse(
+            self.store._public_configs
+        )  # Invalidation follows the reader's fill.
+        second, active = self.store.list_jobs()
+        self.assertEqual(second[0]["status"], "queued")
+        self.assertTrue(active)
+        self.assertEqual(second[0]["configuration"], config.public_config(revised))
+
+    def test_cold_list_keeps_configuration_consistent_during_requeue(self):
+        self.assert_consistent_list_during_requeue(warm_cache=False)
+
+    def test_warm_list_keeps_activity_consistent_during_requeue(self):
+        self.assert_consistent_list_during_requeue(warm_cache=True)
 
 
 if __name__ == "__main__":

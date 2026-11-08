@@ -443,7 +443,7 @@ class ConfigurationRevisionMigrationTests(unittest.TestCase):
     def test_failed_revision_migration_rolls_back_all_tables_and_can_be_retried(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "jobs.sqlite3"
-            migrate = database.MIGRATIONS[-1][1]
+            migrate = dict(database.MIGRATIONS)[5]
 
             def broken(con):
                 migrate(con)
@@ -474,7 +474,7 @@ class ConfigurationRevisionMigrationTests(unittest.TestCase):
                     con.execute(
                         "SELECT MAX(version) FROM schema_migrations"
                     ).fetchone()[0],
-                    5,
+                    database.MIGRATIONS[-1][0],
                 )
 
 

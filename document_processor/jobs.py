@@ -304,6 +304,9 @@ class JobStore:
             self._public_config_lock,
             self.connect() as con,
         ):
+            # SELECT alone does not begin a transaction. Keep metadata, activity
+            # and cache misses in one read snapshot without reserving a writer.
+            con.execute("BEGIN")
             rows = con.execute(
                 "SELECT jobs.*, COALESCE(revisions.fingerprint, job_configs.fingerprint) "
                 "AS config_fingerprint FROM jobs "
