@@ -318,6 +318,50 @@ def retry_job(job_id):
     return jsonify(status="queued", warnings=["legacy_recomputed"] if legacy else [])
 
 
+@blueprint.post("/api/jobs/<job_id>/resume")
+def resume_job(job_id):
+    """Resume a failed/cancelled job with optional absolute output token budgets.
+
+    Accept an empty body or a small JSON object containing analysis_tokens,
+    merge_tokens and/or final_tokens. Return the effective public configuration
+    with HTTP 200, 400 for invalid budgets, 404 for an unknown job, or 409 for a
+    state/attempt conflict or a legacy job without a saved configuration.
+    """
+    services = get_services()
+    if request.content_length and request.content_length > 8192:
+        raise job_config.ConfigurationError("invalid_options", "Options are too large.")
+    raw = request.get_data()
+    payload = request.get_json(silent=True) if raw else {}
+    if len(raw) > 8192 or not isinstance(payload, dict):
+        raise job_config.ConfigurationError(
+            "invalid_options", "Resume budgets must be a small JSON object."
+        )
+    outcome, attempts, config = services.store.resume(
+        job_id, payload, services.capabilities.get()
+    )
+    if outcome == "missing":
+        abort(404)
+    if outcome == "config_missing":
+        return jsonify(
+            error="This job has no saved configuration. Use retry to recompute it.",
+            error_code="resume_config_missing",
+        ), 409
+    if outcome == "limit":
+        return jsonify(
+            error="The retry limit was reached. Create a new analysis.",
+            error_code="retry_limit",
+        ), 409
+    if outcome == "conflict":
+        return jsonify(
+            error="Only failed or cancelled jobs with no active attempt can resume.",
+            error_code="resume_conflict",
+        ), 409
+    # Revision and queue state are committed before the worker can be woken.
+    services.worker.wake()
+    event("job_resume", job_id=job_id, attempt=attempts + 1, status="queued")
+    return jsonify(status="queued", configuration=job_config.public_config(config))
+
+
 @blueprint.post("/api/jobs/<job_id>/cancel")
 def cancel_job(job_id):
     """Request the cancellation of a queued or running job.

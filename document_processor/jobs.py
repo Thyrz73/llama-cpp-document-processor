@@ -21,7 +21,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from . import database
-from .config import fingerprint, public_config
+from .config import fingerprint, increase_budgets, public_config
 from .contracts import PublicJobConfig
 from .errors import Cancelled, ProcessingError
 from .observability import event
@@ -533,9 +533,6 @@ class JobStore:
         """
         with self.connect() as con:
             con.execute("BEGIN IMMEDIATE")
-            attempts = con.execute(
-                "SELECT COUNT(*) FROM job_runs WHERE job_id=?", (job_id,)
-            ).fetchone()[0]
             revision = (
                 self._selected_revision(con, job_id)
                 if config_revision is None
@@ -547,28 +544,74 @@ class JobStore:
                 if config_row
                 else default_max_attempts
             )
-            if attempts >= maximum:
-                return "limit", attempts
-            changed = con.execute(
-                """UPDATE jobs SET status='queued', error='', error_code='', stage='Retrying',
-                phase_code='queued', cancel_requested=0, queued_at=?, updated_at=?
-                WHERE id=? AND status IN ('failed','cancelled')""",
-                (utcnow(), utcnow(), job_id),
-            ).rowcount
-            if changed and config_revision is not None:
-                con.execute(
-                    "DELETE FROM job_config_selections WHERE job_id=?", (job_id,)
-                )
-                if revision:
-                    con.execute(
-                        "INSERT INTO job_config_selections (job_id, revision) VALUES (?, ?)",
-                        (job_id, revision),
-                    )
-        if changed:
+            outcome, attempts = self._requeue(con, job_id, maximum)
+            if outcome == "queued" and config_revision is not None:
+                self._select_revision(con, job_id, revision)
+        if outcome == "queued":
             self.previews.discard(job_id)
             if config_revision is not None:
                 self._discard_public_config(job_id)
+        return outcome, attempts
+
+    def resume(self, job_id, increases, capabilities=None):
+        """Validate saved budgets, append/select a revision and queue in one commit.
+
+        Return (outcome, previous attempts, effective configuration). No snapshot
+        means configurable resume is unavailable: only legacy retry may resolve
+        current defaults. BEGIN IMMEDIATE serializes resumes, retries, deletion
+        and worker claims, so a competing request cannot append another revision.
+        """
+        with self.connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            row = con.execute(
+                "SELECT status FROM jobs WHERE id=?", (job_id,)
+            ).fetchone()
+            if row is None:
+                return "missing", 0, None
+            finishing = con.execute(
+                "SELECT 1 FROM job_runs WHERE job_id=? AND status='running' LIMIT 1",
+                (job_id,),
+            ).fetchone()
+            if row["status"] not in ("failed", "cancelled") or finishing:
+                return "conflict", 0, None
+            saved = self._config_row(con, job_id, self._selected_revision(con, job_id))
+            if saved is None:
+                return "config_missing", 0, None
+            config = increase_budgets(
+                self._decode_config(saved), increases, capabilities
+            )
+            outcome, attempts = self._requeue(con, job_id, config["max_attempts"])
+            if outcome != "queued":
+                return outcome, attempts, None
+            revision = self._insert_config_revision(con, job_id, config)
+            self._select_revision(con, job_id, revision)
+        self.previews.discard(job_id)
+        self._discard_public_config(job_id)
+        return "queued", attempts, config
+
+    def _requeue(self, con, job_id, maximum):
+        """Apply the shared attempt guard and queue reset in the caller's transaction."""
+        attempts = con.execute(
+            "SELECT COUNT(*) FROM job_runs WHERE job_id=?", (job_id,)
+        ).fetchone()[0]
+        if attempts >= maximum:
+            return "limit", attempts
+        changed = con.execute(
+            """UPDATE jobs SET status='queued', error='', error_code='', stage='Retrying',
+            phase_code='queued', cancel_requested=0, queued_at=?, updated_at=?
+            WHERE id=? AND status IN ('failed','cancelled')""",
+            (utcnow(), utcnow(), job_id),
+        ).rowcount
         return ("queued" if changed else "conflict"), attempts
+
+    def _select_revision(self, con, job_id, revision):
+        """Select a stored revision inside the queue transaction; 0 means original."""
+        con.execute("DELETE FROM job_config_selections WHERE job_id=?", (job_id,))
+        if revision:
+            con.execute(
+                "INSERT INTO job_config_selections (job_id, revision) VALUES (?, ?)",
+                (job_id, revision),
+            )
 
     # Configuration snapshots and attempts -------------------------------------
 
@@ -597,33 +640,37 @@ class JobStore:
         reference; attempts never copy snapshot JSON. This does not select or
         queue the revision: requeue() does that in its own transaction.
         """
-        encoded = json.dumps(config, ensure_ascii=False, allow_nan=False)
-        checksum = fingerprint(config)
         with self.connect() as con:
             con.execute("BEGIN IMMEDIATE")
-            original = self._config_row(con, job_id, 0)
-            if original is None:
-                raise LookupError("Job configuration snapshot not found.")
-            self._decode_config(original)
-            if original["fingerprint"] == checksum:
-                return 0
-            existing = con.execute(
-                "SELECT snapshot, fingerprint, revision FROM job_config_revisions "
-                "WHERE job_id=? AND fingerprint=?",
-                (job_id, checksum),
-            ).fetchone()
-            if existing is not None:
-                self._decode_config(existing)
-                return existing["revision"]
-            revision = con.execute(
-                "SELECT COALESCE(MAX(revision), 0) + 1 FROM job_config_revisions WHERE job_id=?",
-                (job_id,),
-            ).fetchone()[0]
-            con.execute(
-                "INSERT INTO job_config_revisions "
-                "(job_id, revision, snapshot, fingerprint, created_at) VALUES (?, ?, ?, ?, ?)",
-                (job_id, revision, encoded, checksum, now()),
-            )
+            return self._insert_config_revision(con, job_id, config)
+
+    def _insert_config_revision(self, con, job_id, config):
+        """Append or reuse a verified snapshot inside the caller's transaction."""
+        encoded = json.dumps(config, ensure_ascii=False, allow_nan=False)
+        checksum = fingerprint(config)
+        original = self._config_row(con, job_id, 0)
+        if original is None:
+            raise LookupError("Job configuration snapshot not found.")
+        self._decode_config(original)
+        if original["fingerprint"] == checksum:
+            return 0
+        existing = con.execute(
+            "SELECT snapshot, fingerprint, revision FROM job_config_revisions "
+            "WHERE job_id=? AND fingerprint=?",
+            (job_id, checksum),
+        ).fetchone()
+        if existing is not None:
+            self._decode_config(existing)
+            return existing["revision"]
+        revision = con.execute(
+            "SELECT COALESCE(MAX(revision), 0) + 1 FROM job_config_revisions WHERE job_id=?",
+            (job_id,),
+        ).fetchone()[0]
+        con.execute(
+            "INSERT INTO job_config_revisions "
+            "(job_id, revision, snapshot, fingerprint, created_at) VALUES (?, ?, ?, ?, ?)",
+            (job_id, revision, encoded, checksum, now()),
+        )
         return revision
 
     def _selected_revision(self, con, job_id):

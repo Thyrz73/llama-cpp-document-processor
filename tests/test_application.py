@@ -101,6 +101,7 @@ class ApplicationTests(unittest.TestCase):
             ("/api/jobs/<job_id>/live", "GET"),
             ("/api/jobs/<job_id>/metrics", "GET"),
             ("/api/jobs/<job_id>/retry", "POST"),
+            ("/api/jobs/<job_id>/resume", "POST"),
             ("/api/jobs/<job_id>/cancel", "POST"),
             ("/api/jobs/<job_id>/report", "GET"),
             ("/api/jobs/<job_id>/report/view", "GET"),

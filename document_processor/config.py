@@ -15,6 +15,16 @@ from typing import Any, cast
 from .contracts import JobConfig, PublicJobConfig
 from .profiles import PROFILE_VERSION, PROFILES
 
+INTEGER_LIMITS = {
+    "chunk_tokens": (128, 131072),
+    "analysis_tokens": (64, 65536),
+    "merge_tokens": (64, 65536),
+    "final_tokens": (64, 65536),
+    "max_calls": (1, 2000),
+    "step_timeout_seconds": (1, 86400),
+}
+RESUME_BUDGETS = {"analysis_tokens", "merge_tokens", "final_tokens"}
+
 
 class ConfigurationError(ValueError):
     """Report a public validation code without echoing untrusted values."""
@@ -109,15 +119,7 @@ def resolve(
         raise ConfigurationError("invalid_language", "Choose auto, fr or en.")
     config["report_language"] = language
     overrides = options.get("overrides", {})
-    integer_limits = {
-        "chunk_tokens": (128, 131072),
-        "analysis_tokens": (64, 65536),
-        "merge_tokens": (64, 65536),
-        "final_tokens": (64, 65536),
-        "max_calls": (1, 2000),
-        "step_timeout_seconds": (1, 86400),
-    }
-    allowed = set(integer_limits) | {
+    allowed = set(INTEGER_LIMITS) | {
         "temperature",
         "top_p",
         "top_k",
@@ -132,10 +134,7 @@ def resolve(
         )
     config.update(overrides)
     config["customized"] = bool(overrides)
-    for name, (minimum, maximum) in integer_limits.items():
-        value = config[name]
-        if type(value) is not int or not minimum <= value <= maximum:
-            raise ConfigurationError("invalid_budget", f"Invalid {name} budget.")
+    _validate_integer_budgets(config)
     for name, maximum in (("temperature", 2), ("top_p", 1), ("min_p", 1)):
         value = config.get(name)
         if value is not None and (
@@ -176,11 +175,56 @@ def resolve(
                 "thinking_unsupported",
                 "Reasoning control has not been verified for this backend.",
             )
+    warnings.extend(_validate_context(cast(JobConfig, config), capabilities))
+    config["warnings"] = warnings
+    return cast(JobConfig, config)
+
+
+def increase_budgets(
+    saved: JobConfig,
+    increases: object,
+    capabilities: Mapping[str, object] | None = None,
+) -> JobConfig:
+    """Copy a saved configuration, changing only nondecreasing output budgets.
+
+    Values are absolute token counts, not deltas. Empty or unchanged budgets
+    retain the snapshot exactly, including its historical metadata and warnings.
+    Never resolve profiles, detail multipliers or deployment defaults again.
+    """
+    if not isinstance(increases, dict) or set(increases) - RESUME_BUDGETS:
+        raise ConfigurationError(
+            "invalid_overrides", "Only output token budgets can change on resume."
+        )
+    config = cast(dict[str, Any], copy.deepcopy(saved))
+    config.update(increases)
+    _validate_integer_budgets(config)
+    for name, value in increases.items():
+        if value < cast(Mapping[str, Any], saved)[name]:
+            raise ConfigurationError(
+                "invalid_budget", "Resume token budgets cannot decrease."
+            )
+    _validate_context(cast(JobConfig, config), capabilities)
+    return cast(JobConfig, config)
+
+
+def _validate_integer_budgets(config: Mapping[str, object]) -> None:
+    """Share strict integer and range checks between creation and resume."""
+    for name, (minimum, maximum) in INTEGER_LIMITS.items():
+        value = config[name]
+        if type(value) is not int or not minimum <= value <= maximum:
+            raise ConfigurationError("invalid_budget", f"Invalid {name} budget.")
+
+
+def _validate_context(
+    config: JobConfig, capabilities: Mapping[str, object] | None
+) -> list[str]:
+    """Check joint budgets against the saved application and observed engine context."""
     context = config["context_tokens"]
     if type(context) is not int or context < 512:
         raise ConfigurationError(
             "invalid_context", "Invalid application context limit."
         )
+    warnings = []
     engine_context = (capabilities or {}).get("context_tokens")
     if type(engine_context) is int and engine_context > 0:
         context = min(context, engine_context)
@@ -195,8 +239,7 @@ def resolve(
             "context_insufficient",
             "Budgets exceed the available context; reduce them before starting.",
         )
-    config["warnings"] = warnings
-    return cast(JobConfig, config)
+    return warnings
 
 
 def public_config(
