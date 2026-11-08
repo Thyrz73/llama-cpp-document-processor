@@ -301,26 +301,28 @@ class ApplicationTests(unittest.TestCase):
         settings = replace(self.settings, max_upload_mb=1)
         client, services = self.ready(settings=settings)
         for extra in (0, 65536):
-            with self.subTest(extra=extra):
-                response = client.post(
+            with (
+                self.subTest(extra=extra),
+                io.BytesIO(b"%PDF-" + b"x" * (1024 * 1024 + extra)) as pdf,
+                client.post(
                     "/api/jobs",
-                    data={
-                        "file": (
-                            io.BytesIO(b"%PDF-" + b"x" * (1024 * 1024 + extra)),
-                            "large.pdf",
-                        )
-                    },
-                )
-                self.assertEqual(response.status_code, 413)
-                self.assertEqual(
-                    response.json,
-                    {
-                        "error_code": "upload_limit",
-                        "error": "PDF too large (limit: 1 MiB)",
-                    },
-                )
-                self.assertEqual(services.store.list_jobs()[0], [])
-                self.assertEqual(list(settings.data_dir.rglob(SOURCE_FILE)), [])
+                    data={"file": (pdf, "large.pdf")},
+                ) as response,
+            ):
+                try:
+                    self.assertEqual(response.status_code, 413)
+                    self.assertEqual(
+                        response.json,
+                        {
+                            "error_code": "upload_limit",
+                            "error": "PDF too large (limit: 1 MiB)",
+                        },
+                    )
+                    self.assertEqual(services.store.list_jobs()[0], [])
+                    self.assertEqual(list(settings.data_dir.rglob(SOURCE_FILE)), [])
+                finally:
+                    # A 413 can leave the multipart body unread in its temp file.
+                    response.request.input_stream.close()
 
     def test_live_cache_reasoning_and_disabled_preview_remain_per_application(self):
         client, services = self.ready()
