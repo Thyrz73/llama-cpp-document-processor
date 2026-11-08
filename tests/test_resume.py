@@ -16,6 +16,7 @@ from support import WordCountModelMixin
 
 from document_processor import config, database, extraction, jobs
 from document_processor.application import create_app
+from document_processor.artifacts import Artifacts
 from document_processor.errors import ModelError
 from document_processor.jobs import JobStore
 from document_processor.model_client import ModelClient
@@ -161,7 +162,12 @@ class ResumeApiTests(unittest.TestCase):
                 self.assertEqual(self.store.attempt_count(identifier), 0)
                 public = config.public_config(expected)
                 self.assertEqual(
-                    response.json, {"status": "queued", "configuration": public}
+                    response.json,
+                    {
+                        "status": "queued",
+                        "configuration": public,
+                        "validation_warnings": ["engine_context_unknown"],
+                    },
                 )
                 self.assertEqual(
                     self.client.get(f"/api/jobs/{identifier}").json["configuration"],
@@ -212,6 +218,103 @@ class ResumeApiTests(unittest.TestCase):
             self.store.load_config(identifier), {**saved, "merge_tokens": 4096}
         )
         wake.assert_called_once_with()
+
+    def test_expired_engine_context_warning_does_not_change_snapshot_or_artifacts(self):
+        self.services.capabilities.remember(
+            {"status": "available", "context_tokens": 8192}
+        )
+        identifier = self.create()
+        saved = self.store.load_config(identifier)
+        self.assertNotIn("engine_context_unknown", saved["warnings"])
+        before = self.snapshot()
+        checksum = config.fingerprint(saved)
+        artifacts = Artifacts(self.store.job_dir(identifier), saved)
+        dependencies = {"source": "test"}
+        artifacts.write("notes.md", "PRIVATE_ARTIFACT", dependencies)
+        # Expire deterministically, without sleeping or changing the saved snapshot.
+        self.services.capabilities.entry["expires"] = 0
+        self.assertIsNone(self.services.capabilities.get())
+        response = self.post(identifier, json={})
+        self.assertEqual(response.status_code, 200, response.json)
+        self.assertEqual(
+            response.json["validation_warnings"], ["engine_context_unknown"]
+        )
+        self.assertEqual(response.json["configuration"], config.public_config(saved))
+        self.assertEqual(response.json["configuration"]["fingerprint"], checksum)
+        self.assertEqual(self.store.load_config(identifier), saved)
+        after = self.snapshot()
+        for table in before.keys() - {"jobs"}:
+            self.assertEqual(after[table], before[table], table)
+        resumed_artifacts = Artifacts(
+            self.store.job_dir(identifier), self.store.load_config(identifier)
+        )
+        self.assertEqual(resumed_artifacts.root, artifacts.root)
+        self.assertEqual(
+            resumed_artifacts.read("notes.md", dependencies), "PRIVATE_ARTIFACT"
+        )
+        body = response.get_data(as_text=True)
+        for private in (
+            "PRIVATE_ARTIFACT",
+            "PRIVATE_SYSTEM_PROMPT",
+            "source_hash",
+            "templates",
+        ):
+            self.assertNotIn(private, body)
+        # Unknown engine context still enforces the immutable application ceiling.
+        self.store.update_job(identifier, status="failed")
+        self.wake.reset_mock()
+        self.rejected(
+            identifier,
+            400,
+            "context_insufficient",
+            json={"final_tokens": saved["context_tokens"]},
+        )
+
+    def test_current_context_warnings_do_not_change_budget_revision_identity(self):
+        observation = {"status": "available", "context_tokens": 8192}
+        self.services.capabilities.remember(observation)
+        identifier = self.create()
+        saved = self.store.load_config(identifier)
+        original_rows = self.snapshot()["job_configs"]
+        expected = {**saved, "merge_tokens": 4096}
+        self.services.capabilities.entry["expires"] = 0
+        unknown = self.post(identifier, json={"merge_tokens": 4096})
+        self.assertEqual(unknown.status_code, 200, unknown.json)
+        self.assertEqual(
+            unknown.json["validation_warnings"], ["engine_context_unknown"]
+        )
+        self.assertEqual(self.store.load_config(identifier), expected)
+        self.assertEqual(
+            unknown.json["configuration"]["fingerprint"], config.fingerprint(expected)
+        )
+        revisions = self.snapshot()["job_config_revisions"]
+        self.assertEqual(len(revisions), 1)
+        self.store.update_job(identifier, status="failed")
+        self.services.capabilities.remember(observation)
+        known = self.post(identifier, json={"merge_tokens": 4096})
+        self.assertEqual(known.status_code, 200, known.json)
+        self.assertEqual(known.json["validation_warnings"], [])
+        self.assertEqual(known.json["configuration"], unknown.json["configuration"])
+        self.assertEqual(self.snapshot()["job_config_revisions"], revisions)
+        self.assertEqual(self.snapshot()["job_configs"], original_rows)
+        self.assertEqual(self.store.load_config(identifier, revision=0), saved)
+        self.assertNotIn("validation_warnings", self.store.load_config(identifier))
+
+    def test_historical_unknown_context_warning_is_separate_from_current_known_context(
+        self,
+    ):
+        identifier = self.create()
+        saved = self.store.load_config(identifier)
+        self.assertIn("engine_context_unknown", saved["warnings"])
+        self.services.capabilities.remember(
+            {"status": "available", "context_tokens": 8192}
+        )
+        response = self.post(identifier)
+        self.assertEqual(response.status_code, 200, response.json)
+        self.assertEqual(response.json["validation_warnings"], [])
+        self.assertEqual(response.json["configuration"]["warnings"], saved["warnings"])
+        self.assertEqual(self.store.load_config(identifier), saved)
+        self.assertEqual(self.snapshot()["job_config_revisions"], [])
 
     def test_invalid_types_and_ranges_are_rejected_without_coercion(self):
         identifier = self.create()

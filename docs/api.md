@@ -15,7 +15,8 @@ There is no authentication or per-user isolation. Browser POSTs from another ori
 | `GET /api/jobs/<id>/report` | Original UTF-8 Markdown attachment with a descriptive portable filename |
 | `GET /api/jobs/<id>/report/view?lang=en` | Server-rendered Markdown reader, optional `lang=en` or `lang=fr`; never starts generation |
 | `GET /api/jobs/<id>/live` | Latest bounded preview; never starts generation |
-| `POST /api/jobs/<id>/retry` | Empty body; requeues a failed/cancelled job with its original settings |
+| `POST /api/jobs/<id>/retry` | Empty body; requeues a failed/cancelled job with its selected effective configuration |
+| `POST /api/jobs/<id>/resume` | Optional output token budget increases; returns the effective configuration and transient `validation_warnings` |
 | `POST /api/jobs/<id>/cancel` | Requests cancellation |
 | `POST /api/jobs/<id>/delete` | Deletes one terminal analysis; returns its individual outcome |
 | `POST /api/jobs/delete` | JSON `{"ids":["<id>","<id>"]}`; deletes up to 100 analyses with per-ID outcomes |
@@ -70,7 +71,9 @@ Statuses are `queued`, `running`, `done`, `failed`, `cancelled`. `progress_perce
 
 Failed jobs store a stable `error_code` and a displayable `error`, for example `encrypted_pdf`, `page_limit`, `no_usable_text`, `ocr_missing`, `deadline` or `identity_changed`. The interface translates known codes. Unexpected internal errors use `analysis_failed` with a generic message; their details are logged without private text.
 
-Retry returns 200 when queued, 409 for an incompatible status or an exhausted attempt limit, and 400 for a nonempty body. It preserves saved budgets and prompts. Jobs predating snapshots get `legacy_recomputed` and current settings when processed. Create a new job to use new settings.
+Retry returns 200 when queued, 409 for an incompatible status or an exhausted attempt limit, and 400 for a nonempty body. It retains the selected effective configuration, including budgets and prompts. After a configurable resume, retry keeps that revision rather than reverting to the original snapshot. Jobs predating snapshots get `legacy_recomputed` and current settings when processed.
+
+Resume accepts an empty body or a JSON object containing absolute, nondecreasing `analysis_tokens`, `merge_tokens` and/or `final_tokens` values. Its successful response includes `status`, `configuration` and `validation_warnings`. `configuration.warnings` contains historical observations saved with the snapshot. `validation_warnings` contains the current context check's warnings, including `engine_context_unknown` when the backend context is unavailable or its cache entry has expired. These transient warnings are never stored or included in configuration fingerprints or artifact compatibility. They describe the cached observation used for this request, not live backend availability. Even without a known engine context, the saved application context remains enforced; the worker checks fully assembled prompts before generation.
 
 Cancel returns 202 when accepted, 200 if already cancelled and 409 for done/failed jobs. Queued jobs become cancelled immediately. Running jobs keep their status with `cancel_requested=true` until cancellation takes effect. The running job sees an accepted request at its next cooperative check: each phase change, tokenizer call or streamed token, and every 0.2 seconds while it waits for the model. These checks are answered in memory; SQLite is reread at most once per second. OCR finishes or times out first; remote engine release depends on the backend.
 

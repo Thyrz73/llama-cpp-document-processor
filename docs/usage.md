@@ -26,7 +26,7 @@ The server-rendered reader supports headings, lists, tables, quotes, links and c
 
 ## Cancel and retry
 
-**Cancel** stops queued jobs immediately and requests cancellation of running work. OCR finishes its current subprocess first; a remote model may take longer to stop. **Retry** is available for failed or cancelled jobs and keeps their original settings. Create a new analysis to change budgets, language or prompts. If the server refuses a cancellation or a retry, for example once the retry limit is reached, the reason appears above the analyses list.
+**Cancel** stops queued jobs immediately and requests cancellation of running work. OCR finishes its current subprocess first; a remote model may take longer to stop. **Retry** is available for failed or cancelled jobs and keeps their selected effective settings, including budgets from a previous API resume. The resume API can increase output token budgets; create a new analysis to change language or prompts. If the server refuses a cancellation or a retry, for example once the retry limit is reached, the reason appears above the analyses list.
 
 If a cancelled or timed-out HTTP reader is still closing, the next generation waits for it instead of failing subsequent jobs. This wait remains cancellable and does not consume the next generation's time limit. A response arriving after cancellation is closed before reading its body.
 

@@ -184,12 +184,14 @@ def increase_budgets(
     saved: JobConfig,
     increases: object,
     capabilities: Mapping[str, object] | None = None,
-) -> JobConfig:
-    """Copy a saved configuration, changing only nondecreasing output budgets.
+) -> tuple[JobConfig, list[str]]:
+    """Return increased saved budgets and separate current context warnings.
 
     Values are absolute token counts, not deltas. Empty or unchanged budgets
     retain the snapshot exactly, including its historical metadata and warnings.
     Never resolve profiles, detail multipliers or deployment defaults again.
+    The returned warnings describe this validation's backend observation only;
+    they must not enter the snapshot, its fingerprint or artifact dependencies.
     """
     if not isinstance(increases, dict) or set(increases) - RESUME_BUDGETS:
         raise ConfigurationError(
@@ -203,8 +205,8 @@ def increase_budgets(
             raise ConfigurationError(
                 "invalid_budget", "Resume token budgets cannot decrease."
             )
-    _validate_context(cast(JobConfig, config), capabilities)
-    return cast(JobConfig, config)
+    validation_warnings = _validate_context(cast(JobConfig, config), capabilities)
+    return cast(JobConfig, config), validation_warnings
 
 
 def _validate_integer_budgets(config: Mapping[str, object]) -> None:
@@ -248,7 +250,8 @@ def public_config(
     """Expose only job controls, never prompt text, credentials or local paths.
 
     stored_fingerprint is the value saved with the snapshot; passing it avoids
-    hashing the whole snapshot again.
+    hashing the whole snapshot again. warnings retains the snapshot's historical
+    observations; it does not describe the backend's current availability.
     """
     fields = {
         "profile",

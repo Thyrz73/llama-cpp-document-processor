@@ -283,8 +283,10 @@ def job_metrics(job_id):
 
 @blueprint.post("/api/jobs/<job_id>/retry")
 def retry_job(job_id):
-    """Queue a failed or cancelled job again, with its original configuration.
+    """Queue a failed/cancelled job with its currently selected configuration.
 
+    After a configurable resume, retain that effective revision; do not reset
+    to the original snapshot. Legacy jobs without snapshots are recomputed.
     Finished steps are reused. Return HTTP 200, 400 when the request has a
     body (a retry cannot change the settings), 404 for an unknown job, or 409
     when the job is neither failed nor cancelled or has used all its attempts.
@@ -294,7 +296,7 @@ def retry_job(job_id):
         abort(404)
     if request.data or request.form:
         return jsonify(
-            error="Retry uses the original snapshot. Create a new job to change options.",
+            error="Retry keeps the selected configuration. Use resume to increase token budgets.",
             error_code="immutable_config",
         ), 400
     outcome, attempts = services.store.requeue(
@@ -326,6 +328,8 @@ def resume_job(job_id):
     merge_tokens and/or final_tokens. Return the effective public configuration
     with HTTP 200, 400 for invalid budgets, 404 for an unknown job, or 409 for a
     state/attempt conflict or a legacy job without a saved configuration.
+    validation_warnings describes the current context check separately from
+    the snapshot's historical configuration.warnings; it is never persisted.
     """
     services = get_services()
     if request.content_length and request.content_length > 8192:
@@ -336,7 +340,7 @@ def resume_job(job_id):
         raise job_config.ConfigurationError(
             "invalid_options", "Resume budgets must be a small JSON object."
         )
-    outcome, attempts, config = services.store.resume(
+    outcome, attempts, config, validation_warnings = services.store.resume(
         job_id, payload, services.capabilities.get()
     )
     if outcome == "missing":
@@ -359,7 +363,11 @@ def resume_job(job_id):
     # Revision and queue state are committed before the worker can be woken.
     services.worker.wake()
     event("job_resume", job_id=job_id, attempt=attempts + 1, status="queued")
-    return jsonify(status="queued", configuration=job_config.public_config(config))
+    return jsonify(
+        status="queued",
+        configuration=job_config.public_config(config),
+        validation_warnings=validation_warnings,
+    )
 
 
 @blueprint.post("/api/jobs/<job_id>/cancel")

@@ -556,10 +556,12 @@ class JobStore:
     def resume(self, job_id, increases, capabilities=None):
         """Validate saved budgets, append/select a revision and queue in one commit.
 
-        Return (outcome, previous attempts, effective configuration). No snapshot
-        means configurable resume is unavailable: only legacy retry may resolve
-        current defaults. BEGIN IMMEDIATE serializes resumes, retries, deletion
-        and worker claims, so a competing request cannot append another revision.
+        Return (outcome, previous attempts, effective configuration, validation
+        warnings). Validation warnings are transient; snapshot warnings stay
+        historical. No snapshot means configurable resume is unavailable: only
+        legacy retry may resolve current defaults. BEGIN IMMEDIATE serializes
+        resumes, retries, deletion and worker claims, so a competing request
+        cannot append another revision.
         """
         with self.connect() as con:
             con.execute("BEGIN IMMEDIATE")
@@ -567,27 +569,27 @@ class JobStore:
                 "SELECT status FROM jobs WHERE id=?", (job_id,)
             ).fetchone()
             if row is None:
-                return "missing", 0, None
+                return "missing", 0, None, []
             finishing = con.execute(
                 "SELECT 1 FROM job_runs WHERE job_id=? AND status='running' LIMIT 1",
                 (job_id,),
             ).fetchone()
             if row["status"] not in ("failed", "cancelled") or finishing:
-                return "conflict", 0, None
+                return "conflict", 0, None, []
             saved = self._config_row(con, job_id, self._selected_revision(con, job_id))
             if saved is None:
-                return "config_missing", 0, None
-            config = increase_budgets(
+                return "config_missing", 0, None, []
+            config, validation_warnings = increase_budgets(
                 self._decode_config(saved), increases, capabilities
             )
             outcome, attempts = self._requeue(con, job_id, config["max_attempts"])
             if outcome != "queued":
-                return outcome, attempts, None
+                return outcome, attempts, None, []
             revision = self._insert_config_revision(con, job_id, config)
             self._select_revision(con, job_id, revision)
         self.previews.discard(job_id)
         self._discard_public_config(job_id)
-        return "queued", attempts, config
+        return "queued", attempts, config, validation_warnings
 
     def _requeue(self, con, job_id, maximum):
         """Apply the shared attempt guard and queue reset in the caller's transaction."""
