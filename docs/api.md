@@ -8,7 +8,7 @@ There is no authentication or per-user isolation. Browser POSTs from another ori
 
 | Method and path | Behavior |
 | --- | --- |
-| `GET /api/health` | Web app liveness only; no model or worker check |
+| `GET /api/health` | Web app liveness and application version; no model or worker check |
 | `GET /api/jobs` | `jobs`: latest 100; `has_active_jobs`: activity across the whole queue |
 | `GET /api/jobs/<id>` | Job status, progress, phase, question, filename and public configuration |
 | `POST /api/jobs` | Multipart PDF upload; returns 201 with ID, queued status and configuration |
@@ -25,6 +25,8 @@ There is no authentication or per-user isolation. Browser POSTs from another ori
 | `GET /api/diagnostics` | Read-only backend inspection, cached for 30 seconds (5 seconds for failures/unknown context); no inference |
 
 Missing jobs return 404. Report access returns 409 unless the job is done and 404 if the file is missing or outside its authorized directory. Empty reports download as empty Markdown and show a message in the reader. Downloads keep `text/markdown; charset=utf-8` and set attachment `filename` and UTF-8 `filename*` parameters. The internal filename remains `rapport_final.md`.
+
+Health returns HTTP 200 with `{"status":"ok","version":"2.0.0"}`. The additive `version` field comes from `document_processor.__version__`; `status` and liveness semantics are unchanged. It does not check SQLite, the worker or llama.cpp. Clients should tolerate additional JSON fields.
 
 The reader escapes raw HTML, rejects executable link schemes, disables images and sends a restrictive Content Security Policy. Previews over 1 MiB return an HTML page with status 413 and an original download link. The reader also provides localized HTML messages for missing, unreadable and unfinished reports. Download errors retain the JSON API format. No arbitrary file or intermediate artifact route is exposed.
 

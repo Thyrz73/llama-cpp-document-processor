@@ -44,7 +44,7 @@ docker compose up -d --build
 curl -f http://127.0.0.1:9932/api/health
 ```
 
-Open **http://127.0.0.1:9932** and try a small text PDF. Health checks confirm the web app responds; they do not check the model or worker.
+Open **http://127.0.0.1:9932** and try a small text PDF. Health returns `status: "ok"` and the application `version`; it does not check the model, SQLite or worker.
 
 `LLAMA_BASE_URL` must be reachable **from the container**. The host alias works when llama.cpp listens on the Docker host's gateway interface. Use its LAN IP if needed; `localhost` inside the container points to the processor itself.
 
@@ -216,6 +216,7 @@ Dependencies are hash-locked and the Docker base image is pinned by digest; [Dep
 - [Architecture](docs/architecture.md): modules, data flow, design rules and common changes.
 - [Using the interface in detail](docs/usage.md): history, reports, cancellation, live output, logs and metrics.
 - [API](docs/api.md): routes, statuses, errors, retries and history deletion.
+- [Changelog](CHANGELOG.md), [release gates and rollback](docs/releasing.md), and [measured release validation](docs/release-validation.md).
 - [Engine tuning and benchmarks](docs/engine-tuning.md).
 - [Documentary reliability](docs/documentary-reliability.md): what the automatic checks verify, and their limits.
 - [UTF-8 handling](docs/utf8-correction.md) and [migration and rollback](docs/migration-v2.md).

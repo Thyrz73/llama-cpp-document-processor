@@ -2,6 +2,8 @@
 
 Updating Document Processor does not restart or reconfigure llama.cpp. Keep the existing `data/`, `.env` and private `config/system_prompt.txt`.
 
+For the first tagged release, follow [release gates, exact-image backup and Docker rollback](releasing.md). The application version reported by `/api/health` is independent of the numbered SQLite schema and artifact/prompt versions.
+
 ## Update
 
 Wait for the queue to empty, then stop the processor and back up its state:

@@ -5,8 +5,8 @@ from pathlib import Path
 
 from flask import Blueprint, jsonify, render_template, request
 
+from .. import __version__, profiles
 from .. import config as job_config
-from .. import profiles
 from . import get_services
 
 blueprint = Blueprint("system", __name__)
@@ -25,8 +25,8 @@ def index():
 
 @blueprint.get("/api/health")
 def health():
-    """Return HTTP 200 without checking the model or worker."""
-    return jsonify(status="ok")
+    """Return application liveness and version without checking the model or worker."""
+    return jsonify(status="ok", version=__version__)
 
 
 @blueprint.get("/api/profiles")

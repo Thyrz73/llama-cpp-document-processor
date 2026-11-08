@@ -13,7 +13,7 @@ from unittest.mock import Mock, patch
 
 from flask import url_for
 
-from document_processor import pipeline
+from document_processor import __version__, pipeline
 from document_processor.application import create_app
 from document_processor.backend import BackendClient, DeploymentModelClient
 from document_processor.database import SchemaVersionError
@@ -74,9 +74,10 @@ class ApplicationTests(unittest.TestCase):
             application, services = self.application(client_factory=factory)
             self.assertFalse(self.settings.data_dir.exists())
             self.assertIsNone(services.worker._thread)
-            self.assertEqual(
-                application.test_client().get("/api/health").json, {"status": "ok"}
-            )
+            response = application.test_client().get("/api/health")
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json, {"status": "ok", "version": __version__})
+            self.assertEqual(response.headers["Cache-Control"], "no-store")
             self.assertFalse(self.settings.data_dir.exists())
             factory.assert_not_called()
         self.assertEqual(set(application.blueprints), {"jobs", "reports", "system"})

@@ -1,0 +1,268 @@
+{
+  "measured_on": "2026-11-08",
+  "platform": "Linux-6.6.114.1-microsoft-standard-WSL2-x86_64-with-glibc2.43",
+  "tesseract": "5.5.0",
+  "constraints": "Unrestricted WSL2 host; no Docker memory/CPU limit applied.",
+  "reference_note": "Reconstructed step-00 source baseline: f55eb01, parent of step-01 commit 8a8b938. No historical timing capture was available.",
+  "candidate_note": "5c5320e plus the additive health-version change; extraction, SQL, preview and tokenizer production code unchanged during release preparation.",
+  "reference": {
+    "label": "f55eb017ed947b7d07e436e4c00c3c26d9f65bb6",
+    "python": "3.12.16 (main, Oct 26 2026, 14:08:45) [Clang 23.1.3 ]",
+    "versions": {
+      "PyMuPDF": "1.28.2",
+      "pypdf": "6.21.4",
+      "Flask": "3.1.3",
+      "waitress": "3.0.2"
+    },
+    "sqlite": "3.53.1",
+    "samples": [
+      {
+        "sql": {
+          "list_100": {
+            "median_us": 862.018,
+            "p95_us": 1634.74
+          },
+          "active": {
+            "median_us": 46.898,
+            "p95_us": 50.398
+          },
+          "claim_select": {
+            "median_us": 39.498,
+            "p95_us": 49.798
+          }
+        },
+        "progress": {
+          "callbacks": 120,
+          "sql_updates": 120,
+          "preview_writes": 120
+        },
+        "live": {
+          "callbacks": 102,
+          "preview_writes": 102
+        },
+        "tokenizer": {
+          "method_calls": 239,
+          "endpoint_calls": 239,
+          "chunks": 10,
+          "seconds": 0.04031131000010646
+        },
+        "extraction": {
+          "text_120_seconds": 0.05217057099980593,
+          "ocr_1_seconds": 0.3017851439999504
+        },
+        "idle_server": {
+          "rss_kib": 71300,
+          "pss_kib": 65168
+        }
+      },
+      {
+        "sql": {
+          "list_100": {
+            "median_us": 872.268,
+            "p95_us": 1579.942
+          },
+          "active": {
+            "median_us": 46.898,
+            "p95_us": 53.798
+          },
+          "claim_select": {
+            "median_us": 38.799,
+            "p95_us": 43.598
+          }
+        },
+        "progress": {
+          "callbacks": 120,
+          "sql_updates": 120,
+          "preview_writes": 120
+        },
+        "live": {
+          "callbacks": 102,
+          "preview_writes": 102
+        },
+        "tokenizer": {
+          "method_calls": 239,
+          "endpoint_calls": 239,
+          "chunks": 10,
+          "seconds": 0.040393106999545125
+        },
+        "extraction": {
+          "text_120_seconds": 0.053546920000371756,
+          "ocr_1_seconds": 0.28165819000059855
+        },
+        "idle_server": {
+          "rss_kib": 71216,
+          "pss_kib": 65122
+        }
+      },
+      {
+        "sql": {
+          "list_100": {
+            "median_us": 865.019,
+            "p95_us": 1858.932
+          },
+          "active": {
+            "median_us": 46.948,
+            "p95_us": 57.198
+          },
+          "claim_select": {
+            "median_us": 39.799,
+            "p95_us": 49.898
+          }
+        },
+        "progress": {
+          "callbacks": 120,
+          "sql_updates": 120,
+          "preview_writes": 120
+        },
+        "live": {
+          "callbacks": 102,
+          "preview_writes": 102
+        },
+        "tokenizer": {
+          "method_calls": 239,
+          "endpoint_calls": 239,
+          "chunks": 10,
+          "seconds": 0.03938044599999557
+        },
+        "extraction": {
+          "text_120_seconds": 0.06455751700013934,
+          "ocr_1_seconds": 0.288119363000078
+        },
+        "idle_server": {
+          "rss_kib": 71284,
+          "pss_kib": 65153
+        }
+      }
+    ]
+  },
+  "candidate": {
+    "label": "release-working-tree",
+    "python": "3.12.16 (main, Oct 26 2026, 14:08:45) [Clang 23.1.3 ]",
+    "versions": {
+      "PyMuPDF": "1.28.2",
+      "pypdf": "6.21.4",
+      "Flask": "3.1.3",
+      "waitress": "3.0.2"
+    },
+    "sqlite": "3.53.1",
+    "samples": [
+      {
+        "sql": {
+          "list_100": {
+            "median_us": 177.394,
+            "p95_us": 217.692
+          },
+          "active": {
+            "median_us": 2.7,
+            "p95_us": 2.899
+          },
+          "claim_select": {
+            "median_us": 0.9,
+            "p95_us": 1.0
+          }
+        },
+        "progress": {
+          "callbacks": 120,
+          "sql_updates": 3,
+          "preview_writes": 2
+        },
+        "live": {
+          "callbacks": 102,
+          "preview_writes": 6
+        },
+        "tokenizer": {
+          "method_calls": 139,
+          "endpoint_calls": 139,
+          "chunks": 10,
+          "seconds": 0.014747956000064733
+        },
+        "extraction": {
+          "text_120_seconds": 0.0530466410000372,
+          "ocr_1_seconds": 0.2909318580004765
+        },
+        "idle_server": {
+          "rss_kib": 69888,
+          "pss_kib": 63816
+        }
+      },
+      {
+        "sql": {
+          "list_100": {
+            "median_us": 178.993,
+            "p95_us": 203.592
+          },
+          "active": {
+            "median_us": 2.6,
+            "p95_us": 2.8
+          },
+          "claim_select": {
+            "median_us": 0.9,
+            "p95_us": 1.0
+          }
+        },
+        "progress": {
+          "callbacks": 120,
+          "sql_updates": 3,
+          "preview_writes": 2
+        },
+        "live": {
+          "callbacks": 102,
+          "preview_writes": 6
+        },
+        "tokenizer": {
+          "method_calls": 139,
+          "endpoint_calls": 139,
+          "chunks": 10,
+          "seconds": 0.014673757999844383
+        },
+        "extraction": {
+          "text_120_seconds": 0.053624520000084885,
+          "ocr_1_seconds": 0.2911928489993443
+        },
+        "idle_server": {
+          "rss_kib": 69876,
+          "pss_kib": 63795
+        }
+      },
+      {
+        "sql": {
+          "list_100": {
+            "median_us": 323.888,
+            "p95_us": 363.687
+          },
+          "active": {
+            "median_us": 4.9,
+            "p95_us": 9.6
+          },
+          "claim_select": {
+            "median_us": 1.7,
+            "p95_us": 2.9
+          }
+        },
+        "progress": {
+          "callbacks": 120,
+          "sql_updates": 3,
+          "preview_writes": 2
+        },
+        "live": {
+          "callbacks": 102,
+          "preview_writes": 6
+        },
+        "tokenizer": {
+          "method_calls": 139,
+          "endpoint_calls": 139,
+          "chunks": 10,
+          "seconds": 0.02392031700037478
+        },
+        "extraction": {
+          "text_120_seconds": 0.05376311500003794,
+          "ocr_1_seconds": 0.30338969900003576
+        },
+        "idle_server": {
+          "rss_kib": 69892,
+          "pss_kib": 63811
+        }
+      }
+    ]
+  }
+}
