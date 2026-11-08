@@ -830,6 +830,11 @@ class Recorder:
                 "SELECT ?, job_id, revision FROM job_config_selections WHERE job_id=?",
                 (self.run_id, job_id),
             )
+            reference = con.execute(
+                "SELECT revision FROM job_run_config_revisions WHERE run_id=?",
+                (self.run_id,),
+            ).fetchone()
+            self.config_revision = reference["revision"] if reference else 0
         event(
             "job_attempt_started",
             job_id=job_id,

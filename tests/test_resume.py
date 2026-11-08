@@ -31,7 +31,7 @@ class ResumeModel(WordCountModelMixin, ModelClient):
         self.capabilities = {
             "context_tokens": 16384,
             "model": "resume-model",
-            "template_hash": "template-1",
+            "template_hash": config.fingerprint("template-1"),
             "version": "test",
             "sampling": {"temperature": 0.2},
         }
@@ -742,9 +742,7 @@ class ResumeApiTests(unittest.TestCase):
             services.worker.run_claimed(identifier)
         self.assertEqual(restarted.get_job(identifier)["status"], "done")
         self.assertEqual(models[1].config, expected)
-        self.assertEqual(
-            set(models[1].calls), {("section", 4096), ("merge", 4096), ("final", 6144)}
-        )
+        self.assertEqual(models[1].calls, [("final", 6144)])
         metrics = restarted.metrics(identifier)
         self.assertEqual([run["status"] for run in metrics["runs"]], ["done", "failed"])
         for run, expected_config in zip(
@@ -754,13 +752,23 @@ class ResumeApiTests(unittest.TestCase):
                 restarted.load_attempt_config(identifier, run["id"]), expected_config
             )
         self.assertEqual(restarted.load_config(identifier, revision=0), original)
-        self.assertTrue(
-            all(
-                step["status"] != "reused"
-                for step in metrics["steps"]
-                if step["run_id"] == metrics["runs"][0]["id"]
-            )
+        reused = [
+            step
+            for step in metrics["steps"]
+            if step["run_id"] == metrics["runs"][0]["id"] and step["status"] == "reused"
+        ]
+        self.assertEqual(
+            {step["step_key"] for step in reused},
+            {"extracted.json", "chunks.json", "merge_00_0000.md"}
+            | {f"analysis_{index:04d}.md" for index in range(5)},
         )
+        for step in reused:
+            self.assertEqual(step["metrics"]["artifact_source_revision"], 0)
+            if step["stage"] in ("section", "merge"):
+                key = (
+                    "analysis_tokens" if step["stage"] == "section" else "merge_tokens"
+                )
+                self.assertEqual(step["metrics"]["output_budget"], original[key])
 
     def test_historical_snapshot_metadata_and_extensions_are_preserved(self):
         identifier = self.create()

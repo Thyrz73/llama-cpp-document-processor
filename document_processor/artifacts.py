@@ -13,13 +13,15 @@ import json
 import os
 import re
 import stat
-from collections.abc import Iterator, Mapping
+from collections import OrderedDict
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, BinaryIO, Literal
+from typing import TYPE_CHECKING, Any, BinaryIO, Literal, cast
 
-from .config import compatible_artifact_config, fingerprint
+from .config import RESUME_BUDGETS, compatible_artifact_config, fingerprint
+from .contracts import ArtifactHistory
 from .errors import ProcessingError
 from .files import atomic_json, atomic_text, file_hash
 from .jobs import MAX_ARTIFACT_REVISIONS, SOURCE_FILE
@@ -49,6 +51,54 @@ class ReusedArtifact:
     sha256: str
     dependencies_hash: str
     reused: Literal[True] = True
+    generation_budget: int | None = None
+
+
+@dataclass
+class ArtifactReuseCache:
+    """Attempt-local verification metadata, never cached artifact text.
+
+    History is bounded by MAX_ARTIFACT_REVISIONS. Parsed manifests use an LRU
+    with at most MAX_REUSE_MANIFEST_BYTES of serialized input in total. Source
+    and manifest observations are usable only while file metadata still matches;
+    every returned artifact is read and hashed again. Never share between runs.
+    """
+
+    key: tuple[object, ...] | None = None
+    history: ArtifactHistory | None = None
+    source: tuple[tuple[int, ...], str] | None = None
+    manifests: OrderedDict[str, tuple[tuple[int, ...], dict[str, Any], int]] = field(
+        default_factory=OrderedDict
+    )
+    manifest_bytes: int = 0
+
+    def bind(self, key: tuple[object, ...]) -> None:
+        if self.key != key:
+            self.key, self.history, self.source = key, None, None
+            self.manifests.clear()
+            self.manifest_bytes = 0
+
+    def manifest(self, root: int, config_hash: str) -> dict[str, Any]:
+        with _regular_file(root, "manifest.json") as stream:
+            before = _file_state(stream)
+            cached = self.manifests.get(config_hash)
+            if cached is not None and cached[0] == before:
+                self.manifests.move_to_end(config_hash)
+                return cached[1]
+            content = _read_stream(stream, MAX_REUSE_MANIFEST_BYTES)
+        manifest = json.loads(content, object_pairs_hook=_unique_object)
+        if not isinstance(manifest, dict):
+            raise ValueError("Unverifiable artifact manifest.")
+        if cached is not None:
+            self.manifest_bytes -= self.manifests.pop(config_hash)[2]
+        while (
+            self.manifests
+            and self.manifest_bytes + len(content) > MAX_REUSE_MANIFEST_BYTES
+        ):
+            self.manifest_bytes -= self.manifests.popitem(last=False)[1][2]
+        self.manifests[config_hash] = before, manifest, len(content)
+        self.manifest_bytes += len(content)
+        return manifest
 
 
 def _is_hash(value: object) -> bool:
@@ -93,21 +143,33 @@ def _file_state(stream: BinaryIO) -> tuple[int, ...]:
 
 def _read_bounded(parent: int, name: str, limit: int) -> bytes:
     with _regular_file(parent, name) as stream:
-        before = _file_state(stream)
-        if before[2] > limit:
-            raise ValueError("Artifact exceeds reuse size limit.")
-        content = stream.read(before[2] + 1)
-        if len(content) != before[2] or before != _file_state(stream):
-            raise ValueError("Artifact changed during verification.")
-        return content
+        return _read_stream(stream, limit)
 
 
-def _source_hash(parent: int) -> str:
+def _read_stream(stream: BinaryIO, limit: int) -> bytes:
+    before = _file_state(stream)
+    if before[2] > limit:
+        raise ValueError("Artifact exceeds reuse size limit.")
+    content = stream.read(before[2] + 1)
+    if len(content) != before[2] or before != _file_state(stream):
+        raise ValueError("Artifact changed during verification.")
+    return content
+
+
+def _source_hash(
+    parent: int,
+    cache: ArtifactReuseCache | None = None,
+    check_cancelled: Callable[[], None] | None = None,
+) -> str:
     digest = hashlib.sha256()
     with _regular_file(parent, SOURCE_FILE) as stream:
         before = _file_state(stream)
+        if cache is not None and cache.source is not None and cache.source[0] == before:
+            return cache.source[1]
         remaining = before[2]
         while remaining:
+            if check_cancelled is not None:
+                check_cancelled()
             block = stream.read(min(1024 * 1024, remaining))
             if not block:
                 raise ValueError("Source changed during verification.")
@@ -115,7 +177,10 @@ def _source_hash(parent: int) -> str:
             remaining -= len(block)
         if before != _file_state(stream):
             raise ValueError("Source changed during verification.")
-    return digest.hexdigest()
+    checksum = digest.hexdigest()
+    if cache is not None:
+        cache.source = before, checksum
+    return checksum
 
 
 def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -195,6 +260,9 @@ class Artifacts:
         job_id: str,
         revision: int,
         max_revisions: int = MAX_ARTIFACT_REVISIONS,
+        cache: ArtifactReuseCache | None = None,
+        budget_key: str | None = None,
+        check_cancelled: Callable[[], None] | None = None,
     ) -> ReusedArtifact | None:
         """Find a completed artifact in this job's compatible older revisions.
 
@@ -204,6 +272,9 @@ class Artifacts:
         Misses and unsafe/unverifiable historical files return None. Stored
         config corruption and a changed source retain explicit error semantics.
         Ordinary read/write retries are independent of this opt-in lookup.
+        An optional attempt-local cache avoids repeated history/PDF/manifest
+        reads; contents are always hashed. budget_key retains the source budget
+        for generation metrics rather than attributing the target's new budget.
         """
         if (
             not isinstance(name, str)
@@ -212,11 +283,44 @@ class Artifacts:
             or name.endswith(".tmp")
         ):
             raise ValueError("Invalid artifact name.")
+        if budget_key is not None and budget_key not in RESUME_BUDGETS:
+            raise ValueError("Invalid artifact generation budget key.")
+        if type(revision) is not int or revision < 0:
+            raise ValueError("Invalid job configuration revision.")
+        if (
+            type(max_revisions) is not int
+            or not 1 <= max_revisions <= MAX_ARTIFACT_REVISIONS
+        ):
+            raise ValueError("Invalid artifact revision lookup limit.")
+        if check_cancelled is not None:
+            check_cancelled()
         if self.directory.absolute() != store.job_dir(job_id).absolute():
             raise ValueError("Artifact lookup must use the same job directory.")
-        history = store.load_artifact_history(
-            job_id, revision=revision, limit=max_revisions
-        )
+        if cache is not None:
+            cache.bind(
+                (
+                    store,
+                    job_id,
+                    revision,
+                    max_revisions,
+                    self.config_hash,
+                    fingerprint(self._bound_identity),
+                )
+            )
+        history = cache.history if cache is not None else None
+        if history is None:
+            history = store.load_artifact_history(
+                job_id, revision=revision, limit=max_revisions
+            )
+            if cache is not None:
+                history["previous"] = [
+                    previous
+                    for previous in history["previous"]
+                    if compatible_artifact_config(
+                        previous["snapshot"], history["current"]["snapshot"]
+                    )
+                ]
+                cache.history = history
         if history["current"]["fingerprint"] != self.config_hash:
             raise ProcessingError(
                 "artifacts_incompatible",
@@ -246,14 +350,16 @@ class Artifacts:
                 _directory("jobs", data) as jobs,
                 _directory(job_id, jobs) as job,
             ):
-                if _source_hash(job) != original_source:
+                if _source_hash(job, cache, check_cancelled) != original_source:
                     raise ProcessingError(
                         "source_changed",
                         "The source PDF changed. Start a new analysis.",
                     )
                 with _directory("artifacts", job) as artifacts:
                     for previous in history["previous"]:
-                        if not compatible_artifact_config(
+                        if check_cancelled is not None:
+                            check_cancelled()
+                        if cache is None and not compatible_artifact_config(
                             previous["snapshot"], history["current"]["snapshot"]
                         ):
                             continue
@@ -266,9 +372,19 @@ class Artifacts:
                                     identity,
                                     previous["fingerprint"],
                                     previous["revision"],
+                                    cache,
                                 )
                             if result is not None:
-                                return result
+                                if check_cancelled is not None:
+                                    check_cancelled()
+                                return replace(
+                                    result,
+                                    generation_budget=cast(
+                                        int, previous["snapshot"][budget_key]
+                                    )
+                                    if budget_key is not None
+                                    else None,
+                                )
                         except (OSError, ValueError, RecursionError):
                             # A bad revision never legitimizes an unverified file;
                             # an older compatible revision may still be valid.
@@ -285,10 +401,15 @@ class Artifacts:
         identity: dict[str, Any],
         config_hash: str,
         revision: int,
+        cache: ArtifactReuseCache | None = None,
     ) -> ReusedArtifact | None:
-        manifest = json.loads(
-            _read_bounded(root, "manifest.json", MAX_REUSE_MANIFEST_BYTES),
-            object_pairs_hook=_unique_object,
+        manifest = (
+            cache.manifest(root, config_hash)
+            if cache is not None
+            else json.loads(
+                _read_bounded(root, "manifest.json", MAX_REUSE_MANIFEST_BYTES),
+                object_pairs_hook=_unique_object,
+            )
         )
         if (
             not isinstance(manifest, dict)

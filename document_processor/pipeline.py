@@ -22,10 +22,10 @@ import re
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from . import extraction, prompts, reliability
-from .artifacts import Artifacts
+from .artifacts import ArtifactReuseCache, Artifacts
 from .config import fingerprint
 from .contracts import AnalysisNote, Chunk, ExtractionResult, JobSnapshot
 from .errors import Cancelled, ProcessingError, WorkerStopping
@@ -40,6 +40,13 @@ from .reports import report_filename
 # Stages that call the model. Their artifacts also depend on the text transport
 # and reliability versions, so fixing either forces a fresh generation.
 GENERATION_STAGES = ("section", "merge", "final")
+GENERATION_BUDGETS: dict[
+    str, Literal["analysis_tokens", "merge_tokens", "final_tokens"]
+] = {
+    "section": "analysis_tokens",
+    "merge": "merge_tokens",
+    "final": "final_tokens",
+}
 # Name of the final report artifact; reliability.report_warnings() reads its checks.
 FINAL_ARTIFACT = REPORT_FILE
 # A merge consolidates at most this many neighbouring notes.
@@ -108,6 +115,8 @@ def run(job_id: str, runtime: Runtime) -> None:
 class JobRun:
     """One attempt to analyze one job."""
 
+    config_revision = 0
+
     def __init__(self, job_id: str, runtime: Runtime) -> None:
         """Load the job and refuse runs that cannot succeed before recording an attempt."""
         self.job_id = job_id
@@ -138,6 +147,8 @@ class JobRun:
         self.recorder = self.store.start_attempt(
             job_id, self.job.get("queued_at") or self.job["created_at"]
         )
+        self.config_revision = self.recorder.config_revision
+        self._artifact_cache = ArtifactReuseCache()
         self.preview_path = self.directory / PREVIEW_FILE
         self.preview_payload: dict[str, Any] | None = None
         self.preview_persisted_at = float("-inf")
@@ -275,7 +286,7 @@ class JobRun:
             "extraction": fingerprint(extracted),
             "version": reliability.VERSION,
         }
-        evidence_json = self.artifacts.read(
+        evidence_json, _ = self._read_artifact(
             "source_evidence.json", evidence_dependencies
         )
         if evidence_json is None:
@@ -590,6 +601,49 @@ class JobRun:
 
     # Helpers ------------------------------------------------------------------
 
+    def _read_artifact(
+        self, name: str, dependencies: Mapping[str, object], stage: str | None = None
+    ) -> tuple[str | None, dict[str, Any]]:
+        """Prefer this configuration, then verified history; retain generation origin."""
+        cached = self.artifacts.read(name, dependencies)
+        budget_key = GENERATION_BUDGETS.get(stage or "")
+        provenance: dict[str, Any] = {"artifact_reused": True}
+        if cached is not None:
+            provenance.update(
+                artifact_source_revision=self.config_revision,
+                artifact_source_config_hash=self.artifacts.config_hash,
+                artifact_source_sha256=self.artifacts.manifest["artifacts"][name][
+                    "sha256"
+                ],
+            )
+            if budget_key is not None:
+                provenance["output_budget"] = self.config.get(budget_key)
+        elif self.config_revision:
+            reused = self.artifacts.read_compatible(
+                name,
+                dependencies,
+                store=self.store,
+                job_id=self.job_id,
+                revision=self.config_revision,
+                cache=self._artifact_cache,
+                budget_key=budget_key,
+                check_cancelled=self.model.check_cancelled,
+            )
+            if reused is not None:
+                cached = reused.text
+                provenance.update(
+                    artifact_source_revision=reused.source_revision,
+                    artifact_source_config_hash=reused.source_config_hash,
+                    artifact_source_sha256=reused.sha256,
+                )
+                if budget_key is not None:
+                    provenance["output_budget"] = reused.generation_budget
+        if cached is not None:
+            self.model.check_cancelled()
+            if budget_key is not None:
+                provenance["requested_output_budget"] = self.config.get(budget_key)
+        return cached, provenance
+
     def _phase(self, code, label, percent=None, **args):
         """Persist stable phase identifiers alongside the historical English label."""
         self.model.check_cancelled()
@@ -684,9 +738,9 @@ class JobRun:
         before_calls, before_ms = model.tokenization_calls, model.tokenization_ms
         before_hits = model.tokenization_cache_hits
         try:
-            cached = self.artifacts.read(name, dependencies)
+            cached, provenance = self._read_artifact(name, dependencies, stage)
             if cached is not None:
-                self.recorder.end(handle, "reused", {"artifact_reused": True})
+                self.recorder.end(handle, "reused", provenance)
                 if generation:
                     self._write_preview(
                         stage,
@@ -696,13 +750,15 @@ class JobRun:
                         reasoning="",
                         reasoning_chars=0,
                         active=False,
-                        metrics={"artifact_reused": True},
+                        metrics=provenance,
                     )
                 return cached
             result = compute()
             model.check_cancelled()
             self.artifacts.write(name, result, dependencies)
             measurements = dict(model.current_metrics) if generation else {}
+            if generation:
+                measurements["output_budget"] = self.config[GENERATION_BUDGETS[stage]]
             measurements.update(
                 tokenization_calls=model.tokenization_calls - before_calls,
                 tokenization_ms=model.tokenization_ms - before_ms,

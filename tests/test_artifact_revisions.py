@@ -618,6 +618,67 @@ class ArtifactRevisionTests(unittest.TestCase):
         )
         self.assertEqual(self.read().text, "Retry result")
 
+    def test_attempt_cache_retains_source_budget_and_does_not_repeat_history_lookup(
+        self,
+    ):
+        cache = artifacts.ArtifactReuseCache()
+        with patch.object(
+            self.store, "load_artifact_history", wraps=self.store.load_artifact_history
+        ) as history:
+            first = self.read(cache=cache, budget_key="merge_tokens")
+            second = self.read(cache=cache, budget_key="analysis_tokens")
+        self.assertEqual(history.call_count, 1)
+        self.assertEqual(first.generation_budget, 512)
+        self.assertEqual(second.generation_budget, 256)
+        self.assertEqual(first.text, second.text)
+        self.assertLessEqual(cache.manifest_bytes, artifacts.MAX_REUSE_MANIFEST_BYTES)
+        with self.assertRaises(ValueError):
+            self.read(cache=cache, budget_key="chunk_tokens")
+        for revision in (True, 1.0):
+            with self.assertRaises(ValueError):
+                self.read(cache=cache, revision=revision)
+        for limit in (True, 1.0):
+            with self.assertRaises(ValueError):
+                self.read(cache=cache, max_revisions=limit)
+        # Switching the pinned target cannot retain an older lookup context.
+        current, revision = self.target(final_tokens=4096)
+        self.assertIsNotNone(self.read(current, revision, cache=cache))
+        self.assertEqual(cache.history["current"]["revision"], revision)
+
+    def test_warm_cache_revalidates_changed_manifest_and_hashes_content_again(self):
+        cache = artifacts.ArtifactReuseCache()
+        self.assertIsNotNone(self.read(cache=cache))
+        manifest = copy.deepcopy(self.previous.manifest)
+        manifest["artifacts"][self.name]["dependencies"] = "changed"
+        atomic_json(self.previous.path, manifest)
+        self.assertIsNone(self.read(cache=cache))
+        atomic_json(self.previous.path, self.previous.manifest)
+        self.assertIsNotNone(self.read(cache=cache))
+        (self.previous.root / self.name).write_text("Corrupted after verification")
+        self.assertIsNone(self.read(cache=cache))
+        atomic_json(self.previous.path, [])
+        self.assertIsNone(self.read(cache=cache))
+
+    def test_warm_cache_rehashes_a_changed_source(self):
+        cache = artifacts.ArtifactReuseCache()
+        self.assertIsNotNone(self.read(cache=cache))
+        (self.directory / "source.pdf").write_bytes(b"Changed after first lookup")
+        with self.assertRaises(ProcessingError) as caught:
+            self.read(cache=cache)
+        self.assertEqual(caught.exception.code, "source_changed")
+
+    def test_manifest_cache_evicts_to_a_bounded_total_size(self):
+        cache = artifacts.ArtifactReuseCache()
+        limit = (
+            max(self.previous.path.stat().st_size, self.current.path.stat().st_size) + 1
+        )
+        with patch.object(artifacts, "MAX_REUSE_MANIFEST_BYTES", limit):
+            for current in (self.previous, self.current):
+                with artifacts._directory(current.root) as root:
+                    cache.manifest(root, current.config_hash)
+                self.assertLessEqual(cache.manifest_bytes, limit)
+        self.assertEqual(list(cache.manifests), [self.current.config_hash])
+
 
 if __name__ == "__main__":
     unittest.main()
