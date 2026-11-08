@@ -51,7 +51,7 @@ UPDATABLE_COLUMNS = {
     "queued_at",
     "report_name",
 }
-# Columns returned by the API; private configuration snapshots live in job_configs.
+# Columns returned by the API; private snapshots live in separate configuration tables.
 PUBLIC_COLUMNS = {
     "id",
     "filename",
@@ -305,8 +305,12 @@ class JobStore:
             self.connect() as con,
         ):
             rows = con.execute(
-                "SELECT jobs.*, job_configs.fingerprint AS config_fingerprint FROM jobs "
+                "SELECT jobs.*, COALESCE(revisions.fingerprint, job_configs.fingerprint) "
+                "AS config_fingerprint FROM jobs "
                 "LEFT JOIN job_configs ON job_configs.job_id=jobs.id "
+                "LEFT JOIN job_config_selections AS selected ON selected.job_id=jobs.id "
+                "LEFT JOIN job_config_revisions AS revisions "
+                "ON revisions.job_id=selected.job_id AND revisions.revision=selected.revision "
                 "ORDER BY jobs.created_at DESC, jobs.id DESC LIMIT ?",
                 (limit,),
             ).fetchall()
@@ -328,8 +332,14 @@ class JobStore:
             if missing:
                 placeholders = ",".join("?" for _ in missing)
                 for row in con.execute(
-                    "SELECT job_id, fingerprint, snapshot FROM job_configs "
-                    f"WHERE job_id IN ({placeholders})",
+                    "SELECT original.job_id, "
+                    "COALESCE(revisions.fingerprint, original.fingerprint) AS fingerprint, "
+                    "COALESCE(revisions.snapshot, original.snapshot) AS snapshot "
+                    "FROM job_configs AS original "
+                    "LEFT JOIN job_config_selections AS selected ON selected.job_id=original.job_id "
+                    "LEFT JOIN job_config_revisions AS revisions "
+                    "ON revisions.job_id=selected.job_id AND revisions.revision=selected.revision "
+                    f"WHERE original.job_id IN ({placeholders})",
                     missing,
                 ):
                     public = public_config(
@@ -348,7 +358,7 @@ class JobStore:
         return jobs, bool(has_active)
 
     def _discard_public_config(self, job_id):
-        """Invalidate all cached fingerprints of one deleted or migrated snapshot."""
+        """Invalidate a job after deletion, snapshot creation or revision selection."""
         with self._public_config_lock:
             for key in list(self._public_configs):
                 if key[0] == job_id:
@@ -509,23 +519,28 @@ class JobStore:
             ).fetchone()
         return not row or bool(row["cancel_requested"])
 
-    def requeue(self, job_id, default_max_attempts):
+    def requeue(self, job_id, default_max_attempts, *, config_revision=None):
         """Queue a failed or cancelled job again; return (outcome, previous attempts).
 
         outcome is "queued", "limit" when the job used all its attempts, or
         "conflict" when the job is not failed or cancelled. Jobs saved before
-        configuration snapshots use default_max_attempts.
+        configuration snapshots use default_max_attempts. An explicit revision
+        is selected atomically with queueing (0 means the original); otherwise
+        the current selection is retained. Only stored revisions are accepted.
         """
         with self.connect() as con:
             con.execute("BEGIN IMMEDIATE")
             attempts = con.execute(
                 "SELECT COUNT(*) FROM job_runs WHERE job_id=?", (job_id,)
             ).fetchone()[0]
-            config_row = con.execute(
-                "SELECT snapshot FROM job_configs WHERE job_id=?", (job_id,)
-            ).fetchone()
+            revision = (
+                self._selected_revision(con, job_id)
+                if config_revision is None
+                else config_revision
+            )
+            config_row = self._config_row(con, job_id, revision)
             maximum = (
-                json.loads(config_row["snapshot"])["max_attempts"]
+                self._decode_config(config_row)["max_attempts"]
                 if config_row
                 else default_max_attempts
             )
@@ -537,8 +552,19 @@ class JobStore:
                 WHERE id=? AND status IN ('failed','cancelled')""",
                 (utcnow(), utcnow(), job_id),
             ).rowcount
+            if changed and config_revision is not None:
+                con.execute(
+                    "DELETE FROM job_config_selections WHERE job_id=?", (job_id,)
+                )
+                if revision:
+                    con.execute(
+                        "INSERT INTO job_config_selections (job_id, revision) VALUES (?, ?)",
+                        (job_id, revision),
+                    )
         if changed:
             self.previews.discard(job_id)
+            if config_revision is not None:
+                self._discard_public_config(job_id)
         return ("queued" if changed else "conflict"), attempts
 
     # Configuration snapshots and attempts -------------------------------------
@@ -561,22 +587,106 @@ class JobStore:
             ),
         )
 
-    def load_config(self, job_id):
-        """Read and verify the private snapshot; None for jobs saved before snapshots."""
+    def save_config_revision(self, job_id, config):
+        """Append a distinct, already resolved private snapshot; return its revision.
+
+        Revision 0 is the immutable original. Identical snapshots reuse their
+        reference; attempts never copy snapshot JSON. This does not select or
+        queue the revision: requeue() does that in its own transaction.
+        """
+        encoded = json.dumps(config, ensure_ascii=False, allow_nan=False)
+        checksum = fingerprint(config)
         with self.connect() as con:
-            row = con.execute(
+            con.execute("BEGIN IMMEDIATE")
+            original = self._config_row(con, job_id, 0)
+            if original is None:
+                raise LookupError("Job configuration snapshot not found.")
+            self._decode_config(original)
+            if original["fingerprint"] == checksum:
+                return 0
+            existing = con.execute(
+                "SELECT snapshot, fingerprint, revision FROM job_config_revisions "
+                "WHERE job_id=? AND fingerprint=?",
+                (job_id, checksum),
+            ).fetchone()
+            if existing is not None:
+                self._decode_config(existing)
+                return existing["revision"]
+            revision = con.execute(
+                "SELECT COALESCE(MAX(revision), 0) + 1 FROM job_config_revisions WHERE job_id=?",
+                (job_id,),
+            ).fetchone()[0]
+            con.execute(
+                "INSERT INTO job_config_revisions "
+                "(job_id, revision, snapshot, fingerprint, created_at) VALUES (?, ?, ?, ?, ?)",
+                (job_id, revision, encoded, checksum, now()),
+            )
+        return revision
+
+    def _selected_revision(self, con, job_id):
+        """Return the durable selection; absence always means the original."""
+        row = con.execute(
+            "SELECT revision FROM job_config_selections WHERE job_id=?", (job_id,)
+        ).fetchone()
+        return row["revision"] if row else 0
+
+    def _config_row(self, con, job_id, revision):
+        """Look up only this job's snapshot, with 0 reserved for the original."""
+        if type(revision) is not int or revision < 0:
+            raise ValueError("Invalid job configuration revision.")
+        if revision == 0:
+            return con.execute(
                 "SELECT snapshot, fingerprint FROM job_configs WHERE job_id=?",
                 (job_id,),
             ).fetchone()
+        row = con.execute(
+            "SELECT snapshot, fingerprint FROM job_config_revisions WHERE job_id=? AND revision=?",
+            (job_id, revision),
+        ).fetchone()
+        if row is None:
+            raise LookupError("Job configuration revision not found.")
+        return row
+
+    def _decode_config(self, row):
+        """Verify private snapshot contents without exposing them in error text."""
+        try:
+            config = json.loads(row["snapshot"])
+            if fingerprint(config) == row["fingerprint"]:
+                return config
+        except (ValueError, TypeError):
+            pass
+        raise ProcessingError(
+            "config_integrity",
+            "Stored job configuration failed its integrity check.",
+        )
+
+    def load_config(self, job_id, *, revision=None):
+        """Read and verify the selected snapshot, or an explicit immutable revision.
+
+        revision=0 reads the original; no snapshot still returns None for legacy
+        jobs. Selection survives restarts and is only changed by explicit requeue.
+        """
+        with self.connect() as con:
+            if revision is None:
+                revision = self._selected_revision(con, job_id)
+            row = self._config_row(con, job_id, revision)
         if row is None:
             return None
-        config = json.loads(row["snapshot"])
-        if fingerprint(config) != row["fingerprint"]:
-            raise ProcessingError(
-                "config_integrity",
-                "Stored job configuration failed its integrity check.",
-            )
-        return config
+        return self._decode_config(row)
+
+    def load_attempt_config(self, job_id, run_id):
+        """Verify the snapshot pinned to an attempt, including historical originals."""
+        with self.connect() as con:
+            run = con.execute(
+                "SELECT COALESCE(config.revision, 0) AS revision FROM job_runs AS run "
+                "LEFT JOIN job_run_config_revisions AS config ON config.run_id=run.id "
+                "WHERE run.job_id=? AND run.id=?",
+                (job_id, run_id),
+            ).fetchone()
+            if run is None:
+                raise LookupError("Job attempt not found.")
+            row = self._config_row(con, job_id, run["revision"])
+        return None if row is None else self._decode_config(row)
 
     def attempt_count(self, job_id):
         """Return how many attempts were started for job_id."""
@@ -586,7 +696,7 @@ class JobStore:
             ).fetchone()[0]
 
     def start_attempt(self, job_id, queued_at):
-        """Record a new attempt and return its Recorder."""
+        """Record an attempt with its selected configuration and return its Recorder."""
         return Recorder(self.connect, job_id, queued_at)
 
     def metrics(self, job_id, limit=200, before=None):
@@ -613,6 +723,11 @@ class Recorder:
                 "INSERT INTO job_runs (job_id, started_at, status, queue_ms) VALUES (?, ?, 'running', ?)",
                 (job_id, now(), queue_ms),
             ).lastrowid
+            con.execute(
+                "INSERT INTO job_run_config_revisions (run_id, job_id, revision) "
+                "SELECT ?, job_id, revision FROM job_config_selections WHERE job_id=?",
+                (self.run_id, job_id),
+            )
         event(
             "job_attempt_started",
             job_id=job_id,

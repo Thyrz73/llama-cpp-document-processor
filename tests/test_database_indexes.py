@@ -99,7 +99,9 @@ class JobIndexTests(unittest.TestCase):
         self.root = Path(temporary.name)
         self.store = JobStore(self.root)
         self.addCleanup(self.store.close)
-        with patch.object(database, "MIGRATIONS", database.MIGRATIONS[:3]):
+        # Isolate v4's indexes while retaining later schema used by current JobStore.
+        without_indexes = tuple(item for item in database.MIGRATIONS if item[0] != 4)
+        with patch.object(database, "MIGRATIONS", without_indexes):
             database.initialize(self.store.db_path)
 
     def contents(self):
@@ -159,7 +161,12 @@ class JobIndexTests(unittest.TestCase):
 
         with (
             patch.object(
-                database, "MIGRATIONS", database.MIGRATIONS[:3] + ((4, broken),)
+                database,
+                "MIGRATIONS",
+                tuple(
+                    (version, broken if version == 4 else migrate)
+                    for version, migrate in database.MIGRATIONS
+                ),
             ),
             self.assertRaises(sqlite3.OperationalError),
         ):
@@ -170,8 +177,10 @@ class JobIndexTests(unittest.TestCase):
                 {row["name"] for row in con.execute("PRAGMA index_list(jobs)")},
             )
             self.assertEqual(
-                con.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0],
-                3,
+                con.execute(
+                    "SELECT COUNT(*) FROM schema_migrations WHERE version=4"
+                ).fetchone()[0],
+                0,
             )
         self.assertEqual(self.contents(), before)
         database.initialize(self.store.db_path)
@@ -196,7 +205,8 @@ class JobIndexTests(unittest.TestCase):
             elif "SELECT EXISTS" in sql:
                 self.assertIn("jobs_by_status_created", details)
             elif "FROM job_runs" in sql:
-                self.assertIn("job_runs_by_job", details)
+                # Both cover (job_id, id); v5 adds uniqueness for revision ownership FKs.
+                self.assertRegex(details, r"job_runs_(by_job|identity)")
             elif "FROM job_steps" in sql:
                 self.assertIn("job_steps_by_job", details)
             elif sql.startswith(

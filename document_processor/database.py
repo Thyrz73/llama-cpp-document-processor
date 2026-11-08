@@ -237,12 +237,39 @@ def _index_job_order_and_status(con):
     )
 
 
+def _add_configuration_revisions(con):
+    """Version 5: immutable revisions, queue selection and per-attempt references.
+
+    Absence of a selection/reference means the original job_configs snapshot.
+    Neither originals nor historical attempts need copying or backfilling.
+    """
+    con.execute("""CREATE TABLE IF NOT EXISTS job_config_revisions (
+        job_id TEXT NOT NULL REFERENCES job_configs(job_id) ON DELETE CASCADE,
+        revision INTEGER NOT NULL CHECK (revision > 0),
+        snapshot TEXT NOT NULL, fingerprint TEXT NOT NULL, created_at TEXT NOT NULL,
+        PRIMARY KEY (job_id, revision), UNIQUE (job_id, fingerprint))""")
+    con.execute("""CREATE TABLE IF NOT EXISTS job_config_selections (
+        job_id TEXT PRIMARY KEY, revision INTEGER NOT NULL,
+        FOREIGN KEY (job_id, revision)
+            REFERENCES job_config_revisions(job_id, revision) ON DELETE CASCADE)""")
+    # Required by the composite FK: an attempt can only reference its own job's revision.
+    con.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS job_runs_identity ON job_runs(job_id, id)"
+    )
+    con.execute("""CREATE TABLE IF NOT EXISTS job_run_config_revisions (
+        run_id INTEGER PRIMARY KEY, job_id TEXT NOT NULL, revision INTEGER NOT NULL,
+        FOREIGN KEY (job_id, run_id) REFERENCES job_runs(job_id, id) ON DELETE CASCADE,
+        FOREIGN KEY (job_id, revision)
+            REFERENCES job_config_revisions(job_id, revision))""")
+
+
 # Ordered (version, migration) pairs. Append only; never edit a released migration.
 MIGRATIONS = (
     (1, _create_jobs),
     (2, _add_configurations_and_measurements),
     (3, _add_report_names_and_prompt_origin),
     (4, _index_job_order_and_status),
+    (5, _add_configuration_revisions),
 )
 
 

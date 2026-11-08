@@ -1,4 +1,4 @@
-"""Compare v3/v4 SQLite plans and read/insert costs on disposable 100/1000-job histories.
+"""Compare SQLite with/without v4 indexes on disposable 100/1000-job histories.
 
 Run: .venv/bin/python tests/benchmark_database_indexes.py
 SQL is captured from the actual JobStore methods; no retained application data is opened.
@@ -59,6 +59,8 @@ def summary(samples):
 
 def benchmark():
     logging.disable(logging.CRITICAL)
+    # Keep later schema available to current JobStore; only v4 indexes differ.
+    without_indexes = tuple(item for item in database.MIGRATIONS if item[0] != 4)
     for count in (100, 1000):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -67,7 +69,7 @@ def benchmark():
                 # Capture real SQL on a separate disposable fixture; claim/delete may mutate it.
                 capture = JobStore(root / "capture")
                 capture.data_dir.mkdir(parents=True)
-                with patch.object(database, "MIGRATIONS", database.MIGRATIONS[:3]):
+                with patch.object(database, "MIGRATIONS", without_indexes):
                     database.initialize(capture.db_path)
                 populate(capture, count)
                 try:
@@ -77,7 +79,7 @@ def benchmark():
                 for variant in ("v3", "v4"):
                     store = stores[variant] = JobStore(root / variant)
                     store.data_dir.mkdir(parents=True)
-                    with patch.object(database, "MIGRATIONS", database.MIGRATIONS[:3]):
+                    with patch.object(database, "MIGRATIONS", without_indexes):
                         database.initialize(store.db_path)
                     populate(store, count)
                     migration_ms = None
