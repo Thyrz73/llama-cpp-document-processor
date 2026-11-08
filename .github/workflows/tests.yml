@@ -45,3 +45,9 @@ jobs:
           docker compose config --quiet
       - name: Check application packaging
         run: docker build -t document-processor:test .
+      - name: Smoke-test runtime image without a model
+        run: |
+          docker run --rm -i --init --network none \
+            --memory 512m --memory-swap 512m --cpus 0.75 --pids-limit 64 \
+            -e OMP_THREAD_LIMIT=1 \
+            document-processor:test python - < tests/smoke_container.py
