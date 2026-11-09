@@ -610,6 +610,7 @@ class JobRun:
         provenance: dict[str, Any] = {"artifact_reused": True}
         if cached is not None:
             provenance.update(
+                artifact_source_name=name,
                 artifact_source_revision=self.config_revision,
                 artifact_source_config_hash=self.artifacts.config_hash,
                 artifact_source_sha256=self.artifacts.manifest["artifacts"][name][
@@ -632,6 +633,7 @@ class JobRun:
             if reused is not None:
                 cached = reused.text
                 provenance.update(
+                    artifact_source_name=reused.name,
                     artifact_source_revision=reused.source_revision,
                     artifact_source_config_hash=reused.source_config_hash,
                     artifact_source_sha256=reused.sha256,

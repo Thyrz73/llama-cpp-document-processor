@@ -385,6 +385,65 @@ class PipelineResumeTests(unittest.TestCase):
         self.assert_calls(self.execute(), section=8, merge=4, final=1)
         self.assert_done()
 
+    def test_regrouping_reuses_unchanged_tail_merge_at_its_new_index(self):
+        stream_lines = ResumeStreamModel.stream_lines
+
+        def uneven_sections(model, payload):
+            for line in stream_lines(model, payload):
+                if model.current_stage == "section" and line.startswith("data: {"):
+                    event = json.loads(line[6:])
+                    delta = event["choices"][0]["delta"]
+                    if any(
+                        delta.get("content", "").startswith(f"Item {index}:")
+                        for index in range(1, 5)
+                    ):
+                        delta["content"] += " Evidence retained." * 90
+                    line = "data: " + json.dumps(event)
+                yield line
+
+        self.settings = replace(self.settings, context_tokens=4096)
+        self.bind_application()
+        self.create()
+        self.failure = ("final", 1, "output_limit")
+        with patch.object(ResumeStreamModel, "stream_lines", uneven_sections):
+            self.assert_calls(self.execute(), section=8, merge=2, final=1)
+        original_files = self.preserved()
+        source = json.loads((self.original_root / "manifest.json").read_text())
+        self.resume(merge_tokens=3120)
+        self.restart()
+        with patch.object(ResumeStreamModel, "stream_lines", uneven_sections):
+            calls = self.execute()
+        self.assert_calls(calls, merge=2, final=1)
+        self.assert_done()
+        self.assert_reused("merge_00_0002.md", 256)
+        reused = self.steps()[1]["merge_00_0002.md"]["metrics"]
+        self.assertEqual(reused["artifact_source_name"], "merge_00_0001.md")
+        self.assertEqual(
+            reused["artifact_source_sha256"],
+            source["artifacts"]["merge_00_0001.md"]["sha256"],
+        )
+        self.assertEqual(reused["requested_output_budget"], 3120)
+        self.assertEqual(self.preserved(), original_files)
+        self.assertEqual(
+            [
+                call["input"].count("## Notes ")
+                for call in calls
+                if call["stage"] == "merge"
+            ],
+            [2, 2],
+        )
+        self.store.update_job(self.job_id, status="failed")
+        self.retry()
+        self.assertEqual(self.execute(), [])
+        self.assert_done()
+        self.assert_reused("merge_00_0002.md", 256)
+        self.settings = replace(self.settings, merge_tokens=3120)
+        self.bind_application()
+        self.create()
+        with patch.object(ResumeStreamModel, "stream_lines", uneven_sections):
+            self.assert_calls(self.execute(), section=8, merge=3, final=1)
+        self.assert_done()
+
     def test_cancel_during_verified_reuse_stops_before_any_new_generation(self):
         self.create()
         self.failure = ("final", 1, "output_limit")

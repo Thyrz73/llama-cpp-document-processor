@@ -55,6 +55,14 @@ class ReusedArtifact:
 
 
 @dataclass
+class _CachedManifest:
+    state: tuple[int, ...]
+    data: dict[str, Any]
+    size: int
+    merges: dict[tuple[str, str], list[str]] | None = None
+
+
+@dataclass
 class ArtifactReuseCache:
     """Attempt-local verification metadata, never cached artifact text.
 
@@ -67,9 +75,7 @@ class ArtifactReuseCache:
     key: tuple[object, ...] | None = None
     history: ArtifactHistory | None = None
     source: tuple[tuple[int, ...], str] | None = None
-    manifests: OrderedDict[str, tuple[tuple[int, ...], dict[str, Any], int]] = field(
-        default_factory=OrderedDict
-    )
+    manifests: OrderedDict[str, _CachedManifest] = field(default_factory=OrderedDict)
     manifest_bytes: int = 0
 
     def bind(self, key: tuple[object, ...]) -> None:
@@ -82,23 +88,70 @@ class ArtifactReuseCache:
         with _regular_file(root, "manifest.json") as stream:
             before = _file_state(stream)
             cached = self.manifests.get(config_hash)
-            if cached is not None and cached[0] == before:
+            if cached is not None and cached.state == before:
                 self.manifests.move_to_end(config_hash)
-                return cached[1]
+                return cached.data
             content = _read_stream(stream, MAX_REUSE_MANIFEST_BYTES)
         manifest = json.loads(content, object_pairs_hook=_unique_object)
         if not isinstance(manifest, dict):
             raise ValueError("Unverifiable artifact manifest.")
         if cached is not None:
-            self.manifest_bytes -= self.manifests.pop(config_hash)[2]
+            self.manifest_bytes -= self.manifests.pop(config_hash).size
         while (
             self.manifests
             and self.manifest_bytes + len(content) > MAX_REUSE_MANIFEST_BYTES
         ):
-            self.manifest_bytes -= self.manifests.popitem(last=False)[1][2]
-        self.manifests[config_hash] = before, manifest, len(content)
+            self.manifest_bytes -= self.manifests.popitem(last=False)[1].size
+        self.manifests[config_hash] = _CachedManifest(before, manifest, len(content))
         self.manifest_bytes += len(content)
         return manifest
+
+    def matching_merges(
+        self, config_hash: str, level: str, dependencies_hash: str
+    ) -> list[str]:
+        """Index names once per resident manifest; reload/eviction drops the index."""
+        cached = self.manifests[config_hash]
+        if cached.merges is None:
+            cached.merges = _merge_index(cached.data["artifacts"])
+        return cached.merges.get((level, dependencies_hash), [])
+
+
+def _merge_level(name: str) -> str | None:
+    # Keep the historical naming scheme and the reader's 200-character bound.
+    match = re.fullmatch(r"merge_([0-9]{2})_[0-9]{4,188}\.md", name)
+    return match[1] if match is not None else None
+
+
+def _merge_index(entries: Mapping[str, Any]) -> dict[tuple[str, str], list[str]]:
+    index: dict[tuple[str, str], list[str]] = {}
+    for name, entry in entries.items():
+        level = _merge_level(name)
+        if (
+            level is not None
+            and isinstance(entry, dict)
+            and _is_hash(entry.get("dependencies"))
+        ):
+            index.setdefault((level, entry["dependencies"]), []).append(name)
+    return index
+
+
+def _previous_names(
+    name: str,
+    dependencies_hash: str,
+    entries: Mapping[str, Any],
+    config_hash: str,
+    cache: ArtifactReuseCache | None,
+) -> Iterator[str]:
+    """Prefer the exact name, then same-level merges with identical dependencies."""
+    yield name
+    level = _merge_level(name)
+    if level is not None:
+        names = (
+            cache.matching_merges(config_hash, level, dependencies_hash)
+            if cache is not None
+            else _merge_index(entries).get((level, dependencies_hash), [])
+        )
+        yield from (candidate for candidate in names if candidate != name)
 
 
 def _is_hash(value: object) -> bool:
@@ -292,6 +345,8 @@ class Artifacts:
         Call bind_identity with a fresh backend observation first, and supply
         the exact dependencies of the newly prepared step (including merge/final
         groups and inputs). No dependency fields are removed or normalized.
+        Only merge indices may differ: alternative names require the same merge
+        level and exact dependency hash, followed by the same content validation.
         Misses and unsafe/unverifiable historical files return None. Stored
         config corruption and a changed source retain explicit error semantics.
         Ordinary read/write retries are independent of this opt-in lookup.
@@ -390,6 +445,7 @@ class Artifacts:
                                     previous["fingerprint"],
                                     previous["revision"],
                                     cache,
+                                    check_cancelled,
                                 )
                             if result is not None:
                                 if check_cancelled is not None:
@@ -419,6 +475,7 @@ class Artifacts:
         config_hash: str,
         revision: int,
         cache: ArtifactReuseCache | None = None,
+        check_cancelled: Callable[[], None] | None = None,
     ) -> ReusedArtifact | None:
         manifest = (
             cache.manifest(root, config_hash)
@@ -437,28 +494,38 @@ class Artifacts:
             or not isinstance(manifest.get("artifacts"), dict)
         ):
             return None
-        entry = manifest["artifacts"].get(name)
-        # Version 1 write() publishes only completed results. Unknown completion
-        # metadata cannot override that contract (e.g. truncated/cancelled flags).
-        if (
-            not isinstance(entry, dict)
-            or set(entry) != {"complete", "dependencies", "sha256"}
-            or entry["complete"] is not True
-            or entry["dependencies"] != dependencies_hash
-            or not _is_hash(entry["sha256"])
+        for candidate in _previous_names(
+            name, dependencies_hash, manifest["artifacts"], config_hash, cache
         ):
-            return None
-        content = _read_bounded(root, name, MAX_REUSE_ARTIFACT_BYTES)
-        if hashlib.sha256(content).hexdigest() != entry["sha256"]:
-            return None
-        return ReusedArtifact(
-            text=content.decode("utf-8"),
-            name=name,
-            source_revision=revision,
-            source_config_hash=config_hash,
-            sha256=entry["sha256"],
-            dependencies_hash=dependencies_hash,
-        )
+            if check_cancelled is not None:
+                check_cancelled()
+            entry = manifest["artifacts"].get(candidate)
+            # Index entries are only hints. Verify completion and exact inputs
+            # for every candidate, including any contradictory completion flags.
+            if (
+                not isinstance(entry, dict)
+                or set(entry) != {"complete", "dependencies", "sha256"}
+                or entry["complete"] is not True
+                or entry["dependencies"] != dependencies_hash
+                or not _is_hash(entry["sha256"])
+            ):
+                continue
+            try:
+                content = _read_bounded(root, candidate, MAX_REUSE_ARTIFACT_BYTES)
+                if hashlib.sha256(content).hexdigest() != entry["sha256"]:
+                    continue
+                text = content.decode("utf-8")
+            except (OSError, ValueError):
+                continue
+            return ReusedArtifact(
+                text=text,
+                name=candidate,
+                source_revision=revision,
+                source_config_hash=config_hash,
+                sha256=entry["sha256"],
+                dependencies_hash=dependencies_hash,
+            )
+        return None
 
     def read(self, name, dependencies):
         """Hash and decode the same bytes; unsafe or changed files are cache misses."""

@@ -7,6 +7,13 @@ nondecreasing output budgets and the `warnings`/`customized` metadata fields.
 Original configuration fingerprints, directories and version 1 manifests remain
 unchanged. Historical files are neither copied nor linked into the new revision.
 
+Within each historical revision the exact name is tried first. For merges only,
+another positional name at the **same merge level** can supply the result when
+the full dependency fingerprint matches. Input order, source pages/sections,
+warnings, prepared text, instructions, identity and reliability/transport versions
+remain part of those exact dependencies. The candidate still passes all manifest,
+completion and content checks; a name or index match alone cannot authorize reuse.
+
 Reuse requires the original PDF identity, a freshly bound model/template/sampling
 identity, a completed manifest entry, exact step dependencies and a SHA-256 hash
 of the returned bytes. Incomplete streams are discarded; a new generation starts
@@ -18,12 +25,14 @@ omit prompt evidence. Matching artifact names never substitute for matching
 the complete dependencies, including groups and the exact prepared input.
 Reliability checks run again on every reused generation before publishing a report.
 
-Each recorded reused step has `artifact_reused`, `artifact_source_revision`,
+Each recorded reused step has `artifact_reused`, `artifact_source_name`, `artifact_source_revision`,
 `artifact_source_config_hash` and `artifact_source_sha256`. For generations,
 `output_budget` is the **source generation's** budget;
 `requested_output_budget` is this attempt's selected budget. Old token usage
 is not charged to this attempt. Attempt configuration references remain pinned
 in SQLite. Saving still archives an existing report under `previous_reports`.
+The recorded step key retains its current positional name; `artifact_source_name`
+identifies the actual historical file when a merge moved to a different index.
 
 The attempt-local verification cache retains bounded history and manifest
 metadata, never artifact text. Within historical lookup, the PDF is hashed once
@@ -33,6 +42,12 @@ serialized input in total. File state is checked on subsequent lookups; changed
 sources and manifests are reverified. Every artifact returned is read and hashed
 again. Normal local retry hits skip historical lookup. Cancellation remains
 checked during historical lookup and PDF hashing, and before using a result.
+On an exact-name merge miss, a lazy index maps `(level, dependency fingerprint)`
+to names in that resident manifest. Building it takes one metadata pass; subsequent
+lookups use the index and read only matching candidates. No directory scan or
+additional SQLite lookup is needed. Manifest reloads and LRU eviction discard the
+associated index. Exact names take precedence within a revision, then candidates
+follow manifest order; the newest compatible verified revision still wins.
 
 ## Deterministic generation-call comparisons
 
@@ -56,6 +71,16 @@ attempt makes four merges and one final (5 calls), versus 13 calls for a fresh
 analysis with that grouping, saving 8 calls. Another fixture changes prepared
 final input and proves that an otherwise completed final must be regenerated.
 
+A fixture using the actual context-fitting arithmetic, word-count tokenization
+and longer first sections changes groups from `[4, 4]` to `[2, 2, 4]` when the
+merge budget increases from 256 to 3120 in a 4096-token application context.
+The unchanged final group moves from `merge_00_0001.md` to `merge_00_0002.md`.
+After the original 11 calls (8 sections, 2 merges, 1 failed final), resume now
+needs **2 merges + 1 final = 3 calls**, instead of 4 without index-independent
+matching. It saves exactly **one additional generation**, or 9 calls versus the
+12-call fresh analysis with the new grouping. The fixture also checks provenance,
+restart before resume, normal retry and unchanged historical files.
+
 The suite also covers corruption, dependency changes, backend changes, cancellation
 during reuse and streaming, successive revisions, restart recovery, normal retries,
 attempt limits, and original generation-budget provenance. It asserts generation
@@ -71,3 +96,7 @@ searched, even when they might contain compatible work. Reused text remains in
 its source revision, so later attempts verify that source again. Checksums provide
 integrity checks within the application's private storage, not authentication
 against an actor who can rewrite both content and its manifest.
+Index memory is limited by the entries of resident manifests, in addition to
+their parsed JSON. An evicted manifest must be parsed and indexed again. Direct
+callers that omit the optional attempt cache rebuild the metadata index on each
+lookup; the pipeline always provides its attempt-local cache.

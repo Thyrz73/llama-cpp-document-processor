@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 from document_processor import artifacts, config, database
 from document_processor.artifacts import Artifacts
-from document_processor.errors import ProcessingError
+from document_processor.errors import Cancelled, ProcessingError
 from document_processor.files import atomic_json
 from document_processor.jobs import MAX_ARTIFACT_REVISIONS, JobStore
 
@@ -678,6 +678,243 @@ class ArtifactRevisionTests(unittest.TestCase):
                     cache.manifest(root, current.config_hash)
                 self.assertLessEqual(cache.manifest_bytes, limit)
         self.assertEqual(list(cache.manifests), [self.current.config_hash])
+
+    def test_shifted_merge_matches_exact_dependencies_with_or_without_cache(self):
+        before = self.saved_files()
+        for cache in (None, artifacts.ArtifactReuseCache()):
+            with self.subTest(cached=cache is not None):
+                reused = self.read(
+                    name="merge_00_0007.md", cache=cache, budget_key="merge_tokens"
+                )
+                self.assertEqual((reused.name, reused.text), (self.name, self.text))
+                self.assertEqual(reused.source_revision, 0)
+                self.assertEqual(reused.generation_budget, 512)
+                self.assertEqual(
+                    reused.sha256, hashlib.sha256(self.text.encode()).hexdigest()
+                )
+        self.assertEqual(self.saved_files(), before)
+
+    def test_shifted_merges_reject_changed_order_scope_input_and_reliability(self):
+        notes = [
+            {"text": "First", "pages": [1], "sections": [0], "warning_codes": []},
+            {"text": "Second", "pages": [2], "sections": [1], "warning_codes": []},
+        ]
+        dependencies = {**self.dependencies, "notes": config.fingerprint(notes)}
+        self.previous.write(self.name, self.text, dependencies)
+        self.assertIsNotNone(
+            self.read(name="merge_00_0007.md", dependencies=dependencies)
+        )
+        changed_notes = [list(reversed(notes))]
+        for field, value in (
+            ("text", "Different"),
+            ("pages", [3]),
+            ("sections", [2]),
+            ("warning_codes", ["new_warning"]),
+        ):
+            changed = copy.deepcopy(notes)
+            changed[0][field] = value
+            changed_notes.append(changed)
+        for changed in changed_notes:
+            with self.subTest(notes=changed):
+                self.assertIsNone(
+                    self.read(
+                        name="merge_00_0007.md",
+                        dependencies={
+                            **dependencies,
+                            "notes": config.fingerprint(changed),
+                        },
+                    )
+                )
+        for field in dependencies.keys() - {"notes"}:
+            with self.subTest(field=field):
+                self.assertIsNone(
+                    self.read(
+                        name="merge_00_0007.md",
+                        dependencies={**dependencies, field: "changed"},
+                    )
+                )
+
+    def test_shifted_lookup_preserves_merge_level_and_never_aliases_other_stages(self):
+        for name in (
+            "merge_01_0007.md",
+            "merge_0_0007.md",
+            "merge_000_0007.md",
+            "analysis_0007.md",
+            "final.md",
+        ):
+            with self.subTest(name=name):
+                self.assertIsNone(self.read(name=name))
+        self.previous.write("merge_01_0010.md", "Higher level", self.dependencies)
+        self.assertEqual(self.read(name="merge_01_0007.md").name, "merge_01_0010.md")
+
+    def test_merge_index_never_opens_noncanonical_or_unsafe_manifest_names(self):
+        manifest = copy.deepcopy(self.previous.manifest)
+        entry = manifest["artifacts"].pop(self.name)
+        for name in (
+            "../merge_00_0000.md",
+            "/merge_00_0000.md",
+            "merge_00_0000.md.tmp",
+            "merge_00_../0000.md",
+            "merge_00_٠٠٠٠.md",
+            "merge_00_" + "1" * 189 + ".md",
+        ):
+            manifest["artifacts"][name] = entry
+        atomic_json(self.previous.path, manifest)
+        with patch.object(artifacts, "_read_bounded") as read:
+            self.assertIsNone(
+                self.read(name="merge_00_0007.md", cache=artifacts.ArtifactReuseCache())
+            )
+        read.assert_not_called()
+
+    def test_shifted_lookup_prefers_exact_name_then_verified_matching_candidates(self):
+        target = "merge_00_0007.md"
+        self.previous.write(target, "Exact match", self.dependencies)
+        self.previous.write("merge_00_0001.md", "Alternative", self.dependencies)
+        self.previous.write("merge_00_0002.md", "Later alternative", self.dependencies)
+        self.assertEqual(self.read(name=target).name, target)
+        (self.previous.root / target).write_text("CORRUPTED")
+        self.assertEqual(self.read(name=target).name, self.name)
+        (self.previous.root / self.name).unlink()
+        self.assertEqual(self.read(name=target).name, "merge_00_0001.md")
+        outside = self.store.data_dir / "external.md"
+        outside.write_text("Alternative")
+        path = self.previous.root / "merge_00_0001.md"
+        path.unlink()
+        path.symlink_to(outside)
+        self.assertEqual(self.read(name=target).name, "merge_00_0002.md")
+        self.assertEqual(outside.read_text(), "Alternative")
+
+    def test_shifted_lookup_rejects_incomplete_or_incompatible_candidates(self):
+        for changes in (
+            {"complete": False},
+            {"finish_reason": "length"},
+            {"dependencies": "invalid"},
+            {"sha256": "invalid"},
+        ):
+            with self.subTest(changes=changes):
+                manifest = copy.deepcopy(self.previous.manifest)
+                manifest["artifacts"][self.name].update(changes)
+                atomic_json(self.previous.path, manifest)
+                self.assertIsNone(self.read(name="merge_00_0007.md"))
+        for changes in (
+            {"config_hash": "invalid"},
+            {"identity": {**self.identity, "template_hash": "changed"}},
+            {"version": 2},
+        ):
+            with self.subTest(changes=changes):
+                atomic_json(self.previous.path, {**self.previous.manifest, **changes})
+                self.assertIsNone(self.read(name="merge_00_0007.md"))
+        atomic_json(self.previous.path, self.previous.manifest)
+        current, revision = self.target(report_language="en")
+        self.assertIsNone(self.read(current, revision, name="merge_00_0007.md"))
+
+    def test_shifted_lookup_retains_newest_verified_revision_and_generation_budget(
+        self,
+    ):
+        first, revision1 = self.target(analysis_tokens=512)
+        first.write("merge_00_0010.md", "Revision one", self.dependencies)
+        second, revision2 = self.target(analysis_tokens=1024)
+        second.write("merge_00_0011.md", "Revision two", self.dependencies)
+        current, revision3 = self.target(analysis_tokens=2048)
+        cache = artifacts.ArtifactReuseCache()
+        reused = self.read(current, revision3, name="merge_00_0099.md", cache=cache)
+        self.assertEqual(
+            (reused.source_revision, reused.name), (revision2, "merge_00_0011.md")
+        )
+        (second.root / reused.name).write_text("CORRUPTED")
+        reused = self.read(
+            current,
+            revision3,
+            name="merge_00_0099.md",
+            cache=cache,
+            budget_key="analysis_tokens",
+        )
+        self.assertEqual(
+            (reused.source_revision, reused.name), (revision1, "merge_00_0010.md")
+        )
+        self.assertEqual(reused.generation_budget, 512)
+        self.assertEqual(reused.source_config_hash, first.config_hash)
+
+    def test_merge_index_is_built_once_and_reads_only_matching_artifact_contents(self):
+        for index in range(1, 101):
+            self.previous.write(
+                f"merge_00_{index:04d}.md", "Different", {"input": index}
+            )
+        cache = artifacts.ArtifactReuseCache()
+        with (
+            patch.object(
+                artifacts, "_merge_index", wraps=artifacts._merge_index
+            ) as index,
+            patch.object(
+                artifacts, "_read_bounded", wraps=artifacts._read_bounded
+            ) as read,
+        ):
+            for position in range(1000, 1010):
+                self.assertEqual(
+                    self.read(name=f"merge_00_{position:04d}.md", cache=cache).name,
+                    self.name,
+                )
+        self.assertEqual(index.call_count, 1)
+        self.assertEqual(
+            [call.args[1] for call in read.call_args_list], [self.name] * 10
+        )
+
+    def test_merge_index_reloads_and_is_discarded_with_evicted_manifest(self):
+        self.previous.write("merge_00_0010.md", "Alternative", self.dependencies)
+        cache = artifacts.ArtifactReuseCache()
+        with patch.object(
+            artifacts, "_merge_index", wraps=artifacts._merge_index
+        ) as index:
+            self.assertEqual(
+                self.read(name="merge_00_0007.md", cache=cache).name, self.name
+            )
+            manifest = copy.deepcopy(self.previous.manifest)
+            manifest["artifacts"][self.name]["dependencies"] = "changed"
+            atomic_json(self.previous.path, manifest)
+            self.assertEqual(
+                self.read(name="merge_00_0007.md", cache=cache).name, "merge_00_0010.md"
+            )
+            self.assertEqual(index.call_count, 2)
+            limit = (
+                max(self.previous.path.stat().st_size, self.current.path.stat().st_size)
+                + 1
+            )
+            with patch.object(artifacts, "MAX_REUSE_MANIFEST_BYTES", limit):
+                with artifacts._directory(self.current.root) as root:
+                    cache.manifest(root, self.current.config_hash)
+                self.assertNotIn(self.previous.config_hash, cache.manifests)
+                self.assertEqual(
+                    self.read(name="merge_00_0007.md", cache=cache).name,
+                    "merge_00_0010.md",
+                )
+            self.assertEqual(index.call_count, 3)
+
+    def test_cancellation_between_shifted_candidates_stops_before_next_file_read(self):
+        self.previous.write("merge_00_0010.md", "Alternative", self.dependencies)
+        (self.previous.root / self.name).write_text("CORRUPTED")
+        read = artifacts._read_bounded
+        cancelled = False
+        names = []
+
+        def observe(root, name, limit):
+            nonlocal cancelled
+            content = read(root, name, limit)
+            names.append(name)
+            if name == self.name:
+                cancelled = True
+            return content
+
+        def check():
+            if cancelled:
+                raise Cancelled()
+
+        with (
+            patch.object(artifacts, "_read_bounded", side_effect=observe),
+            self.assertRaises(Cancelled),
+        ):
+            self.read(name="merge_00_0007.md", check_cancelled=check)
+        self.assertIn(self.name, names)
+        self.assertNotIn("merge_00_0010.md", names)
 
 
 if __name__ == "__main__":
