@@ -455,6 +455,35 @@ class PipelineResumeTests(unittest.TestCase):
         )
         self.assertEqual(self.preserved(), before)
 
+    def test_retry_preserves_report_archive_snapshot_and_external_temporary_targets(
+        self,
+    ):
+        self.fail_saving()
+        directory = self.store.job_dir(self.job_id)
+        previous = (directory / REPORT_FILE).read_bytes()
+        archive = directory / "previous_reports"
+        archive.mkdir()
+        archived_report = archive / f"{file_hash(directory / REPORT_FILE)}.md"
+        external = self.root / "external.txt"
+        external.write_text("EXTERNAL CONTENT", encoding="utf-8")
+        destinations = (
+            directory / REPORT_FILE,
+            directory / "live_preview.json",
+            self.original_root / "manifest.json",
+            self.original_root / "quality_checks.json",
+            archived_report,
+        )
+        links = [path.with_suffix(path.suffix + ".tmp") for path in destinations]
+        for link in links:
+            link.symlink_to(external)
+        self.retry()
+        self.assertEqual(self.execute(), [])
+        self.assert_done()
+        self.assertEqual(external.read_text(), "EXTERNAL CONTENT")
+        self.assertTrue(all(link.is_symlink() for link in links))
+        self.assertEqual(archived_report.read_bytes(), previous)
+        self.assertEqual(self.store.load_config(self.job_id), self.original)
+
     def test_changed_final_input_preparation_invalidates_completed_final(self):
         self.fail_saving()
         self.final_compact = True

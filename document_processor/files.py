@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import os
+import tempfile
 from pathlib import Path
 
 from .observability import current_job_id, event
@@ -12,14 +13,30 @@ from .observability import current_job_id, event
 def atomic_text(path, text):
     """Replace path with UTF-8 text atomically: readers never see a partial file.
 
-    The text is written to a neighbouring .tmp file, then moved over path. The
-    parent directory must exist. I/O errors are logged, then raised.
+    A private, exclusively created temporary in the destination directory is
+    closed before replacement. Its context owns cleanup on exceptions; existing
+    temporary names are never opened or removed. Python 3.12+ keeps cleanup
+    active after close with delete_on_close=False.
+
+    The destination's parents must exist and remain application-controlled and
+    stable during creation, replacement and cleanup. This does not protect
+    against an actor who can concurrently rename those directories or entries.
+    Replacement is atomic on the same filesystem, without a power-loss fsync
+    guarantee. I/O errors are logged, then raised.
     """
     path = Path(path)
-    tmp = path.with_suffix(path.suffix + ".tmp")
     try:
-        tmp.write_text(text, encoding="utf-8")
-        os.replace(tmp, path)
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete_on_close=False,
+        ) as tmp:
+            tmp.write(text)
+            tmp.close()
+            os.replace(tmp.name, path)
     except OSError as exc:
         event(
             "artifact_write_failed",
