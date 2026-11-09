@@ -1,6 +1,7 @@
 """Resume real persisted attempts with deterministic SSE and exact call counts."""
 
 import copy
+import hashlib
 import io
 import json
 import os
@@ -465,6 +466,45 @@ class PipelineResumeTests(unittest.TestCase):
             self.models[-1].calls[0]["input"],
         )
         self.assertEqual(self.steps()[1][REPORT_FILE]["status"], "done")
+
+    def test_replaced_final_after_digest_cannot_publish_unverified_content(self):
+        self.fail_saving()
+        path = self.original_root / REPORT_FILE
+        verified = path.read_text(encoding="utf-8")
+        replacement = self.root / "replacement.md"
+        replacement.write_text("UNVERIFIED FINAL REPORT", encoding="utf-8")
+        sha256 = hashlib.sha256
+        swapped = False
+
+        def hash_bytes(content):
+            nonlocal swapped
+            digest = sha256(content)
+            if content == verified.encode("utf-8"):
+                os.replace(replacement, path)
+                swapped = True
+            return digest
+
+        def hash_path(candidate):
+            nonlocal swapped
+            digest = file_hash(candidate)
+            if candidate == path:
+                os.replace(replacement, path)
+                swapped = True
+            return digest
+
+        self.retry()
+        with (
+            patch.object(artifacts, "file_hash", side_effect=hash_path),
+            patch.object(artifacts, "hashlib", SimpleNamespace(sha256=hash_bytes)),
+        ):
+            self.assertEqual(self.execute(), [])
+        self.assertTrue(swapped, "The substitution must occur during verification")
+        self.assert_done()
+        self.assert_reused(REPORT_FILE, 256)
+        report = (self.store.job_dir(self.job_id) / REPORT_FILE).read_text()
+        self.assertIn(verified, report)
+        self.assertNotIn("UNVERIFIED FINAL REPORT", report)
+        self.assertEqual(path.read_text(), "UNVERIFIED FINAL REPORT")
 
     def test_revised_final_context_is_rechecked_before_generation(self):
         self.create()

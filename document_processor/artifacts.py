@@ -105,6 +105,16 @@ def _is_hash(value: object) -> bool:
     return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
 
 
+def _validate_name(name: str) -> None:
+    if (
+        not isinstance(name, str)
+        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,199}", name) is None
+        or name == "manifest.json"
+        or name.endswith(".tmp")
+    ):
+        raise ValueError("Invalid artifact name.")
+
+
 @contextmanager
 def _directory(path: str | Path, parent: int | None = None) -> Iterator[int]:
     """Anchor each directory component without following symlinks."""
@@ -146,9 +156,10 @@ def _read_bounded(parent: int, name: str, limit: int) -> bytes:
         return _read_stream(stream, limit)
 
 
-def _read_stream(stream: BinaryIO, limit: int) -> bytes:
+def _read_stream(stream: BinaryIO, limit: int | None = None) -> bytes:
+    """Read once, bounded by the observed size and any historical reuse limit."""
     before = _file_state(stream)
-    if before[2] > limit:
+    if limit is not None and before[2] > limit:
         raise ValueError("Artifact exceeds reuse size limit.")
     content = stream.read(before[2] + 1)
     if len(content) != before[2] or before != _file_state(stream):
@@ -209,16 +220,18 @@ class Artifacts:
         self.root = self.directory / "artifacts" / self.config_hash
         self.root.mkdir(parents=True, exist_ok=True)
         self.path = self.root / "manifest.json"
-        self.manifest: dict[str, Any] = (
-            json.loads(self.path.read_text(encoding="utf-8"))
-            if self.path.exists()
-            else {
-                "version": 1,
-                "config_hash": self.config_hash,
-                "artifacts": {},
-                "identity": None,
-            }
-        )
+        self.manifest: dict[str, Any]
+        with self._root_directory() as root:
+            try:
+                with _regular_file(root, "manifest.json") as stream:
+                    self.manifest = json.loads(_read_stream(stream).decode("utf-8"))
+            except FileNotFoundError:
+                self.manifest = {
+                    "version": 1,
+                    "config_hash": self.config_hash,
+                    "artifacts": {},
+                    "identity": None,
+                }
         if (
             self.manifest.get("config_hash") != self.config_hash
             or self.manifest.get("version") != 1
@@ -227,6 +240,16 @@ class Artifacts:
                 "artifacts_incompatible",
                 "Artifact manifest is incompatible with this job.",
             )
+
+    @contextmanager
+    def _root_directory(self) -> Iterator[int]:
+        """Anchor reads within this job, refusing linked artifact directories."""
+        with (
+            _directory(self.directory) as job,
+            _directory("artifacts", job) as artifacts,
+            _directory(self.config_hash, artifacts) as root,
+        ):
+            yield root
 
     def bind_identity(self, identity):
         """Refuse changed or unverifiable identities before reusing existing artifacts."""
@@ -276,13 +299,7 @@ class Artifacts:
         reads; contents are always hashed. budget_key retains the source budget
         for generation metrics rather than attributing the target's new budget.
         """
-        if (
-            not isinstance(name, str)
-            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,199}", name) is None
-            or name == "manifest.json"
-            or name.endswith(".tmp")
-        ):
-            raise ValueError("Invalid artifact name.")
+        _validate_name(name)
         if budget_key is not None and budget_key not in RESUME_BUDGETS:
             raise ValueError("Invalid artifact generation budget key.")
         if type(revision) is not int or revision < 0:
@@ -444,18 +461,23 @@ class Artifacts:
         )
 
     def read(self, name, dependencies):
-        """Return verified text, or None when there is no reusable completed artifact."""
+        """Hash and decode the same bytes; unsafe or changed files are cache misses."""
+        _validate_name(name)
         entry = self.manifest["artifacts"].get(name)
-        path = self.root / name
         if (
             not entry
             or entry.get("complete") is not True
             or entry.get("dependencies") != fingerprint(dependencies)
-            or not path.is_file()
-            or file_hash(path) != entry.get("sha256")
         ):
             return None
-        return path.read_text(encoding="utf-8")
+        try:
+            with self._root_directory() as root, _regular_file(root, name) as stream:
+                content = _read_stream(stream)
+        except (OSError, ValueError):
+            return None
+        if hashlib.sha256(content).hexdigest() != entry.get("sha256"):
+            return None
+        return content.decode("utf-8")
 
     def write(self, name, text, dependencies):
         """Publish contents first, then the matching completed manifest entry."""
