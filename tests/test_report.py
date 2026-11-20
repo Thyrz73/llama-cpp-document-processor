@@ -1,7 +1,9 @@
 """Test Markdown downloads in isolated storage."""
 
+import os
 import tempfile
 import unittest
+from contextlib import contextmanager
 from dataclasses import replace
 from html.parser import HTMLParser
 from pathlib import Path
@@ -11,6 +13,7 @@ import app
 from document_processor import jobs, prompts, reports
 from document_processor.application import create_app
 from document_processor.jobs import JobStore
+from document_processor.web import reports as web_reports
 
 
 class Tags(HTMLParser):
@@ -250,6 +253,287 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(
             self.client.get(f"/api/jobs/{self.job_id}/report").status_code, 404
         )
+
+    def test_substitution_after_resolution_cannot_redirect_name_or_content(self):
+        outside = Path(self.tmp.name) / "external.md"
+        outside.write_text("# External secret\nPRIVATE_CONTENT", encoding="utf-8")
+        path = self.directory / "rapport_final.md"
+        original = web_reports.resolve_report
+        for suffix in ("report", "report/view"):
+            with self.subTest(suffix=suffix):
+                self.write_report("# Trusted study\nORIGINAL_CONTENT")
+                self.store.set_report_name(self.job_id, None)
+
+                def substitute(identifier):
+                    resolved = original(identifier)
+                    path.unlink()
+                    path.symlink_to(outside)
+                    return resolved
+
+                try:
+                    with (
+                        patch.object(
+                            web_reports, "resolve_report", side_effect=substitute
+                        ),
+                        self.client.get(
+                            f"/api/jobs/{self.job_id}/{suffix}"
+                        ) as response,
+                    ):
+                        self.assertEqual(response.status_code, 200)
+                        self.assertIn(b"ORIGINAL_CONTENT", response.data)
+                        self.assertNotIn(b"PRIVATE_CONTENT", response.data)
+                        self.assertNotIn(b"External secret", response.data)
+                        self.assertIn(
+                            "Trusted_study_rapport.md",
+                            response.headers.get("Content-Disposition", "")
+                            if suffix == "report"
+                            else response.get_data(as_text=True),
+                        )
+                finally:
+                    path.unlink()
+
+    def test_substitution_after_naming_keeps_download_and_view_on_opened_report(self):
+        outside = Path(self.tmp.name) / "external.md"
+        outside.write_text("# External secret\nPRIVATE_CONTENT", encoding="utf-8")
+        path = self.directory / "rapport_final.md"
+        original = web_reports.ensure_report_name
+        for suffix in ("report", "report/view"):
+            with self.subTest(suffix=suffix):
+                self.write_report("# Trusted study\nORIGINAL_CONTENT")
+
+                def substitute(job, opened):
+                    name = original(job, opened)
+                    path.unlink()
+                    path.symlink_to(outside)
+                    return name
+
+                try:
+                    with (
+                        patch.object(
+                            web_reports, "ensure_report_name", side_effect=substitute
+                        ),
+                        self.client.get(
+                            f"/api/jobs/{self.job_id}/{suffix}"
+                        ) as response,
+                    ):
+                        self.assertEqual(response.status_code, 200)
+                        self.assertIn(b"ORIGINAL_CONTENT", response.data)
+                        self.assertNotIn(b"PRIVATE_CONTENT", response.data)
+                finally:
+                    path.unlink()
+
+    def test_directory_and_file_substitution_before_open_are_rejected(self):
+        outside = Path(self.tmp.name) / "outside"
+        outside.mkdir()
+        (outside / self.job_id).mkdir()
+        for directory in (outside, outside / self.job_id):
+            (directory / "rapport_final.md").write_text("PRIVATE_CONTENT")
+        path = self.directory / "rapport_final.md"
+        self.write_report("# Trusted study")
+        original = web_reports.job_directory
+        for suffix in ("report", "report/view"):
+            for target in (path, self.directory, self.directory.parent):
+                with self.subTest(suffix=suffix, target=target):
+                    retained = target.with_name(target.name + "-retained")
+
+                    def substitute(identifier, target=target, retained=retained):
+                        directory = original(identifier)
+                        target.rename(retained)
+                        target.symlink_to(
+                            outside / path.name if target == path else outside,
+                            target_is_directory=target != path,
+                        )
+                        return directory
+
+                    try:
+                        with (
+                            patch.object(
+                                web_reports, "job_directory", side_effect=substitute
+                            ),
+                            self.client.get(
+                                f"/api/jobs/{self.job_id}/{suffix}"
+                            ) as response,
+                        ):
+                            self.assertEqual(response.status_code, 404)
+                            self.assertNotIn(b"PRIVATE_CONTENT", response.data)
+                    finally:
+                        target.unlink()
+                        retained.rename(target)
+
+    @contextmanager
+    def opened_report_files(self):
+        streams = []
+        original = os.fdopen
+
+        def observe(*args, **kwargs):
+            stream = original(*args, **kwargs)
+            streams.append(stream)
+            return stream
+
+        with patch.object(web_reports.os, "fdopen", side_effect=observe):
+            yield streams
+
+    def test_streamed_download_pins_file_until_response_closes(self):
+        content = "# Trusted study\n" + "Original content — é\n" * 100000
+        self.write_report(content)
+        self.store.set_report_name(self.job_id, "Trusted_study_rapport.md")
+        outside = Path(self.tmp.name) / "external.md"
+        outside.write_text("PRIVATE_CONTENT")
+        # X-Sendfile must not reintroduce a pathname open by an HTTP server.
+        self.application.config["USE_X_SENDFILE"] = True
+        with self.opened_report_files() as streams:
+            response = self.client.get(
+                f"/api/jobs/{self.job_id}/report", buffered=False
+            )
+            try:
+                self.assertEqual(response.status_code, 200)
+                self.assertTrue(response.is_streamed)
+                self.assertNotIn("X-Sendfile", response.headers)
+                self.assertEqual(len(streams), 1)
+                self.assertFalse(streams[0].closed)
+                path = self.directory / "rapport_final.md"
+                path.unlink()
+                path.symlink_to(outside)
+                self.assertEqual(response.data, content.encode("utf-8"))
+                self.assertEqual(response.content_length, len(response.data))
+            finally:
+                response.close()
+            self.assertTrue(streams[0].closed)
+
+    def test_early_disconnect_closes_download_file(self):
+        self.write_report("# Trusted study\n" + "x" * 100000)
+        with self.opened_report_files() as streams:
+            response = self.client.get(
+                f"/api/jobs/{self.job_id}/report", buffered=False
+            )
+            self.assertFalse(streams[0].closed)
+            response.close()  # Do not consume the rest of the body.
+            self.assertTrue(streams[0].closed)
+
+    def test_http_metadata_ranges_conditionals_and_descriptor_cleanup(self):
+        content = b"# Trusted study\nORIGINAL_CONTENT"
+        (self.directory / "rapport_final.md").write_bytes(content)
+        url = f"/api/jobs/{self.job_id}/report"
+        with self.client.get(url) as response:
+            etag = response.headers["ETag"]
+            modified = response.headers["Last-Modified"]
+            self.assertEqual(response.content_length, len(content))
+        cases = (
+            ("HEAD", {}, 200, b""),
+            ("GET", {"Range": "bytes=2-8"}, 206, content[2:9]),
+            ("GET", {"If-None-Match": etag}, 304, b""),
+            ("GET", {"If-Modified-Since": modified}, 304, b""),
+            ("GET", {"Range": "bytes=99999-"}, 416, None),
+        )
+        for method, headers, status, expected in cases:
+            with self.subTest(method=method, headers=headers):
+                with (
+                    self.opened_report_files() as streams,
+                    self.client.open(url, method=method, headers=headers) as response,
+                ):
+                    self.assertEqual(response.status_code, status)
+                    self.assertEqual(response.headers["Cache-Control"], "no-store")
+                    self.assertEqual(
+                        response.headers["X-Content-Type-Options"], "nosniff"
+                    )
+                    if expected is not None:
+                        self.assertEqual(response.data, expected)
+                    if status == 206:
+                        self.assertEqual(
+                            response.headers["Content-Range"],
+                            f"bytes 2-8/{len(content)}",
+                        )
+                self.assertEqual(len(streams), 1)
+                self.assertTrue(streams[0].closed)
+
+    def test_invalid_utf8_view_is_404_but_original_bytes_remain_downloadable(self):
+        content = b"# Broken \xff title\n\xff"
+        (self.directory / "rapport_final.md").write_bytes(content)
+        with self.opened_report_files() as streams:
+            response = self.client.get(f"/api/jobs/{self.job_id}/report/view")
+            self.assertEqual(response.status_code, 404)
+            self.assertIn(
+                "default-src 'none'", response.headers["Content-Security-Policy"]
+            )
+            self.assertEqual(response.headers["Referrer-Policy"], "no-referrer")
+            self.assertTrue(streams[0].closed)
+        with self.client.get(f"/api/jobs/{self.job_id}/report") as response:
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.data, content)
+
+    def test_viewer_closes_file_on_success_and_size_limit(self):
+        for content, status in (("# Valid", 200), ("x" * (1024 * 1024 + 1), 413)):
+            with self.subTest(status=status):
+                self.write_report(content)
+                with self.opened_report_files() as streams:
+                    response = self.client.get(f"/api/jobs/{self.job_id}/report/view")
+                    self.assertEqual(response.status_code, status)
+                    self.assertEqual(len(streams), 1)
+                    self.assertTrue(streams[0].closed)
+
+    def test_io_errors_during_naming_and_response_creation_close_file(self):
+        self.write_report("# Trusted study")
+        for owner, operation, suffix in (
+            (reports, "report_filename", "report"),
+            (reports, "report_filename", "report/view"),
+            (web_reports, "send_file", "report"),
+        ):
+            with self.subTest(operation=operation, suffix=suffix):
+                self.store.set_report_name(self.job_id, None)
+                with (
+                    self.opened_report_files() as streams,
+                    patch.object(owner, operation, side_effect=OSError("PRIVATE_PATH")),
+                ):
+                    response = self.client.get(f"/api/jobs/{self.job_id}/{suffix}")
+                    self.assertEqual(response.status_code, 404)
+                    self.assertNotIn(b"PRIVATE_PATH", response.data)
+                    self.assertEqual(len(streams), 1)
+                    self.assertTrue(streams[0].closed)
+
+    def test_missing_special_and_hardlinked_reports_fail_safely(self):
+        path = self.directory / "rapport_final.md"
+        outside = Path(self.tmp.name) / "external.md"
+        outside.write_text("PRIVATE_CONTENT")
+        for create in (
+            lambda: None,
+            lambda: os.mkfifo(path),
+            path.mkdir,
+            lambda: os.link(outside, path),
+        ):
+            create()
+            try:
+                for suffix in ("report", "report/view"):
+                    with self.client.get(
+                        f"/api/jobs/{self.job_id}/{suffix}"
+                    ) as response:
+                        self.assertEqual(response.status_code, 404)
+                        self.assertNotIn(b"PRIVATE_CONTENT", response.data)
+            finally:
+                if path.is_dir():
+                    path.rmdir()
+                else:
+                    path.unlink(missing_ok=True)
+
+    def test_open_failure_closes_directory_and_file_descriptors(self):
+        self.write_report("# Trusted study")
+        opened = []
+        original = os.open
+
+        def observe(*args, **kwargs):
+            descriptor = original(*args, **kwargs)
+            opened.append(descriptor)
+            return descriptor
+
+        with (
+            patch.object(web_reports.os, "open", side_effect=observe),
+            patch.object(web_reports.os, "fdopen", side_effect=OSError("PRIVATE_PATH")),
+        ):
+            response = self.client.get(f"/api/jobs/{self.job_id}/report")
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(len(opened), 3)
+        for descriptor in opened:
+            with self.assertRaises(OSError):
+                os.fstat(descriptor)
 
     def test_listing_never_offers_symlinked_reports_or_job_roots(self):
         outside = Path(self.tmp.name) / "outside"
