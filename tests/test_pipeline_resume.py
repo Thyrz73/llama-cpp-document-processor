@@ -17,7 +17,14 @@ from unittest.mock import Mock, patch
 
 from support import WordCountModelMixin, sse_event
 
-from document_processor import artifacts, config, extraction, pipeline, reliability
+from document_processor import (
+    artifacts,
+    config,
+    extraction,
+    files,
+    pipeline,
+    reliability,
+)
 from document_processor.application import create_app
 from document_processor.errors import ProcessingError, WorkerStopping
 from document_processor.files import atomic_json, file_hash
@@ -542,6 +549,94 @@ class PipelineResumeTests(unittest.TestCase):
         self.assertTrue(all(link.is_symlink() for link in links))
         self.assertEqual(archived_report.read_bytes(), previous)
         self.assertEqual(self.store.load_config(self.job_id), self.original)
+
+    def test_symlinked_previous_report_blocks_saving_without_archiving_external_text(
+        self,
+    ):
+        self.fail_saving()
+        directory = self.store.job_dir(self.job_id)
+        path = directory / REPORT_FILE
+        external = self.root / "external.md"
+        external.write_text("PRIVATE EXTERNAL REPORT", encoding="utf-8")
+        path.unlink()
+        path.symlink_to(external)
+        self.retry()
+        self.assertEqual(self.execute(), [])
+        self.assertFalse((directory / "previous_reports").exists())
+        self.assertEqual(self.store.get_job(self.job_id)["status"], "failed")
+        saving = next(
+            step for step in self.steps()[1].values() if step["stage"] == "saving"
+        )
+        self.assertEqual(saving["status"], "failed")
+        self.assertEqual(saving["metrics"]["error_code"], "report_save_failed")
+        self.assertEqual(external.read_text(), "PRIVATE EXTERNAL REPORT")
+        self.assertTrue(path.is_symlink())
+        path.unlink()
+        self.retry()
+        self.assertEqual(self.execute(), [])
+        self.assert_done()
+
+    def test_symlinked_archive_blocks_completion_then_retry_recovers_without_model_calls(
+        self,
+    ):
+        self.fail_saving()
+        directory = self.store.job_dir(self.job_id)
+        path = directory / REPORT_FILE
+        previous = path.read_bytes()
+        external = self.root / "external"
+        external.mkdir()
+        victim = external / (file_hash(path) + ".md")
+        victim.write_text("EXTERNAL CONTENT", encoding="utf-8")
+        archive = directory / "previous_reports"
+        archive.symlink_to(external, target_is_directory=True)
+        self.retry()
+        self.assertEqual(self.execute(), [])
+        self.assertEqual(victim.read_text(), "EXTERNAL CONTENT")
+        self.assertEqual(self.store.get_job(self.job_id)["status"], "failed")
+        self.assertEqual(path.read_bytes(), previous)
+        archive.unlink()
+        self.restart()
+        self.retry()
+        self.assertEqual(self.execute(), [])
+        self.assert_done()
+        self.assertEqual((archive / victim.name).read_bytes(), previous)
+        self.assertEqual(victim.read_text(), "EXTERNAL CONTENT")
+
+    def test_cancellation_and_shutdown_during_archiving_preserve_report_and_recover(
+        self,
+    ):
+        for stopping in (False, True):
+            with self.subTest(stopping=stopping):
+                self.fail_saving()
+                directory = self.store.job_dir(self.job_id)
+                path = directory / REPORT_FILE
+                previous = path.read_bytes()
+                self.retry()
+
+                def interrupt(source, target, check_cancelled, stopping=stopping):
+                    target.write(b"PARTIAL")
+                    if stopping:
+                        raise WorkerStopping()
+                    self.client.post(f"/api/jobs/{self.job_id}/cancel")
+                    check_cancelled()
+
+                with patch.object(files, "_copy_digest", side_effect=interrupt):
+                    self.assertEqual(self.execute(), [])
+                self.assertEqual(path.read_bytes(), previous)
+                self.assertEqual(list((directory / "previous_reports").iterdir()), [])
+                current, steps = self.steps()
+                expected = "interrupted" if stopping else "cancelled"
+                self.assertEqual(current["status"], expected)
+                saving = next(
+                    step for step in steps.values() if step["stage"] == "saving"
+                )
+                self.assertEqual(saving["status"], expected)
+                if stopping:
+                    self.restart()
+                else:
+                    self.retry()
+                self.assertEqual(self.execute(), [])
+                self.assert_done()
 
     def test_changed_final_input_preparation_invalidates_completed_final(self):
         self.fail_saving()

@@ -29,7 +29,7 @@ from .artifacts import ArtifactReuseCache, Artifacts
 from .config import fingerprint
 from .contracts import AnalysisNote, Chunk, ExtractionResult, JobSnapshot
 from .errors import Cancelled, ProcessingError, WorkerStopping
-from .files import atomic_json, atomic_text, file_hash
+from .files import archive_report, atomic_json, atomic_text, file_hash
 from .jobs import PREVIEW_FILE, SOURCE_FILE, JobStore, now
 from .model_client import ModelClient
 from .observability import event, failure, log
@@ -554,13 +554,7 @@ class JobRun:
                 extracted["ocr_pages"],
             )
             report_path = self.directory / REPORT_FILE
-            if report_path.is_file():
-                archive = self.directory / "previous_reports"
-                archive.mkdir(exist_ok=True)
-                atomic_text(
-                    archive / (file_hash(report_path) + ".md"),
-                    report_path.read_text(encoding="utf-8"),
-                )
+            archive_report(self.directory, self.model.check_cancelled)
             report_text = (
                 header
                 + final

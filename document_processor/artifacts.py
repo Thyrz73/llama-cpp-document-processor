@@ -12,7 +12,6 @@ import hashlib
 import json
 import os
 import re
-import stat
 from collections import OrderedDict
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
@@ -23,7 +22,14 @@ from typing import TYPE_CHECKING, Any, BinaryIO, Literal, cast
 from .config import RESUME_BUDGETS, compatible_artifact_config, fingerprint
 from .contracts import ArtifactHistory
 from .errors import ProcessingError
-from .files import atomic_json, atomic_text, file_hash
+from .files import (
+    _directory,
+    _file_state,
+    _regular_file,
+    atomic_json,
+    atomic_text,
+    file_hash,
+)
 from .jobs import MAX_ARTIFACT_REVISIONS, SOURCE_FILE
 
 if TYPE_CHECKING:
@@ -166,42 +172,6 @@ def _validate_name(name: str) -> None:
         or name.endswith(".tmp")
     ):
         raise ValueError("Invalid artifact name.")
-
-
-@contextmanager
-def _directory(path: str | Path, parent: int | None = None) -> Iterator[int]:
-    """Anchor each directory component without following symlinks."""
-    descriptor = os.open(
-        path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent
-    )
-    try:
-        yield descriptor
-    finally:
-        os.close(descriptor)
-
-
-@contextmanager
-def _regular_file(parent: int, name: str) -> Iterator[BinaryIO]:
-    descriptor = os.open(
-        name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent
-    )
-    with os.fdopen(descriptor, "rb") as stream:
-        info = os.fstat(stream.fileno())
-        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
-            raise ValueError("Unverifiable artifact file.")
-        yield stream
-
-
-def _file_state(stream: BinaryIO) -> tuple[int, ...]:
-    info = os.fstat(stream.fileno())
-    return (
-        info.st_dev,
-        info.st_ino,
-        info.st_size,
-        info.st_mtime_ns,
-        info.st_ctime_ns,
-        info.st_nlink,
-    )
 
 
 def _read_bounded(parent: int, name: str, limit: int) -> bytes:
