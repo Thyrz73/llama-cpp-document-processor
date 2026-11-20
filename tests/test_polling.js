@@ -2712,6 +2712,127 @@ describe("Browser interface", { concurrency: false }, () => {
       );
     });
 
+    test("verified failed-attempt phases select the correct translated phase and budget", async () => {
+      for (const language of ["en", "fr"]) {
+        for (const [phase, budget] of [
+          ["section", "analysis_tokens"],
+          ["merge", "merge_tokens"],
+          ["final", "final_tokens"],
+        ]) {
+          const browser = createBrowser({
+            storage: new Map([["document-processor-language", language]]),
+          });
+          await browser.respond(0, {
+            jobs: [
+              failed({
+                phase_args: {
+                  failed_phase: {
+                    attempt_id: 2,
+                    code: phase,
+                    error_code: "output_limit",
+                  },
+                },
+              }),
+            ],
+          });
+          open(browser);
+          assert.ok(
+            browser.elements.resumePhase.textContent.includes(
+              translations[language]["resume.phase." + phase],
+            ),
+          );
+          assert.ok(
+            browser.elements.resumeGuidance.textContent.includes(budget),
+          );
+          assert.ok(!browser.elements.resumePhase.textContent.includes("{"));
+          assert.equal(
+            browser.requests.length,
+            1,
+            "No extra history or preview request",
+          );
+        }
+      }
+    });
+
+    test("missing, incomplete and inconsistent failure metadata keeps generic guidance", async () => {
+      for (const failure of [
+        undefined,
+        null,
+        {},
+        { code: "merge", error_code: "output_limit" },
+        { attempt_id: 0, code: "merge", error_code: "output_limit" },
+        { attempt_id: 2, code: "merge" },
+        { attempt_id: 2, code: "merge", error_code: "deadline" },
+        { attempt_id: 2, code: "unknown", error_code: "output_limit" },
+      ]) {
+        const browser = createBrowser();
+        await browser.respond(0, {
+          jobs: [failed({ phase_args: { failed_phase: failure } })],
+        });
+        open(browser);
+        assert.match(
+          browser.elements.resumePhase.textContent,
+          /phase is unavailable/,
+        );
+        assert.match(
+          browser.elements.resumeGuidance.textContent,
+          /affected phase/,
+        );
+        assert.ok(
+          !browser.elements.resumeGuidance.textContent.includes("merge_tokens"),
+        );
+        assert.ok(!browser.elements.resumeRetry.disabled);
+      }
+    });
+
+    test("unknown failure types never receive token advice even with a known failed stage", async () => {
+      const browser = createBrowser();
+      await browser.respond(0, {
+        jobs: [
+          failed({
+            error_code: "future_error",
+            phase_args: {
+              failed_phase: {
+                attempt_id: 2,
+                code: "final",
+                error_code: "future_error",
+              },
+            },
+          }),
+        ],
+      });
+      open(browser);
+      assert.match(browser.elements.resumePhase.textContent, /Final report/);
+      assert.equal(browser.elements.resumeGuidance.textContent, "");
+    });
+
+    test("a newer failed attempt in the same second makes an open dialog stale", async () => {
+      const browser = createBrowser();
+      const withAttempt = (attempt) =>
+        failed({
+          phase_args: {
+            failed_phase: {
+              attempt_id: attempt,
+              code: "merge",
+              error_code: "output_limit",
+            },
+          },
+        });
+      await browser.respond(0, { jobs: [withAttempt(1)] });
+      open(browser);
+      browser.elements.resume_merge_tokens.value = "4500";
+      browser.api.refresh();
+      await browser.respond(1, { jobs: [withAttempt(2)] });
+      assert.ok(browser.elements.resumeAdjusted.disabled);
+      assert.ok(!browser.elements.resumeStale.hidden);
+      assert.equal(browser.elements.resume_merge_tokens.value, "4500");
+      submit(browser);
+      assert.equal(browser.requests.length, 2);
+      escape(browser);
+      open(browser);
+      assert.ok(!browser.elements.resumeAdjusted.disabled);
+    });
+
     test("failure guidance distinguishes output limits, context limits and other errors", async () => {
       for (const [code, phase, expected, budget] of [
         [

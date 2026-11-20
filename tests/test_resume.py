@@ -22,6 +22,7 @@ from document_processor.jobs import JobStore
 from document_processor.model_client import ModelClient
 from document_processor.observability import log
 from document_processor.settings import Settings
+from document_processor.worker import Worker
 
 
 class ResumeModel(WordCountModelMixin, ModelClient):
@@ -769,6 +770,240 @@ class ResumeApiTests(unittest.TestCase):
                     "analysis_tokens" if step["stage"] == "section" else "merge_tokens"
                 )
                 self.assertEqual(step["metrics"]["output_budget"], original[key])
+
+    def test_real_output_limit_failures_expose_the_current_generation_phase(self):
+        for stage in ("section", "merge", "final"):
+            with self.subTest(stage=stage):
+                identifier = self.create("queued")
+
+                class LimitedModel(ResumeModel):
+                    def complete(self, *args, failed_stage=stage, **kwargs):
+                        if self.current_stage == failed_stage:
+                            self.current_metrics = {
+                                "output_tokens": args[2],
+                                "finish_reason": "length",
+                            }
+                            raise ModelError("output_limit", "Output budget exhausted.")
+                        return super().complete(*args, **kwargs)
+
+                def factory(snapshot):
+                    model = LimitedModel(
+                        "http://unused", "", snapshot, snapshot["system_prompt"]
+                    )
+                    model.calls, model.fail_stage = [], None
+                    return model
+
+                application = create_app(self.settings, self.store, factory)
+                services = application.extensions["document_processor"]
+                chunks = [
+                    {"text": "Sample measurements [Page 1]", "pages": [1]}
+                    for _ in range(5)
+                ]
+                with (
+                    patch.object(
+                        extraction,
+                        "extract_pdf",
+                        return_value=([{"page": 1, "text": "Measurements"}], 1, [], []),
+                    ),
+                    patch.object(extraction, "make_chunks", return_value=chunks),
+                    self.assertLogs(log, "ERROR"),
+                ):
+                    self.assertEqual(self.store.claim_next_job(), identifier)
+                    services.worker.run_claimed(identifier)
+                metrics = self.store.metrics(identifier)
+                expected = {
+                    "code": stage,
+                    "attempt_id": metrics["runs"][0]["id"],
+                    "error_code": "output_limit",
+                }
+                client = application.test_client()
+                listed = next(
+                    job
+                    for job in client.get("/api/jobs").json["jobs"]
+                    if job["id"] == identifier
+                )
+                for job in (listed, client.get(f"/api/jobs/{identifier}").json):
+                    self.assertEqual(job["status"], "failed")
+                    self.assertEqual(job["phase_code"], "failed")
+                    self.assertEqual(job["error_code"], "output_limit")
+                    self.assertEqual(job["phase_args"], {"failed_phase": expected})
+
+    def failed_attempt(self, identifier, stage="merge", code="output_limit"):
+        """Persist realistic step metadata without running inference."""
+        recorder = self.store.start_attempt(identifier, jobs.utcnow())
+        handle = recorder.start(stage, "failed.md")
+        recorder.end(handle, "failed", {"error_code": code})
+        recorder.finish("failed")
+        return recorder.run_id
+
+    def test_incomplete_or_inconsistent_current_attempt_metadata_is_not_guessed(self):
+        for invalid in (
+            "no_attempt",
+            "no_steps",
+            "running_attempt",
+            "unfinished_attempt",
+            "unfinished_step",
+            "running_step",
+            "successful_attempt",
+            "unknown_stage",
+            "missing_code",
+            "different_code",
+            "invalid_json",
+            "null_metrics",
+            "newest_failure_unknown",
+        ):
+            with self.subTest(metadata=invalid):
+                identifier = self.create("running")
+
+                def run_job(job_id, check, invalid=invalid):
+                    if invalid != "no_attempt":
+                        run_id = self.failed_attempt(job_id)
+                        with self.store.connect() as con:
+                            if invalid == "no_steps":
+                                con.execute(
+                                    "DELETE FROM job_steps WHERE run_id=?", (run_id,)
+                                )
+                            elif invalid == "running_attempt":
+                                con.execute(
+                                    "UPDATE job_runs SET status='running' WHERE id=?",
+                                    (run_id,),
+                                )
+                            elif invalid == "unfinished_attempt":
+                                con.execute(
+                                    "UPDATE job_runs SET finished_at=NULL WHERE id=?",
+                                    (run_id,),
+                                )
+                            elif invalid == "successful_attempt":
+                                con.execute(
+                                    "UPDATE job_runs SET status='done' WHERE id=?",
+                                    (run_id,),
+                                )
+                            elif invalid == "unfinished_step":
+                                con.execute(
+                                    "UPDATE job_steps SET finished_at=NULL WHERE run_id=?",
+                                    (run_id,),
+                                )
+                            elif invalid == "running_step":
+                                con.execute(
+                                    "UPDATE job_steps SET status='running' WHERE run_id=?",
+                                    (run_id,),
+                                )
+                            elif invalid == "unknown_stage":
+                                con.execute(
+                                    "UPDATE job_steps SET stage='unknown' WHERE run_id=?",
+                                    (run_id,),
+                                )
+                            elif invalid in (
+                                "missing_code",
+                                "different_code",
+                                "invalid_json",
+                                "null_metrics",
+                            ):
+                                values = {
+                                    "missing_code": "{}",
+                                    "different_code": '{"error_code":"deadline"}',
+                                    "invalid_json": "broken",
+                                    "null_metrics": "null",
+                                }
+                                con.execute(
+                                    "UPDATE job_steps SET metrics=? WHERE run_id=?",
+                                    (values[invalid], run_id),
+                                )
+                        if invalid == "newest_failure_unknown":
+                            # A newer failed step must not reveal an older matching one.
+                            with self.store.connect() as con:
+                                con.execute(
+                                    "INSERT INTO job_steps (run_id,job_id,stage,step_key,started_at,finished_at,status,metrics) "
+                                    "VALUES (?,?,'unknown','newer',?,?,'failed','{}')",
+                                    (run_id, job_id, jobs.now(), jobs.now()),
+                                )
+                    raise ModelError("output_limit", "Output budget exhausted.")
+
+                with self.assertLogs(log, "ERROR"):
+                    Worker(self.store, run_job).run_claimed(identifier)
+                self.assertEqual(self.store.get_job(identifier)["phase_args"], {})
+
+    @patch("document_processor.jobs.now", return_value="2026-11-20T12:00:00.000+00:00")
+    @patch("document_processor.jobs.utcnow", return_value="2026-11-20T12:00:00+00:00")
+    def test_previous_attempts_and_saved_failure_metadata_are_never_reused(
+        self, _utcnow, _now
+    ):
+        for new_attempt in (False, True):
+            with self.subTest(new_attempt=new_attempt):
+                identifier = self.create("running")
+                old_id = self.failed_attempt(identifier)
+                self.store.update_job(
+                    identifier,
+                    phase_args=json.dumps(
+                        {
+                            "failed_phase": {
+                                "attempt_id": old_id,
+                                "code": "merge",
+                                "error_code": "output_limit",
+                            }
+                        }
+                    ),
+                )
+
+                def run_job(job_id, check, new_attempt=new_attempt):
+                    if new_attempt:
+                        self.store.start_attempt(job_id, jobs.utcnow()).finish("failed")
+                    raise ModelError("output_limit", "Output budget exhausted.")
+
+                # Keep all timestamps identical: attempt identity, not time, is the fence.
+                with self.assertLogs(log, "ERROR"):
+                    Worker(self.store, run_job).run_claimed(identifier)
+                self.assertEqual(self.store.get_job(identifier)["phase_args"], {})
+
+    def test_latest_failed_attempt_wins(self):
+        identifier = self.create("running")
+        self.failed_attempt(identifier, "merge")
+
+        def run_job(job_id, check):
+            self.failed_attempt(job_id, "final")
+            raise ModelError("output_limit", "Output budget exhausted.")
+
+        with self.assertLogs(log, "ERROR"):
+            Worker(self.store, run_job).run_claimed(identifier)
+        job = self.store.get_job(identifier)
+        self.assertEqual(job["phase_args"]["failed_phase"]["code"], "final")
+        self.assertEqual(
+            job["phase_args"]["failed_phase"]["attempt_id"],
+            self.store.metrics(identifier)["runs"][0]["id"],
+        )
+
+    def test_retry_and_resume_clear_failed_phase_metadata(self):
+        for action in ("retry", "resume"):
+            with self.subTest(action=action):
+                identifier = self.create("running")
+
+                def run_job(job_id, check):
+                    self.failed_attempt(job_id, "final")
+                    raise ModelError("output_limit", "Output budget exhausted.")
+
+                with self.assertLogs(log, "ERROR"):
+                    Worker(self.store, run_job).run_claimed(identifier)
+                job = self.store.get_job(identifier)
+                self.assertEqual(job["phase_args"]["failed_phase"]["code"], "final")
+                kwargs = {"json": {"final_tokens": 6144}} if action == "resume" else {}
+                response = self.client.post(
+                    f"/api/jobs/{identifier}/{action}", **kwargs
+                )
+                self.assertEqual(response.status_code, 200, response.json)
+                self.assertEqual(self.store.get_job(identifier)["phase_args"], {})
+
+    def test_unexpected_failure_does_not_inherit_a_generation_step_error(self):
+        identifier = self.create("running")
+
+        def run_job(job_id, check):
+            self.failed_attempt(job_id, "final", "step_failed")
+            raise RuntimeError("PRIVATE_FAILURE")
+
+        with self.assertLogs(log, "ERROR"):
+            Worker(self.store, run_job).run_claimed(identifier)
+        job = self.store.get_job(identifier)
+        self.assertEqual(job["error_code"], "analysis_failed")
+        self.assertEqual(job["phase_args"], {})
 
     def test_historical_snapshot_metadata_and_extensions_are_preserved(self):
         identifier = self.create()

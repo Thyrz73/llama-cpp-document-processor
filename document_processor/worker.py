@@ -5,6 +5,7 @@ queued job, runs it and records how it ended. A single worker keeps memory
 and CPU use predictable on small machines.
 """
 
+import json
 import logging
 import threading
 import time
@@ -23,7 +24,7 @@ CANCEL_RECHECK_SECONDS = 1.0
 SHUTDOWN_TIMEOUT_SECONDS = 5.0
 
 
-def record_failure(store, job_id, exc):
+def record_failure(store, job_id, exc, *, after_attempt_id=None):
     """Record a failed job with a translatable code and a message safe to display.
 
     Only ProcessingError and ConfigurationError carry public text; any other
@@ -37,11 +38,17 @@ def record_failure(store, job_id, exc):
             "analysis_failed",
             "Analysis failed. Check the PDF, configuration and local diagnostics.",
         )
+    failed_phase = (
+        store.failed_phase(job_id, after_attempt_id, code)
+        if after_attempt_id is not None
+        else None
+    )
     store.update_job(
         job_id,
         status="failed",
         stage="Error",
         phase_code="failed",
+        phase_args=json.dumps({"failed_phase": failed_phase} if failed_phase else {}),
         error_code=code,
         error=message,
     )
@@ -163,7 +170,10 @@ class Worker:
         self._signals[job_id] = _CancelSignal()
         event("job_state", job_id=job_id, status="running", stage="starting")
         with job_context(job_id):
+            after_attempt_id = None
             try:
+                _, previous_attempt_id = self.store.get_live_job(job_id)
+                after_attempt_id = previous_attempt_id or 0
                 self.run_job(job_id, self.cancellation_requested)
             except WorkerStopping:
                 event("worker_job_interrupted", job_id=job_id, status="interrupted")
@@ -178,6 +188,8 @@ class Worker:
                 )
             except Exception as exc:
                 # Keep the last preview to help diagnose the error.
-                record_failure(self.store, job_id, exc)
+                record_failure(
+                    self.store, job_id, exc, after_attempt_id=after_attempt_id
+                )
             finally:
                 self._signals.pop(job_id, None)

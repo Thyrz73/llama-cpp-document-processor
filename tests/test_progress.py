@@ -37,6 +37,8 @@ class ExtractionProgressTests(unittest.TestCase):
         self.store.previews = PreviewCache()
         self.store.start_attempt.return_value.run_id = 1
         self.store.start_attempt.return_value.config_revision = 0
+        self.store.get_live_job.return_value = ({}, None)
+        self.store.failed_phase.return_value = None
         self.store.job_dir.return_value = self.directory
         self.store.get_job.return_value = {
             "question": "Analyze",

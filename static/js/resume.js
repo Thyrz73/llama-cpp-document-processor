@@ -56,7 +56,29 @@ const canAdjust = (config) =>
     (name) => Number.isSafeInteger(config?.[name]) && config[name] > 0,
   );
 const version = (job) =>
-  JSON.stringify([job.status, job.queued_at, job.configuration]);
+  JSON.stringify([
+    job.status,
+    job.queued_at,
+    job.configuration,
+    job.phase_args?.failed_phase,
+  ]);
+
+// Terminal phase_code stays "failed". The worker separately records a verified
+// generation stage from the attempt created by that execution, never a preview.
+function failedPhase(job) {
+  const failure = job.phase_args?.failed_phase;
+  if (failure !== undefined) {
+    return job.status === "failed" &&
+      Number.isSafeInteger(failure?.attempt_id) &&
+      failure.attempt_id > 0 &&
+      failure.error_code === job.error_code &&
+      Object.hasOwn(PHASE_BUDGET, failure.code)
+      ? failure.code
+      : null;
+  }
+  // Preserve older payloads that still identify their processing phase.
+  return PHASES.has(job.phase_code) ? job.phase_code : null;
+}
 
 // These listeners are installed once at startup, never on dialog opening.
 // Native showModal supplies the focus trap and keyboard traversal.
@@ -126,7 +148,7 @@ export function renderResumeDialog() {
   if (!intent) return;
   const { job } = intent;
   const config = job.configuration;
-  const knownPhase = PHASES.has(job.phase_code);
+  const phase = failedPhase(job);
   $("resumeDocument").textContent = job.filename;
   $("resumeFailure").textContent =
     job.status === "cancelled"
@@ -135,10 +157,14 @@ export function renderResumeDialog() {
           job,
           "Analysis failed. Check the PDF, configuration and local diagnostics.",
         );
-  $("resumePhase").textContent = knownPhase
-    ? t("Last processing phase: {phase}", { phase: phaseLabel(job) })
+  $("resumePhase").textContent = phase
+    ? t("Last processing phase: {phase}", {
+        phase: job.phase_args?.failed_phase
+          ? t("resume.phase." + phase)
+          : phaseLabel(job),
+      })
     : t("The failed or interrupted processing phase is unavailable.");
-  const budget = knownPhase && PHASE_BUDGET[job.phase_code];
+  const budget = phase && PHASE_BUDGET[phase];
   $("resumeGuidance").textContent =
     job.error_code === "output_limit"
       ? t(

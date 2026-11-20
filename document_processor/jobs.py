@@ -294,6 +294,46 @@ class JobStore:
             else (self.serialize(row), row["latest_attempt_id"])
         )
 
+    def failed_phase(self, job_id, after_attempt_id, error_code):
+        """Identify a failed generation step from this worker execution only.
+
+        The worker captures the latest attempt ID before calling the pipeline.
+        A failure before a new attempt starts must never inherit an older
+        attempt's stage, even when both executions occur in the same second.
+        """
+        with self.connect() as con:
+            row = con.execute(
+                "SELECT run.id AS attempt_id, run.status AS run_status, "
+                "run.finished_at AS run_finished_at, step.stage, step.status, "
+                "step.finished_at, step.metrics FROM job_runs AS run "
+                "LEFT JOIN job_steps AS step ON step.id=("
+                "SELECT MAX(id) FROM job_steps WHERE job_id=run.job_id "
+                "AND run_id=run.id AND status='failed') "
+                "WHERE run.job_id=? ORDER BY run.id DESC LIMIT 1",
+                (job_id,),
+            ).fetchone()
+        if (
+            row is None
+            or row["attempt_id"] <= after_attempt_id
+            or row["run_status"] != "failed"
+            or not row["run_finished_at"]
+            or row["status"] != "failed"
+            or not row["finished_at"]
+            or row["stage"] not in ("section", "merge", "final")
+        ):
+            return None
+        try:
+            metrics = json.loads(row["metrics"])
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(metrics, dict) or metrics.get("error_code") != error_code:
+            return None
+        return {
+            "attempt_id": row["attempt_id"],
+            "code": row["stage"],
+            "error_code": error_code,
+        }
+
     def list_jobs(self, limit=100):
         """Return the latest jobs with their public configuration, and whether any job is active.
 
@@ -602,7 +642,7 @@ class JobStore:
             return "limit", attempts
         changed = con.execute(
             """UPDATE jobs SET status='queued', error='', error_code='', stage='Retrying',
-            phase_code='queued', cancel_requested=0, queued_at=?, updated_at=?
+            phase_code='queued', phase_args='{}', cancel_requested=0, queued_at=?, updated_at=?
             WHERE id=? AND status IN ('failed','cancelled')""",
             (utcnow(), utcnow(), job_id),
         ).rowcount
