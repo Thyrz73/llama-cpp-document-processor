@@ -34,6 +34,10 @@ function initialState() {
     refreshPending: false,
     jobsFailures: 0,
     cancellingJobs: new Set(),
+    restartingJobs: new Set(),
+    // The resume dialog is independent of the periodically rebuilt cards.
+    resumeIntent: null,
+    resumeTrigger: null,
     promptExpanded: new Set(),
     // Outcome of the last retry, cancellation or deletion, shown above the list.
     jobsNotice: null,

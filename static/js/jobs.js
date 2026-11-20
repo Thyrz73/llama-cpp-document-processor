@@ -7,6 +7,13 @@ import { jsonFetch } from "./api.js";
 import { jobCard } from "./card.js";
 import { invalidateLivePreview, syncLivePolling } from "./live.js";
 import {
+  openResumeDialog,
+  closeResumeDialog,
+  renderResumeDialog,
+  syncResumeDialog,
+  modifiedBudgets,
+} from "./resume.js";
+import {
   closeDeleteDialog,
   historyControls,
   historyHeading,
@@ -22,7 +29,11 @@ const GROUPS = [
   ["active", "Active analyses", "No analyses in progress."],
   ["history", "Analysis history", "No analysis history yet."],
 ];
-const CARD_HANDLERS = { retry, cancel: cancelJob, toggleLive };
+const CARD_HANDLERS = {
+  resume: openResumeDialog,
+  cancel: cancelJob,
+  toggleLive,
+};
 
 // Cancel the planned automatic reload, if any.
 export function stopJobsPolling() {
@@ -93,6 +104,7 @@ export function refresh(afterChange = false) {
 // changed. The open live panel is moved into the new card instead of being
 // rebuilt, so its text, tab and scroll position are kept.
 export function renderJobs() {
+  syncResumeDialog();
   const eligible = new Set(
     state.jobs
       .filter((job) => TERMINAL_STATUSES.has(job.status))
@@ -105,6 +117,7 @@ export function renderJobs() {
     state.expandedId,
     state.deleting,
     state.selectionMode,
+    [...state.restartingJobs],
   ]);
   if (signature === state.renderedSignature) {
     syncLivePolling();
@@ -161,12 +174,15 @@ function restoreFocus(focused, host) {
     ? "[data-select-job]"
     : focused?.dataset?.deleteJob
       ? "[data-delete-job]"
-      : null;
+      : focused?.dataset?.resumeJob
+        ? "[data-resume-job]"
+        : null;
   if (selector) {
     const replacement = [...host.querySelectorAll(selector)].find(
       (node) =>
         node.dataset.selectJob === focused.dataset.selectJob &&
-        node.dataset.deleteJob === focused.dataset.deleteJob,
+        node.dataset.deleteJob === focused.dataset.deleteJob &&
+        node.dataset.resumeJob === focused.dataset.resumeJob,
     );
     focusHistoryControl(replacement);
   } else if (
@@ -229,15 +245,69 @@ export function renderJobsNotice() {
 // Queue a failed or cancelled job again, then reload the list. A refusal,
 // such as an exhausted retry limit, is shown above the list.
 export async function retry(id) {
+  return restartJob(id);
+}
+
+// Called by the dialog's two actions. Retry sends no body; resume sends only
+// explicitly increased output budgets, never the new-analysis form settings.
+export async function submitResume(adjusted) {
+  const intent = state.resumeIntent;
+  if (!intent || intent.stale || state.restartingJobs.has(intent.job.id))
+    return;
+  const budgets = adjusted ? modifiedBudgets() : undefined;
+  if (adjusted && !budgets) return;
+  return restartJob(intent.job.id, budgets);
+}
+
+async function restartJob(id, budgets) {
+  if (state.deleting || state.restartingJobs.has(id)) return;
+  const generation = state.uiGeneration;
+  const intent = state.resumeIntent?.job.id === id ? state.resumeIntent : null;
+  state.restartingJobs.add(id);
+  if (intent) intent.error = null;
   showJobsNotice(null);
+  renderJobs();
+  let success = false;
   try {
-    const r = await jsonFetch(`/api/jobs/${id}/retry`, { method: "POST" });
+    const r = await jsonFetch(
+      `/api/jobs/${id}/${budgets ? "resume" : "retry"}`,
+      {
+        method: "POST",
+        ...(budgets
+          ? {
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(budgets),
+            }
+          : {}),
+      },
+    );
     const d = await r.json();
-    if (!r.ok) throw Error(errorText(d, "Retry failed"));
+    if (generation !== state.uiGeneration) return;
+    if (!r.ok) {
+      if (intent) {
+        intent.error = { data: d, fallback: "Resume failed" };
+        // Refresh only after the server reports missing/stale state.
+        if ([404, 409].includes(r.status)) {
+          intent.stale = true;
+          await refresh();
+        }
+      } else showJobsNotice({ error: errorText(d, "Retry failed") });
+      return;
+    }
     invalidateLivePreview(id);
     await refresh(true);
+    success = true;
   } catch (err) {
-    showJobsNotice({ error: err.message });
+    if (generation !== state.uiGeneration) return;
+    if (intent) intent.error = { key: err.message };
+    else showJobsNotice({ error: err.message });
+  } finally {
+    if (generation === state.uiGeneration) {
+      state.restartingJobs.delete(id);
+      if (success && intent === state.resumeIntent) closeResumeDialog();
+      renderJobs();
+      renderResumeDialog();
+    }
   }
 }
 

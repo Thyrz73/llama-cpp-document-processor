@@ -24,9 +24,15 @@ Reports use a deterministic descriptive download name such as `Consommation_ener
 
 The server-rendered reader supports headings, lists, tables, quotes, links and code, with selectable Unicode text and the saved light/dark theme. Raw HTML is escaped, executable link schemes are rejected and images are disabled. A restrictive Content Security Policy blocks embedded resources. Preview is limited to **1 MiB**; larger files remain downloadable without loading the full file into application memory. Empty reports show an explicit message and can still be downloaded. Only completed final reports are exposed; private configurations and intermediate pipeline files are not published.
 
-## Cancel and retry
+## Cancel, retry and resume
 
-**Cancel** stops queued jobs immediately and requests cancellation of running work. OCR finishes its current subprocess first; a remote model may take longer to stop. **Retry** is available for failed or cancelled jobs and keeps their selected effective settings, including budgets from a previous API resume. The resume API can increase output token budgets; create a new analysis to change language or prompts. If the server refuses a cancellation or a retry, for example once the retry limit is reached, the reason appears above the analyses list.
+**Cancel** stops queued jobs immediately and requests cancellation of running work. OCR finishes its current subprocess first; a remote model may take longer to stop.
+
+For a failed or cancelled job, choose **Resume…** to see its saved configuration and failure information. **Retry** keeps its selected effective settings, including budgets from an earlier resume. **Resume with adjusted budgets** lets you increase the analysis, merge and final output token budgets; only modified budgets are submitted. Other settings and prompts stay as saved. Create a new analysis to change them. Older jobs without saved budgets can still use Retry.
+
+Output exhaustion may benefit from a larger budget for the affected phase. A context-window limit is different: increasing output budgets does not enlarge the context window and may reduce space for input. The failed phase is shown only when available, and larger budgets do not guarantee success.
+
+Polling preserves edits while the dialog is open. If the job changes, close and reopen it to use the latest settings. Escape or **Close** dismisses the dialog when no request is pending. Validation and request errors appear inside the dialog; cancellation errors appear above the analyses list.
 
 If a cancelled or timed-out HTTP reader is still closing, the next generation waits for it instead of failing subsequent jobs. This wait remains cancellable and does not consume the next generation's time limit. A response arriving after cancellation is closed before reading its body.
 

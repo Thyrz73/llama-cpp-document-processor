@@ -354,6 +354,135 @@ Analyze this entire document: objectives, methods, results, key figures, assumpt
       </footer>
     </main>
     <dialog
+      id="resumeDialog"
+      aria-labelledby="resumeTitle"
+      aria-describedby="resumeDocument resumeFailure"
+    >
+      <h2 id="resumeTitle" data-i18n="Resume analysis">Resume analysis</h2>
+      <p id="resumeDocument" class="name"></p>
+      <p id="resumeFailure" class="small"></p>
+      <p id="resumePhase" class="small muted"></p>
+      <p id="resumeGuidance" class="small"></p>
+      <h3 data-i18n="Current configuration">Current configuration</h3>
+      <p id="resumeConfig" class="small muted"></p>
+      <details>
+        <summary data-i18n="Other saved settings">Other saved settings</summary>
+        <dl id="resumeSavedSettings" class="resume-settings small"></dl>
+      </details>
+      <section class="resume-option" aria-labelledby="resumeRetryTitle">
+        <h3 id="resumeRetryTitle" data-i18n="Retry with current settings">
+          Retry with current settings
+        </h3>
+        <p
+          class="small muted"
+          data-i18n="Keep the currently selected saved configuration."
+        >
+          Keep the currently selected saved configuration.
+        </p>
+        <button
+          id="resumeRetry"
+          type="button"
+          class="button-secondary"
+          data-i18n="Retry"
+          >Retry</button
+        >
+      </section>
+      <form
+        id="resumeForm"
+        class="resume-option"
+        novalidate
+        aria-labelledby="resumeAdjustedTitle"
+      >
+        <h3 id="resumeAdjustedTitle" data-i18n="Resume with adjusted budgets">
+          Resume with adjusted budgets
+        </h3>
+        <p
+          id="resumeBudgetHelp"
+          class="small muted"
+          data-i18n="Increase only the output budgets you need. All other saved settings are kept. The server checks available context."
+        >
+          Increase only the output budgets you need. All other saved settings
+          are kept. The server checks available context.
+        </p>
+        <div class="settings-grid">
+          <div>
+            <label
+              for="resume_analysis_tokens"
+              data-i18n="Analysis output tokens"
+              >Analysis output tokens</label
+            >
+            <input
+              id="resume_analysis_tokens"
+              type="number"
+              min="1"
+              step="1"
+              required
+              aria-describedby="resumeBudgetHelp resumeError"
+            />
+          </div>
+          <div>
+            <label for="resume_merge_tokens" data-i18n="Merge output tokens"
+              >Merge output tokens</label
+            >
+            <input
+              id="resume_merge_tokens"
+              type="number"
+              min="1"
+              step="1"
+              required
+              aria-describedby="resumeBudgetHelp resumeError"
+            />
+          </div>
+          <div>
+            <label for="resume_final_tokens" data-i18n="Final output tokens"
+              >Final output tokens</label
+            >
+            <input
+              id="resume_final_tokens"
+              type="number"
+              min="1"
+              step="1"
+              required
+              aria-describedby="resumeBudgetHelp resumeError"
+            />
+          </div>
+        </div>
+        <p id="resumeError" class="error" role="alert" hidden></p>
+        <p
+          id="resumeStale"
+          class="warning small"
+          role="status"
+          data-i18n="This analysis changed or is no longer available. Close and reopen the dialog to use its latest settings."
+          hidden
+        >
+          This analysis changed or is no longer available. Close and reopen the
+          dialog to use its latest settings.
+        </p>
+        <p
+          id="resumeStatus"
+          class="small muted"
+          role="status"
+          aria-live="polite"
+        ></p>
+        <div class="dialog-actions">
+          <button
+            id="resumeCancel"
+            type="button"
+            class="button-secondary"
+            data-i18n="Close"
+            autofocus
+            >Close</button
+          >
+          <button
+            id="resumeAdjusted"
+            type="submit"
+            data-i18n="Resume with adjusted budgets"
+            >Resume with adjusted budgets</button
+          >
+        </div>
+      </form>
+    </dialog>
+    <dialog
       id="deleteDialog"
       aria-labelledby="deleteTitle"
       aria-describedby="deleteMessage"

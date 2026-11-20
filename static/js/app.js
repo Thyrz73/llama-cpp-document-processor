@@ -13,10 +13,12 @@ import {
   rerenderJobs,
   stopJobsPolling,
   submitDeletion,
+  submitResume,
 } from "./jobs.js";
 import { stopLivePolling, syncLivePolling, translateLive } from "./live.js";
 import { closeDeleteDialog, renderDeleteDialog } from "./history.js";
 import { initSettings, renderConfig } from "./settings.js";
+import { initResumeDialog, renderResumeDialog } from "./resume.js";
 
 export function start() {
   resetState();
@@ -24,6 +26,7 @@ export function start() {
   applyLanguage();
   initTheme();
   initUpload();
+  initResumeDialog(submitResume);
   $("refresh").addEventListener("click", refresh);
   if ($("deleteDialog")) {
     $("deleteCancel").addEventListener("click", closeDeleteDialog);
@@ -71,6 +74,7 @@ function changeLanguage() {
   translateLive();
   rerenderJobs();
   renderDeleteDialog();
+  renderResumeDialog();
   renderJobsNotice();
   if (state.profileConfig) renderConfig(state.profileConfig);
 }

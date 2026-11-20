@@ -562,6 +562,26 @@ dialog {
 dialog::backdrop {
   background: rgb(0 0 0 / 45%);
 }
+#resumeDialog {
+  width: min(620px, calc(100% - 32px));
+  overflow-wrap: anywhere;
+}
+.resume-option {
+  border-top: 1px solid var(--border);
+  margin-top: 18px;
+  padding-top: 18px;
+}
+.resume-settings {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 8px 16px;
+}
+.resume-settings dd {
+  margin: 0;
+}
+#resumeDialog .dialog-actions {
+  margin-top: 18px;
+}
 .dialog-actions {
   display: flex;
   justify-content: flex-end;

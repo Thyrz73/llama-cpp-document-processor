@@ -682,7 +682,7 @@ describe("Browser interface", { concurrency: false }, () => {
       assert.ok(
         !browser.elements.jobsNotice.hidden &&
           browser.elements.jobsNotice.textContent ===
-            "The retry limit was reached.",
+            translations.en["error.retry_limit"],
         "Refusal shown without blocking the page",
       );
       assert.equal(
@@ -2214,6 +2214,616 @@ describe("Browser interface", { concurrency: false }, () => {
         ),
         "Unavailable message",
       );
+    });
+  });
+
+  describe("Configurable analysis resume", () => {
+    const id = "a".repeat(32);
+    const config = {
+      fingerprint: "selected-revision",
+      profile: "high",
+      customized: true,
+      chunk_tokens: 2048,
+      analysis_tokens: 3072,
+      merge_tokens: 4096,
+      final_tokens: 5120,
+      context_tokens: 16384,
+      report_language: "fr",
+      detail_level: "detailed",
+      temperature: 0.3,
+      thinking_section: "inherit",
+    };
+    const failed = (extra = {}) => ({
+      ...job("failed"),
+      configuration: { ...config },
+      phase_code: "failed",
+      error_code: "output_limit",
+      ...extra,
+    });
+    const trigger = (browser, jobId = id) =>
+      descendants(browser.elements.jobs).find(
+        (node) => node.dataset.resumeJob === jobId,
+      );
+    const open = (browser) => trigger(browser).handlers.click[0]();
+    const submit = (browser) =>
+      browser.elements.resumeForm.handlers.submit[0]({ preventDefault() {} });
+    const escape = (browser) => {
+      let prevented = false;
+      browser.elements.resumeDialog.handlers.cancel[0]({
+        preventDefault() {
+          prevented = true;
+        },
+      });
+      assert.ok(prevented, "Cancel handling controls safe dismissal");
+    };
+
+    test("failed and cancelled cards open with effective saved values and safe focus", async () => {
+      for (const status of ["failed", "cancelled"]) {
+        const browser = createBrowser();
+        const saved = failed({ status, filename: "<analysis>.pdf" });
+        await browser.respond(0, { jobs: [saved] });
+        open(browser);
+        const e = browser.elements;
+        assert.ok(e.resumeDialog.open);
+        assert.equal(browser.document.activeElement, e.resumeCancel);
+        assert.equal(trigger(browser).attributes["aria-haspopup"], "dialog");
+        assert.equal(e.resumeDocument.textContent, "<analysis>.pdf");
+        for (const name of [
+          "analysis_tokens",
+          "merge_tokens",
+          "final_tokens",
+        ]) {
+          assert.equal(e["resume_" + name].value, String(config[name]));
+          assert.equal(e["resume_" + name].min, String(config[name]));
+        }
+        assert.match(e.resumeConfig.textContent, /analysis 3072 · merge 4096/);
+        assert.equal(browser.requests.length, 1, "Opening needs no preflight");
+        if (status === "cancelled")
+          assert.match(e.resumeFailure.textContent, /cancelled/);
+        e.resumeCancel.handlers.click[0]();
+        assert.ok(!e.resumeDialog.open);
+        assert.equal(browser.document.activeElement, trigger(browser));
+      }
+    });
+
+    test("only eligible cards offer resume and missing saved budgets retain retry", async () => {
+      const browser = createBrowser();
+      await browser.respond(0, {
+        jobs: [job("done"), job("running", 50, "b".repeat(32))],
+      });
+      assert.equal(trigger(browser), undefined);
+      browser.api.openResumeDialog(id);
+      assert.ok(!browser.elements.resumeDialog.open);
+      browser.api.refresh();
+      await browser.respond(1, { jobs: [job("failed")] });
+      open(browser);
+      assert.ok(browser.elements.resumeAdjusted.disabled);
+      assert.ok(!browser.elements.resumeRetry.disabled);
+      assert.match(
+        browser.elements.resumeConfig.textContent,
+        /Saved budgets are unavailable/,
+      );
+      browser.elements.resumeRetry.handlers.click[0]();
+      assert.equal(browser.requests[2].url, `/api/jobs/${id}/retry`);
+    });
+
+    test("native dialog and form expose labels, validation messages and keyboard controls", () => {
+      assert.match(
+        template,
+        /<dialog\s+id="resumeDialog"\s+aria-labelledby="resumeTitle"\s+aria-describedby="resumeDocument resumeFailure"/,
+      );
+      for (const name of ["analysis_tokens", "merge_tokens", "final_tokens"]) {
+        assert.match(template, new RegExp(`for="resume_${name}"`));
+        assert.match(
+          template,
+          new RegExp(
+            `id="resume_${name}"[\\s\\S]*?aria-describedby="resumeBudgetHelp resumeError"`,
+          ),
+        );
+      }
+      assert.match(template, /id="resumeAdjusted"\s+type="submit"/);
+      assert.match(template, /id="resumeError"[^>]+role="alert"/);
+      assert.match(template, /id="resumeStatus"[^>]+role="status"/);
+      assert.match(template, /id="resumeCancel"[^>]+autofocus/);
+    });
+
+    test("Escape restores a refreshed trigger, repeated openings keep one listener", async () => {
+      const browser = createBrowser();
+      await browser.respond(0, { jobs: [failed()] });
+      const first = trigger(browser);
+      open(browser);
+      browser.api.refresh();
+      await browser.respond(1, { jobs: [failed({ done_chunks: 2 })] });
+      escape(browser);
+      assert.ok(!first.isConnected);
+      assert.equal(browser.document.activeElement, trigger(browser));
+      for (let i = 0; i < 4; i++) {
+        open(browser);
+        escape(browser);
+      }
+      assert.equal(browser.elements.resumeDialog.handlers.cancel.length, 1);
+      assert.equal(browser.elements.resumeForm.handlers.submit.length, 1);
+      assert.equal(browser.requests.length, 2);
+    });
+
+    test("Retry ignores edited inputs and uses the existing bodyless endpoint", async () => {
+      const browser = createBrowser();
+      await browser.respond(0, { jobs: [failed()] });
+      open(browser);
+      browser.elements.resume_merge_tokens.value = "invalid";
+      browser.elements.resumeRetry.handlers.click[0]();
+      const request = browser.requests[1];
+      assert.equal(request.url, `/api/jobs/${id}/retry`);
+      assert.equal(request.options.method, "POST");
+      assert.equal(request.options.body, undefined);
+      assert.ok(
+        browser.elements.resumeDialog.open,
+        "Wait for server acknowledgement",
+      );
+      await browser.respond(1, { status: "queued" });
+      assert.equal(browser.requests[2].url, "/api/jobs");
+      await browser.respond(2, { jobs: [{ ...failed(), status: "queued" }] });
+      assert.ok(!browser.elements.resumeDialog.open);
+      assert.equal(browser.polls().length, 1);
+    });
+
+    test("resume submits only changed allowed budgets, including multiple changes", async () => {
+      for (const changes of [
+        { analysis_tokens: 3500 },
+        { merge_tokens: 4500 },
+        { final_tokens: 6000 },
+        { analysis_tokens: 3500, merge_tokens: 4500, final_tokens: 6000 },
+      ]) {
+        const browser = createBrowser();
+        const other = failed({
+          id: "b".repeat(32),
+          configuration: { ...config, merge_tokens: 9000 },
+        });
+        const saved = failed();
+        const before = JSON.stringify([saved, other]);
+        await browser.respond(0, { jobs: [saved, other] });
+        open(browser);
+        for (const [name, value] of Object.entries(changes))
+          browser.elements["resume_" + name].value = String(value);
+        submit(browser);
+        const request = browser.requests[1];
+        assert.equal(request.url, `/api/jobs/${id}/resume`);
+        assert.equal(request.options.method, "POST");
+        assert.equal(
+          request.options.headers["Content-Type"],
+          "application/json",
+        );
+        assert.deepEqual(JSON.parse(request.options.body), changes);
+        assert.equal(
+          JSON.stringify([saved, other]),
+          before,
+          "Saved configurations stay immutable",
+        );
+        await browser.respond(1, {
+          status: "queued",
+          configuration: { ...config, ...changes },
+        });
+        await browser.respond(2, {
+          jobs: [
+            {
+              ...saved,
+              status: "queued",
+              configuration: { ...config, ...changes },
+            },
+            other,
+          ],
+        });
+        assert.ok(!browser.elements.resumeDialog.open);
+        assert.equal(browser.requests.length, 3);
+      }
+    });
+
+    test("saved settings and the new-analysis form never enter the resume payload", async () => {
+      const storage = new Map([["document-processor-profile", "low"]]);
+      const browser = createBrowser({ withSettings: true, storage });
+      await browser.respond(0, { jobs: [failed()] });
+      open(browser);
+      browser.elements.profile.value = "ultra";
+      browser.elements.analysis_tokens.value = "10000";
+      browser.elements.temperature.value = "1.2";
+      browser.elements.resume_merge_tokens.value = "4500";
+      submit(browser);
+      assert.deepEqual(JSON.parse(browser.requests[2].options.body), {
+        merge_tokens: 4500,
+      });
+      assert.equal(browser.elements.analysis_tokens.value, "10000");
+      assert.equal(storage.get("document-processor-profile"), "low");
+      assert.match(browser.elements.resumeConfig.textContent, /analysis 3072/);
+    });
+
+    test("invalid values, decreases and unchanged budgets never make requests", async () => {
+      const browser = createBrowser();
+      await browser.respond(0, { jobs: [failed()] });
+      open(browser);
+      submit(browser);
+      assert.match(
+        browser.elements.resumeError.textContent,
+        /Increase at least one/,
+      );
+      for (const name of ["analysis_tokens", "merge_tokens", "final_tokens"]) {
+        const input = browser.elements["resume_" + name];
+        for (const value of [
+          "",
+          "0",
+          "-2",
+          "1.5",
+          "1e4",
+          "0x2000",
+          "NaN",
+          "Infinity",
+          "9007199254740992",
+          String(config[name] - 1),
+        ]) {
+          input.value = value;
+          submit(browser);
+          assert.equal(browser.requests.length, 1, `${name}: ${value}`);
+          assert.equal(input.attributes["aria-invalid"], "true");
+          assert.equal(browser.document.activeElement, input);
+          assert.ok(!browser.elements.resumeError.hidden);
+        }
+        input.value = String(config[name]);
+      }
+      browser.elements.resume_merge_tokens.value = "4500";
+      submit(browser);
+      assert.equal(browser.requests.length, 2, "Corrected inputs can submit");
+      assert.ok(browser.elements.resumeError.hidden);
+    });
+
+    test("duplicate submits and conflicting actions are disabled until confirmation and refresh", async () => {
+      const browser = createBrowser();
+      await browser.respond(0, { jobs: [failed()] });
+      open(browser);
+      browser.elements.resume_merge_tokens.value = "4500";
+      submit(browser);
+      submit(browser);
+      browser.elements.resumeRetry.handlers.click[0]();
+      browser.api.retry(id);
+      escape(browser);
+      const e = browser.elements;
+      for (const control of [
+        e.resumeRetry,
+        e.resumeAdjusted,
+        e.resumeCancel,
+        e.resume_analysis_tokens,
+        e.resume_merge_tokens,
+        e.resume_final_tokens,
+        trigger(browser),
+      ])
+        assert.ok(control.disabled);
+      assert.equal(e.resumeDialog.attributes["aria-busy"], "true");
+      assert.equal(e.resumeStatus.textContent, "Submitting…");
+      assert.ok(e.resumeDialog.open);
+      assert.equal(browser.requests.length, 2);
+      await browser.respond(1, { status: "queued" });
+      submit(browser);
+      assert.ok(e.resumeDialog.open && e.resumeRetry.disabled);
+      assert.equal(browser.requests.length, 3);
+      await browser.respond(2, { jobs: [{ ...failed(), status: "queued" }] });
+      assert.ok(!e.resumeDialog.open);
+    });
+
+    test("server validation uses translated codes or plain safe text and preserves edits", async () => {
+      for (const data of [
+        { error_code: "context_insufficient", error: "server detail" },
+        { error_code: "invalid_budget", error: "Invalid merge_tokens budget." },
+        {
+          error_code: "unknown_validation",
+          error: "<img src=x onerror=alert(1)>",
+        },
+      ]) {
+        const browser = createBrowser();
+        await browser.respond(0, { jobs: [failed()] });
+        open(browser);
+        browser.elements.resume_merge_tokens.value = "4500";
+        submit(browser);
+        await browser.respond(1, data, false, 400);
+        const e = browser.elements;
+        assert.equal(
+          e.resumeError.textContent,
+          translations.en["error." + data.error_code] || data.error,
+        );
+        assert.equal(e.resumeError.children.length, 0);
+        assert.equal(e.resume_merge_tokens.value, "4500");
+        assert.ok(
+          e.resumeDialog.open &&
+            !e.resumeRetry.disabled &&
+            !e.resumeAdjusted.disabled,
+        );
+        assert.equal(
+          browser.requests.length,
+          2,
+          "No validation preflight or redundant refresh",
+        );
+      }
+    });
+
+    test("404 and 409 keep backend errors visible, refresh stale state and block resubmission", async () => {
+      for (const [status, data] of [
+        [404, { error_code: "not_found", error: "Analysis not found." }],
+        [409, { error_code: "resume_conflict", error: "Conflict" }],
+        [409, { error_code: "retry_limit", error: "Limit" }],
+      ]) {
+        const browser = createBrowser();
+        await browser.respond(0, { jobs: [failed()] });
+        open(browser);
+        browser.elements.resume_merge_tokens.value = "4500";
+        submit(browser);
+        await browser.respond(1, data, false, status);
+        assert.equal(browser.requests[2].url, "/api/jobs");
+        await browser.respond(2, { jobs: status === 404 ? [] : [failed()] });
+        const e = browser.elements;
+        assert.equal(
+          e.resumeError.textContent,
+          translations.en["error." + data.error_code] || data.error,
+        );
+        assert.ok(
+          e.resumeDialog.open &&
+            e.resumeRetry.disabled &&
+            e.resumeAdjusted.disabled,
+        );
+        assert.ok(!e.resumeStale.hidden && !e.resumeCancel.disabled);
+        submit(browser);
+        assert.equal(browser.requests.length, 3);
+        escape(browser);
+        if (status === 404)
+          assert.equal(browser.document.activeElement.id, "toggleSelection");
+      }
+    });
+
+    test("network errors and timeouts unlock the dialog without success or lost edits", async () => {
+      for (const timeout of [false, true]) {
+        const browser = createBrowser();
+        await browser.respond(0, { jobs: [failed()] });
+        open(browser);
+        browser.elements.resume_merge_tokens.value = "4500";
+        submit(browser);
+        if (timeout) await browser.tick(15000);
+        else await browser.reject(1);
+        const e = browser.elements;
+        assert.equal(
+          e.resumeError.textContent,
+          timeout ? "Request timed out." : "Offline",
+        );
+        assert.ok(e.resumeDialog.open && !e.resumeAdjusted.disabled);
+        assert.equal(e.resume_merge_tokens.value, "4500");
+        assert.equal(browser.requests.length, 2);
+        escape(browser);
+        assert.equal(browser.document.activeElement, trigger(browser));
+      }
+    });
+
+    test("polling preserves open dialog values, focus and selected history", async () => {
+      const browser = createBrowser();
+      const running = job("running", 20, "b".repeat(32));
+      await browser.respond(0, { jobs: [failed(), running] });
+      toggleSelection(browser);
+      setSelected(selectionCheckboxes(browser)[0]);
+      open(browser);
+      const input = browser.elements.resume_merge_tokens;
+      input.value = "4500";
+      input.focus();
+      await browser.tick(6000);
+      await browser.respond(1, {
+        jobs: [failed(), { ...running, progress_percent: 40 }],
+      });
+      assert.equal(input.value, "4500");
+      assert.equal(browser.document.activeElement, input);
+      assert.ok(
+        browser.elements.resumeDialog.open &&
+          !browser.elements.resumeAdjusted.disabled,
+      );
+      assert.ok(selectionCheckboxes(browser)[0].checked);
+      escape(browser);
+      assert.equal(browser.document.activeElement, trigger(browser));
+      browser.api.cancelJob(running.id);
+      assert.equal(browser.requests[2].url, `/api/jobs/${running.id}/cancel`);
+    });
+
+    test("external status, queue or configuration changes require reopening without resetting edits", async () => {
+      for (const changed of [
+        { ...failed(), status: "running" },
+        failed({
+          configuration: {
+            ...config,
+            fingerprint: "new-revision",
+            merge_tokens: 8000,
+          },
+        }),
+        failed({ queued_at: "2026-11-20T12:00:00Z" }),
+        null,
+      ]) {
+        const browser = createBrowser();
+        await browser.respond(0, { jobs: [failed()] });
+        open(browser);
+        browser.elements.resume_merge_tokens.value = "4500";
+        browser.api.refresh();
+        await browser.respond(1, { jobs: changed ? [changed] : [] });
+        assert.ok(
+          browser.elements.resumeAdjusted.disabled &&
+            browser.elements.resumeRetry.disabled,
+        );
+        assert.ok(!browser.elements.resumeStale.hidden);
+        assert.equal(browser.elements.resume_merge_tokens.value, "4500");
+        submit(browser);
+        assert.equal(browser.requests.length, 2);
+        escape(browser);
+        if (changed?.configuration.merge_tokens === 8000) {
+          open(browser);
+          assert.equal(browser.elements.resume_merge_tokens.value, "8000");
+          assert.ok(!browser.elements.resumeAdjusted.disabled);
+        }
+      }
+    });
+
+    test("successful resume rejects an older list response and survives a failed refresh", async () => {
+      const browser = createBrowser();
+      await browser.respond(0, { jobs: [failed()] });
+      open(browser);
+      browser.api.refresh();
+      browser.elements.resume_merge_tokens.value = "4500";
+      submit(browser);
+      await browser.respond(2, { status: "queued" });
+      assert.equal(browser.requests.length, 3, "Reuse pending list request");
+      await browser.respond(1, { jobs: [failed()] });
+      assert.equal(
+        browser.requests[3].url,
+        "/api/jobs",
+        "Older response requires a fresh read",
+      );
+      await browser.reject(3);
+      assert.ok(!browser.elements.resumeDialog.open);
+      assert.ok(!browser.elements.jobsError.hidden);
+      assert.equal(
+        browser.polls().length,
+        1,
+        "Known queued work restarts polling",
+      );
+    });
+
+    test("resume invalidates previous-attempt live output immediately after acknowledgement", async () => {
+      const browser = createBrowser();
+      await browser.respond(0, { jobs: [failed()] });
+      browser.api.toggleLive(id);
+      open(browser);
+      browser.elements.resume_merge_tokens.value = "4500";
+      submit(browser);
+      await browser.respond(2, { status: "queued" });
+      await browser.respond(1, { content: "Old attempt", active: false });
+      assert.equal(
+        browser.document.getElementById("live-content").textContent,
+        "Waiting for streamed output…",
+      );
+      assert.equal(browser.requests.length, 4);
+      await browser.respond(3, {
+        jobs: [
+          { ...failed(), status: "queued", queued_at: "2026-11-20T12:00:00Z" },
+        ],
+      });
+      assert.equal(browser.requests.length, 5);
+      await browser.respond(4, { content: "New attempt", active: true });
+      assert.equal(
+        browser.document.getElementById("live-content").textContent,
+        "New attempt",
+      );
+    });
+
+    test("failure guidance distinguishes output limits, context limits and other errors", async () => {
+      for (const [code, phase, expected, budget] of [
+        [
+          "output_limit",
+          "section",
+          /does not enlarge the context window/,
+          "analysis_tokens",
+        ],
+        [
+          "output_limit",
+          "merge",
+          /does not enlarge the context window/,
+          "merge_tokens",
+        ],
+        [
+          "output_limit",
+          "final",
+          /does not enlarge the context window/,
+          "final_tokens",
+        ],
+        ["output_limit", "failed", /affected phase/, null],
+        ["context_insufficient", "failed", /context-window limitation/, null],
+        ["merge_impossible", "failed", /context-window limitation/, null],
+        ["empty_output", "failed", /^$/, null],
+        ["analysis_failed", "failed", /^$/, null],
+      ]) {
+        const browser = createBrowser();
+        await browser.respond(0, {
+          jobs: [
+            failed({
+              error_code: code,
+              phase_code: phase,
+              phase_args: { level: 1, index: 1, total: 2, pages: "1–2" },
+            }),
+          ],
+        });
+        open(browser);
+        assert.match(browser.elements.resumeGuidance.textContent, expected);
+        if (budget) {
+          assert.ok(
+            browser.elements.resumeGuidance.textContent.includes(budget),
+          );
+          assert.match(
+            browser.elements.resumePhase.textContent,
+            /Last processing phase:/,
+          );
+        } else
+          assert.match(
+            browser.elements.resumePhase.textContent,
+            /phase is unavailable/,
+          );
+      }
+    });
+
+    test("French and English translations cover dialog text and survive switching with edits", async () => {
+      const browser = createBrowser({ withSettings: true });
+      await browser.respond(0, { jobs: [failed()] });
+      open(browser);
+      browser.elements.resume_merge_tokens.value = "1";
+      submit(browser);
+      for (const language of ["fr", "en"]) {
+        browser.elements.uiLanguage.value = language;
+        browser.elements.uiLanguage.handlers.change[0]();
+        assert.equal(
+          trigger(browser).textContent,
+          translations[language]["Resume…"],
+        );
+        assert.equal(
+          browser.elements.resumeFailure.textContent,
+          translations[language]["error.output_limit"],
+        );
+        assert.ok(
+          browser.elements.resumeError.textContent.includes(
+            translations[language]["Merge output tokens"],
+          ),
+        );
+        assert.equal(browser.elements.resume_merge_tokens.value, "1");
+        assert.equal(
+          browser.document.activeElement,
+          browser.elements.resume_merge_tokens,
+        );
+      }
+      const dialogTemplate = template.slice(
+        template.indexOf('id="resumeDialog"'),
+        template.indexOf('id="deleteDialog"'),
+      );
+      for (const [, key] of dialogTemplate.matchAll(/data-i18n="([^"]+)"/g)) {
+        assert.ok(translations.en[key] && translations.fr[key], key);
+      }
+      for (const key of Object.keys(translations.en))
+        assert.ok(translations.fr[key], key);
+      browser.elements.theme.value = "dark";
+      browser.elements.theme.handlers.change[0]();
+      assert.equal(browser.elements.resume_merge_tokens.value, "1");
+      assert.ok(browser.elements.resumeDialog.open);
+    });
+
+    test("a late acknowledgement from an old page cannot change a new dialog", async () => {
+      const old = createBrowser();
+      await old.respond(0, { jobs: [failed()] });
+      open(old);
+      old.elements.resume_merge_tokens.value = "4500";
+      submit(old);
+      const current = createBrowser();
+      await current.respond(0, { jobs: [failed()] });
+      open(current);
+      await old.respond(1, { status: "queued" });
+      assert.ok(
+        current.elements.resumeDialog.open &&
+          !current.elements.resumeRetry.disabled,
+      );
+      assert.equal(current.requests.length, 1);
     });
   });
 

@@ -9,7 +9,7 @@ import { showMetrics } from "./metrics.js";
 const SVG = "http://www.w3.org/2000/svg";
 
 // Build the card of job.
-// handlers.retry, handlers.cancel and handlers.toggleLive come from jobs.js:
+// handlers.resume, handlers.cancel and handlers.toggleLive come from jobs.js:
 // they update the list, and jobs.js imports this module. live is the open
 // live panel, reused so that its text and scroll position survive a refresh.
 export function jobCard(job, handlers, live) {
@@ -153,15 +153,17 @@ function reportLinks(job) {
   return [view, link];
 }
 
-// Retry, cancel, metrics and live output buttons.
+// Resume, cancel, metrics and live output buttons.
 function actionButtons(job, handlers, item) {
   const actions = el("div", undefined, "actions");
   if (["failed", "cancelled"].includes(job.status)) {
-    const retry = el("button", t("Retry"), "button-secondary");
-    retry.type = "button";
-    retry.disabled = state.deleting;
-    retry.addEventListener("click", () => handlers.retry(job.id));
-    actions.append(retry);
+    const resume = el("button", t("Resume…"), "button-secondary");
+    resume.type = "button";
+    resume.dataset.resumeJob = job.id;
+    resume.setAttribute("aria-haspopup", "dialog");
+    resume.disabled = state.deleting || state.restartingJobs.has(job.id);
+    resume.addEventListener("click", () => handlers.resume(job.id, resume));
+    actions.append(resume);
   }
   if (ACTIVE_STATUSES.has(job.status)) {
     const pending = state.cancellingJobs.has(job.id);

@@ -75,7 +75,7 @@ Keep these same `-f` options for later Compose commands. The base installation n
 4. Choose **View** to read the formatted report in a new tab, or **Download** to save the original Markdown.
 
 - **Cancel** stops a queued analysis at once and a running one at its next safe point.
-- **Retry** restarts a failed or cancelled analysis with its original settings and reuses its finished steps. Create a new analysis to change settings or prompts.
+- **Resume…** opens a dialog for failed or cancelled analyses. **Retry** keeps the currently selected saved configuration, including any previous budget changes. **Resume with adjusted budgets** lets you increase analysis, merge and final output tokens while keeping all other settings. The server validates the budgets before queuing the analysis; compatible finished steps are reused. Older analyses without saved budgets can still use Retry. Create a new analysis to change other settings or prompts.
 - **History** keeps every analysis; finished ones can be deleted one by one or in bulk.
 
 See [using the interface in detail](docs/usage.md) for report names, the reader, live output and history.
@@ -180,7 +180,7 @@ curl -f http://127.0.0.1:9932/api/health
 
 - **Database errors:** check `data/` ownership and write permissions.
 - **Backend unavailable:** check the container's access to `LLAMA_BASE_URL` and the optional key.
-- **Context or output limit:** inspect applied settings and finish reason. Start a new job with suitable budgets; Retry preserves the old ones. Truncated output fails, with no automatic continuation.
+- **Context or output limit:** inspect the saved settings and failure information under **Resume…**. Increasing the affected output budget may help with output exhaustion, but does not enlarge the context window or guarantee success. Context limitations may require a new analysis with smaller inputs or suitable context settings. Retry preserves the selected configuration. Truncated output fails, with no automatic continuation.
 - **OCR failure:** check language packs, page complexity and container memory. Large PDFs may exceed memory limits despite small upload sizes.
 - **Garbled accents:** see [UTF-8 handling and old reports](docs/utf8-correction.md).
 - **Empty reasoning panel:** the backend may not emit it. Live output shows only the current/latest pass and may be incomplete.

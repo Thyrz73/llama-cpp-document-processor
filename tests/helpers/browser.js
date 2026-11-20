@@ -6,6 +6,7 @@ import * as jobs from "../../static/js/jobs.js";
 import * as live from "../../static/js/live.js";
 import * as settings from "../../static/js/settings.js";
 import * as history from "../../static/js/history.js";
+import * as resume from "../../static/js/resume.js";
 import { resetState } from "../../static/js/state.js";
 
 // Drain promise continuations without advancing simulated timers or fetching anything.
@@ -234,11 +235,29 @@ export function createBrowserHarness(context, { template, translations }) {
         "deleteDocument",
         "deleteCancel",
         "deleteConfirm",
+        "resumeDialog",
+        "resumeForm",
+        "resumeCancel",
+        "resumeRetry",
+        "resumeAdjusted",
+        "resumeDocument",
+        "resumeFailure",
+        "resumePhase",
+        "resumeGuidance",
+        "resumeConfig",
+        "resumeSavedSettings",
+        "resumeStale",
+        "resumeStatus",
+        "resumeError",
+        "resume_analysis_tokens",
+        "resume_merge_tokens",
+        "resume_final_tokens",
+        "translations",
       ].map((id) => [id, new Element("div")]),
     );
+    elements.translations.textContent = JSON.stringify(translations);
     if (withSettings) {
       for (const id of [
-        "translations",
         "uiLanguage",
         "languageFlag",
         "profile",
@@ -264,7 +283,6 @@ export function createBrowserHarness(context, { template, translations }) {
         "thinking_final",
       ])
         elements[id] = new Element("div");
-      elements.translations.textContent = JSON.stringify(translations);
       elements.profile.value = "low";
       elements.reportLanguage.value = "auto";
       elements.detailLevel.value = "standard";
@@ -369,13 +387,21 @@ export function createBrowserHarness(context, { template, translations }) {
       confirmDeletion: history.confirmDeletion,
       submitDeletion: jobs.submitDeletion,
       closeDeleteDialog: history.closeDeleteDialog,
+      openResumeDialog: resume.openResumeDialog,
+      closeResumeDialog: resume.closeResumeDialog,
+      submitResume: jobs.submitResume,
     };
     // Resolve request index with payload, then run its asynchronous continuations.
-    const respond = async (index, payload, ok = true) => {
+    const respond = async (
+      index,
+      payload,
+      ok = true,
+      status = ok ? 200 : 503,
+    ) => {
       assert.ok(requests[index], "Missing request " + index);
       requests[index].resolve({
         ok,
-        status: ok ? 200 : 503,
+        status,
         json: async () => payload,
       });
       await flush();
