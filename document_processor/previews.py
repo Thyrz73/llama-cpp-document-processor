@@ -1,14 +1,21 @@
 """Bounded, process-local live previews; the JSON checkpoint remains the fallback."""
 
 import copy
+import json
+import os
+import stat
 import threading
 import time
 from collections import OrderedDict
+from contextlib import ExitStack
+from pathlib import Path
 
 # One worker is active today; keep a small fixed budget even with more producers.
 MAX_CACHED_PREVIEWS = 16
 PREVIEW_TTL_SECONDS = 300.0
 CHECKPOINT_SECONDS = 20.0
+# Two channels of up to 50,000 characters, including JSON escapes and metadata.
+MAX_CHECKPOINT_BYTES = 1024 * 1024
 PREVIEW_FIELDS = {
     "phase",
     "phase_code",
@@ -24,6 +31,59 @@ PREVIEW_FIELDS = {
     "elapsed_seconds",
     "_attempt_id",
 }
+
+
+def read_checkpoint(path: Path) -> dict | None:
+    """Read a bounded UTF-8 preview, or return None for an unsafe/invalid file.
+
+    The caller supplies <data>/jobs/<validated job id>/live_preview.json.
+    <data> and its ancestors must be trusted and stable. Anchor jobs and the job
+    directory without following links, then validate the actual opened file.
+    Replacement after opening cannot redirect the read. Hard links and special
+    files are rejected; in-place changes observed during reading are rejected.
+    This does not authenticate content written by an actor with storage access.
+    """
+    try:
+        with ExitStack() as stack:
+            parent = None
+            for component in (path.parent.parent, path.parent.name):
+                parent = os.open(
+                    component,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                    dir_fd=parent,
+                )
+                stack.callback(os.close, parent)
+            descriptor = os.open(
+                path.name,
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                dir_fd=parent,
+            )
+            with os.fdopen(descriptor, "rb") as stream:
+                before = os.fstat(stream.fileno())
+                if (
+                    not stat.S_ISREG(before.st_mode)
+                    or before.st_nlink != 1
+                    or before.st_size > MAX_CHECKPOINT_BYTES
+                ):
+                    return None
+                content = stream.read(before.st_size + 1)
+                after = os.fstat(stream.fileno())
+                if (
+                    len(content) != before.st_size
+                    or before.st_size != after.st_size
+                    or before.st_mtime_ns != after.st_mtime_ns
+                    or before.st_ctime_ns != after.st_ctime_ns
+                    or after.st_nlink != 1
+                ):
+                    return None
+        payload = json.loads(content.decode("utf-8"))
+        if isinstance(payload, dict):
+            return {
+                key: value for key, value in payload.items() if key in PREVIEW_FIELDS
+            }
+    except (OSError, ValueError, UnicodeError, RecursionError):
+        pass
+    return None
 
 
 class PreviewCache:

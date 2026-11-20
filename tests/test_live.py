@@ -27,6 +27,7 @@ from document_processor.errors import Cancelled, ModelError, WorkerStopping
 from document_processor.files import atomic_json, file_hash
 from document_processor.jobs import JobStore
 from document_processor.model_client import ThinkingSplitter
+from document_processor.web import jobs as web_jobs
 
 
 class LiveTests(unittest.TestCase):
@@ -665,6 +666,143 @@ class HybridPreviewTests(unittest.TestCase):
         self.assertEqual(self.live()["content"], "legacy")
         self.assertFalse(self.live()["active"])
         self.assertEqual(self.live(True)["reasoning"], "SECRET")
+
+    def test_external_checkpoint_symlink_never_discloses_json_fields(self):
+        self.run.recorder.finish("done")
+        self.store.update_job(self.identifier, status="done")
+        outside = self.store.data_dir / "external.json"
+        atomic_json(outside, {"content": "PRIVATE", "private_token": "SECRET"})
+        self.path.symlink_to(outside)
+        payload = self.live(True)
+        self.assertEqual(payload["content"], "")
+        self.assertNotIn("SECRET", json.dumps(payload))
+        self.assertNotIn("PRIVATE", json.dumps(payload))
+
+    def test_checkpoint_and_directory_substitution_after_path_validation(self):
+        self.publish("original")
+        self.store.previews.clear()
+        outside = self.store.data_dir / "outside"
+        outside.mkdir()
+        atomic_json(
+            outside / self.path.name,
+            {"_attempt_id": self.run.recorder.run_id, "content": "PRIVATE"},
+        )
+        (outside / self.identifier).mkdir()
+        atomic_json(
+            outside / self.identifier / self.path.name,
+            {"_attempt_id": self.run.recorder.run_id, "content": "PRIVATE"},
+        )
+        original = web_jobs.job_directory
+        for target in (self.path, self.directory, self.directory.parent):
+            with self.subTest(target=target):
+                retained = target.with_name(target.name + "-retained")
+
+                def substitute(identifier, target=target, retained=retained):
+                    directory = original(identifier)
+                    target.rename(retained)
+                    target.symlink_to(
+                        outside / self.path.name if target == self.path else outside,
+                        target_is_directory=target != self.path,
+                    )
+                    return directory
+
+                try:
+                    with patch.object(
+                        web_jobs, "job_directory", side_effect=substitute
+                    ):
+                        self.assertEqual(self.live(True)["content"], "")
+                finally:
+                    target.unlink()
+                    retained.rename(target)
+
+    def test_replacement_and_growth_after_open_cannot_supply_unvalidated_bytes(self):
+        outside = self.store.data_dir / "external.json"
+        atomic_json(outside, {"content": "PRIVATE", "private_token": "SECRET"})
+        original = os.fstat
+        for mutation in ("symlink", "growth"):
+            with self.subTest(mutation=mutation):
+                self.publish("original", force=True)
+                self.store.previews.clear()
+                changed = False
+
+                def change_after_stat(descriptor, mutation=mutation):
+                    nonlocal changed
+                    info = original(descriptor)
+                    if not changed:
+                        changed = True
+                        if mutation == "symlink":
+                            self.path.unlink()
+                            self.path.symlink_to(outside)
+                        else:
+                            with self.path.open("ab") as stream:
+                                stream.write(b" " * 100)
+                    return info
+
+                try:
+                    with patch.object(
+                        previews.os, "fstat", side_effect=change_after_stat
+                    ):
+                        payload = self.live(True)
+                    self.assertTrue(changed)
+                    self.assertEqual(payload["content"], "")
+                    self.assertNotIn("SECRET", json.dumps(payload))
+                finally:
+                    self.path.unlink()
+
+    def test_checkpoint_disappearing_before_open_fails_safely(self):
+        self.publish("original")
+        self.store.previews.clear()
+        original = web_jobs.read_checkpoint
+
+        def disappear(path):
+            path.unlink()
+            return original(path)
+
+        with patch.object(web_jobs, "read_checkpoint", side_effect=disappear):
+            self.assertEqual(self.live()["content"], "")
+
+    def test_checkpoint_size_limit_and_malformed_json_fail_safely(self):
+        # Include parser recursion and invalid UTF-8 as well as ordinary bad JSON.
+        for raw in (b"{", b"[]", b"null", b"\xff", b"[" * 2000):
+            with self.subTest(raw=raw[:8]):
+                self.path.write_bytes(raw)
+                self.assertEqual(self.live()["content"], "")
+        atomic_json(
+            self.path,
+            {"_attempt_id": self.run.recorder.run_id, "content": "x" * (1024 * 1024)},
+        )
+        self.assertEqual(self.live()["content"], "")
+
+    def test_checkpoint_rejects_fifo_directory_and_hardlink(self):
+        outside = self.store.data_dir / "external.json"
+        atomic_json(
+            outside,
+            {"_attempt_id": self.run.recorder.run_id, "content": "PRIVATE"},
+        )
+        for create in (
+            lambda: os.mkfifo(self.path),
+            self.path.mkdir,
+            lambda: os.link(outside, self.path),
+        ):
+            create()
+            try:
+                self.assertEqual(self.live()["content"], "")
+            finally:
+                if self.path.is_dir():
+                    self.path.rmdir()
+                else:
+                    self.path.unlink()
+
+    def test_valid_disk_checkpoint_preserves_contract_and_filters_private_fields(self):
+        self.publish("Réponse ✓", active=False)
+        payload = json.loads(self.path.read_text())
+        payload["private_prompt"] = "SECRET"
+        atomic_json(self.path, payload)
+        memory = self.live(True)
+        self.store.previews.clear()
+        self.assertEqual(self.live(True), memory)
+        self.assertEqual(self.live()["reasoning"], "")
+        self.assertNotIn("SECRET", json.dumps(self.live(True)))
 
     def test_separate_process_store_sees_checkpoints_without_caching_disk(self):
         self.publish("checkpoint")

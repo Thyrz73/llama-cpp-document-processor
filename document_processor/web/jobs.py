@@ -1,6 +1,5 @@
 """Jobs API: upload, status, history deletion, live previews, metrics and actions."""
 
-import json
 import sqlite3
 import uuid
 from datetime import UTC, datetime
@@ -13,6 +12,7 @@ from .. import prompts
 from ..files import file_hash
 from ..jobs import PREVIEW_FILE, SOURCE_FILE, is_job_id
 from ..observability import event, failure
+from ..previews import read_checkpoint
 from . import get_services, job_directory
 
 blueprint = Blueprint("jobs", __name__)
@@ -202,10 +202,7 @@ def job_live(job_id):
         services.store.previews.discard(job_id)
         payload = None
     if payload is None:
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError, UnicodeError):
-            payload = None
+        payload = read_checkpoint(path)
     # Queued jobs have no current output, including legacy retries without job_runs.
     if (
         not isinstance(payload, dict)
