@@ -33,9 +33,16 @@ export function t(key, args = {}) {
 }
 
 // Prefer the translation of a stable error code over the server's message.
-export function errorText(data, fallback) {
-  const key = "error." + (data.error_code || "generic");
-  return state.catalog[state.language]?.[key] || data.error || t(fallback);
+export function errorText(data, fallback = "error.generic") {
+  if (!data || typeof data !== "object" || Array.isArray(data))
+    return t(fallback);
+  const key =
+    typeof data.error_code === "string" ? "error." + data.error_code : null;
+  const translated = key && state.catalog[state.language]?.[key];
+  if (typeof translated === "string" && translated) return translated;
+  return typeof data.error === "string" && data.error.trim()
+    ? data.error
+    : t(fallback);
 }
 
 // Translated label of a job or attempt status.

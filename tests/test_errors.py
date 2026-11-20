@@ -176,6 +176,7 @@ class ErrorCatalogTests(unittest.TestCase):
         sources = [
             ROOT / "app.py",
             *sorted((ROOT / "document_processor").rglob("*.py")),
+            *sorted((ROOT / "static/js").glob("*.js")),
         ]
         text = {path: path.read_text(encoding="utf-8") for path in sources}
         emitted = set()
@@ -189,6 +190,8 @@ class ErrorCatalogTests(unittest.TestCase):
             emitted |= set(
                 re.findall(r"jsonify\([^\n]*?error_code=\"([a-z_]+)\"", source)
             )
+            # Browser transport failures use the same error.* catalog as the API.
+            emitted |= set(re.findall(r'new ApiError\(\s*"error\.([a-z_]+)"', source))
         # Route helpers may return dictionaries; public HTTP errors come from the
         # installed application handlers, independently of module organization.
         emitted |= set(

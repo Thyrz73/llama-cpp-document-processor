@@ -2,6 +2,9 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { beforeEach, describe, test } from "node:test";
+import { errorText } from "../static/js/i18n.js";
+import { renderResumeDialog } from "../static/js/resume.js";
+import { state } from "../static/js/state.js";
 import {
   createBrowserHarness,
   descendants,
@@ -16,6 +19,7 @@ const template = readFileSync(
 const translations = JSON.parse(
   readFileSync(new URL("../static/translations.json", import.meta.url), "utf8"),
 );
+const queuedRetry = { status: "queued", warnings: [] };
 
 const selectionCheckboxes = (browser) =>
   descendants(browser.elements.jobs).filter((node) => node.dataset.selectJob);
@@ -548,7 +552,8 @@ describe("Browser interface", { concurrency: false }, () => {
       );
       assert.ok(
         !browser.elements.jobsNotice.hidden &&
-          browser.elements.jobsNotice.textContent === "Offline",
+          browser.elements.jobsNotice.textContent ===
+            translations.en["error.network_failure"],
         "Error is shown above the list",
       );
     });
@@ -656,7 +661,7 @@ describe("Browser interface", { concurrency: false }, () => {
       const browser = createBrowser();
       await browser.respond(0, { jobs: [job("failed")] });
       const pending = browser.api.retry("a".repeat(32));
-      await browser.respond(1, { status: "queued" });
+      await browser.respond(1, queuedRetry);
       assert.ok(browser.requests[1].url.endsWith("/retry"), "Retry endpoint");
       await browser.respond(2, {}, false);
       await pending;
@@ -695,7 +700,7 @@ describe("Browser interface", { concurrency: false }, () => {
         browser.elements.jobsNotice.hidden,
         "A new action hides the previous outcome",
       );
-      await browser.respond(2, { status: "queued" });
+      await browser.respond(2, queuedRetry);
       await browser.respond(3, { jobs: [job("queued")] });
       await accepted;
       assert.ok(
@@ -1322,7 +1327,7 @@ describe("Browser interface", { concurrency: false }, () => {
           assert.ok(
             browser.document
               .getElementById("live-note")
-              .textContent.includes("Still offline"),
+              .textContent.includes(translations.en["error.network_failure"]),
             "Keep the recovery error visible",
           );
         }
@@ -1405,7 +1410,7 @@ describe("Browser interface", { concurrency: false }, () => {
       await browser.respond(0, { jobs: [job("failed")] });
       browser.api.toggleLive(id);
       const retry = browser.api.retry(id);
-      await browser.respond(2, { status: "queued" });
+      await browser.respond(2, queuedRetry);
       assert.equal(
         browser.requests.length,
         4,
@@ -2156,7 +2161,7 @@ describe("Browser interface", { concurrency: false }, () => {
       );
       assert.equal(
         browser.elements.jobsNotice.textContent,
-        "Offline",
+        translations.en["error.network_failure"],
         "Visible error",
       );
     });
@@ -2239,6 +2244,11 @@ describe("Browser interface", { concurrency: false }, () => {
       phase_code: "failed",
       error_code: "output_limit",
       ...extra,
+    });
+    const resumed = (changes = {}) => ({
+      status: "queued",
+      configuration: { ...config, ...changes },
+      validation_warnings: [],
     });
     const trigger = (browser, jobId = id) =>
       descendants(browser.elements.jobs).find(
@@ -2360,7 +2370,7 @@ describe("Browser interface", { concurrency: false }, () => {
         browser.elements.resumeDialog.open,
         "Wait for server acknowledgement",
       );
-      await browser.respond(1, { status: "queued" });
+      await browser.respond(1, queuedRetry);
       assert.equal(browser.requests[2].url, "/api/jobs");
       await browser.respond(2, { jobs: [{ ...failed(), status: "queued" }] });
       assert.ok(!browser.elements.resumeDialog.open);
@@ -2399,10 +2409,7 @@ describe("Browser interface", { concurrency: false }, () => {
           before,
           "Saved configurations stay immutable",
         );
-        await browser.respond(1, {
-          status: "queued",
-          configuration: { ...config, ...changes },
-        });
+        await browser.respond(1, resumed(changes));
         await browser.respond(2, {
           jobs: [
             {
@@ -2499,7 +2506,7 @@ describe("Browser interface", { concurrency: false }, () => {
       assert.equal(e.resumeStatus.textContent, "Submitting…");
       assert.ok(e.resumeDialog.open);
       assert.equal(browser.requests.length, 2);
-      await browser.respond(1, { status: "queued" });
+      await browser.respond(1, resumed({ merge_tokens: 4500 }));
       submit(browser);
       assert.ok(e.resumeDialog.open && e.resumeRetry.disabled);
       assert.equal(browser.requests.length, 3);
@@ -2539,6 +2546,352 @@ describe("Browser interface", { concurrency: false }, () => {
           2,
           "No validation preflight or redundant refresh",
         );
+      }
+    });
+
+    const assertRestartFailure = (browser, language, key, requests = 2) => {
+      const e = browser.elements;
+      assert.ok(e.resumeDialog.open, "Failure must not close the dialog");
+      assert.equal(e.resumeError.textContent, translations[language][key]);
+      assert.equal(e.resumeError.hidden, false);
+      assert.equal(e.resumeDialog.attributes["aria-busy"], "false");
+      assert.equal(e.resumeStatus.textContent, "");
+      assert.ok(
+        !e.resumeAdjusted.disabled &&
+          !e.resumeRetry.disabled &&
+          !e.resumeCancel.disabled,
+      );
+      assert.equal(e.resume_merge_tokens.value, "4500");
+      assert.equal(
+        browser.requests.length,
+        requests,
+        "No success refresh or extra request",
+      );
+      assert.equal(browser.polls().length, 0);
+    };
+
+    test("malformed resume acknowledgements cannot close the dialog or trigger success behavior", async () => {
+      const changes = { merge_tokens: 4500 };
+      const success = resumed(changes);
+      const invalid = [
+        null,
+        {},
+        [],
+        false,
+        "queued",
+        { status: "failed" },
+        { status: "running" },
+        { status: "done" },
+        { status: "cancelled" },
+        { status: "unexpected" },
+        { ...success, status: null },
+        { status: "queued" },
+        { ...success, error: "Refused" },
+        { ...success, error_code: "resume_conflict" },
+        { ...success, configuration: null },
+        { ...success, configuration: [] },
+        { ...success, configuration: {} },
+        {
+          ...success,
+          configuration: { ...success.configuration, fingerprint: "" },
+        },
+        {
+          ...success,
+          configuration: { ...success.configuration, fingerprint: null },
+        },
+        {
+          ...success,
+          configuration: { ...success.configuration, merge_tokens: 4096 },
+        },
+        {
+          ...success,
+          configuration: { ...success.configuration, analysis_tokens: "3072" },
+        },
+        {
+          ...success,
+          configuration: { ...success.configuration, final_tokens: 0 },
+        },
+        { ...success, validation_warnings: undefined },
+        { ...success, validation_warnings: null },
+        { ...success, validation_warnings: {} },
+        { ...success, validation_warnings: [42] },
+      ];
+      for (const language of ["en", "fr"]) {
+        for (const data of invalid) {
+          const browser = createBrowser({
+            storage: new Map([["document-processor-language", language]]),
+          });
+          await browser.respond(0, { jobs: [failed()] });
+          open(browser);
+          browser.elements.resume_merge_tokens.value = "4500";
+          const pending = browser.api.submitResume(true);
+          await browser.respond(1, data);
+          await pending;
+          assertRestartFailure(browser, language, "error.invalid_response");
+          assert.equal(
+            state.resumeIntent.error.cause.cause.data,
+            data,
+            "Keep rejected payload for diagnostics",
+          );
+          escape(browser);
+        }
+      }
+    });
+
+    test("only the contract's HTTP 200 acknowledges a successful resume", async () => {
+      for (const status of [201, 202, 204]) {
+        const browser = createBrowser();
+        await browser.respond(0, { jobs: [failed()] });
+        open(browser);
+        browser.elements.resume_merge_tokens.value = "4500";
+        const pending = browser.api.submitResume(true);
+        await browser.respond(1, resumed({ merge_tokens: 4500 }), true, status);
+        await pending;
+        assertRestartFailure(browser, "en", "error.invalid_response");
+      }
+    });
+
+    test("malformed retry acknowledgements use the retry contract and keep the dialog open", async () => {
+      for (const data of [
+        null,
+        {},
+        [],
+        { status: "failed" },
+        { status: "queued" },
+        { ...queuedRetry, warnings: null },
+        { ...queuedRetry, warnings: [42] },
+        { ...queuedRetry, error_code: "retry_conflict" },
+      ]) {
+        const browser = createBrowser();
+        await browser.respond(0, { jobs: [failed()] });
+        open(browser);
+        browser.elements.resume_merge_tokens.value = "4500";
+        const pending = browser.api.submitResume(false);
+        await browser.respond(1, data);
+        await pending;
+        assertRestartFailure(browser, "en", "error.invalid_response");
+      }
+    });
+
+    test("valid resume and legacy retry acknowledgements preserve the existing flow", async () => {
+      for (const adjusted of [false, true]) {
+        const browser = createBrowser();
+        await browser.respond(0, { jobs: [failed()] });
+        open(browser);
+        browser.elements.resume_merge_tokens.value = "4500";
+        const pending = browser.api.submitResume(adjusted);
+        const data = adjusted
+          ? {
+              ...resumed({ merge_tokens: 4500 }),
+              validation_warnings: ["engine_context_unknown"],
+            }
+          : { ...queuedRetry, warnings: ["legacy_recomputed"] };
+        await browser.respond(1, data);
+        assert.ok(
+          browser.elements.resumeDialog.open &&
+            browser.elements.resumeRetry.disabled,
+        );
+        assert.equal(browser.requests[2].url, "/api/jobs");
+        await browser.respond(2, {
+          jobs: [
+            failed({
+              status: "queued",
+              configuration: adjusted ? data.configuration : config,
+            }),
+          ],
+        });
+        await pending;
+        assert.ok(!browser.elements.resumeDialog.open);
+        assert.equal(browser.polls().length, 1);
+      }
+    });
+
+    test("malformed HTTP 400 bodies use a translated request failure and remain recoverable", async () => {
+      for (const language of ["en", "fr"]) {
+        for (const data of [
+          null,
+          [],
+          {},
+          "invalid",
+          { error_code: {} },
+          { error: [] },
+          { error: { message: "private detail" } },
+        ]) {
+          const browser = createBrowser({
+            storage: new Map([["document-processor-language", language]]),
+          });
+          await browser.respond(0, { jobs: [failed()] });
+          open(browser);
+          browser.elements.resume_merge_tokens.value = "4500";
+          const pending = browser.api.submitResume(true);
+          await browser.respond(1, data, false, 400);
+          await pending;
+          assertRestartFailure(browser, language, "Resume failed");
+          renderResumeDialog();
+          escape(browser);
+        }
+      }
+    });
+
+    test("errorText tolerates unexpected JSON structures without returning non-text errors", async () => {
+      const malformed = [
+        undefined,
+        null,
+        [],
+        {},
+        false,
+        42,
+        "failure",
+        { error_code: null },
+        { error_code: [] },
+        { error_code: {} },
+        { error: [] },
+        { error: {} },
+        { error: 12 },
+        { error: "" },
+        { error: " " },
+        { status: "failed" },
+      ];
+      for (const language of ["en", "fr"]) {
+        const browser = createBrowser({
+          storage: new Map([["document-processor-language", language]]),
+        });
+        await browser.respond(0, { jobs: [failed()] });
+        for (const data of malformed) {
+          assert.equal(
+            errorText(data, "Resume failed"),
+            translations[language]["Resume failed"],
+          );
+          assert.equal(
+            errorText(data),
+            translations[language]["error.generic"],
+          );
+        }
+        assert.equal(
+          errorText({ error_code: "resume_conflict", error: "raw detail" }),
+          translations[language]["error.resume_conflict"],
+        );
+        assert.equal(
+          errorText({
+            error_code: "future_error",
+            error: "Safe server detail",
+          }),
+          "Safe server detail",
+        );
+      }
+    });
+
+    test("network failures are localized and retain the original browser exception", async () => {
+      for (const language of ["en", "fr"]) {
+        const browser = createBrowser({
+          storage: new Map([["document-processor-language", language]]),
+        });
+        await browser.respond(0, { jobs: [failed()] });
+        open(browser);
+        browser.elements.resume_merge_tokens.value = "4500";
+        const pending = browser.api.submitResume(true);
+        const original = new TypeError("Failed to fetch: browser diagnostics");
+        await browser.reject(1, original);
+        await pending;
+        assertRestartFailure(browser, language, "error.network_failure");
+        assert.equal(state.resumeIntent.error.cause.cause, original);
+        state.language = language === "en" ? "fr" : "en";
+        renderResumeDialog();
+        assert.equal(
+          browser.elements.resumeError.textContent,
+          translations[state.language]["error.network_failure"],
+        );
+      }
+    });
+
+    test("response decoding failures are localized separately from network failures", async () => {
+      for (const language of ["en", "fr"]) {
+        for (const original of [
+          new SyntaxError("Unexpected token < in JSON at position 0"),
+          new TypeError("Response body terminated"),
+        ]) {
+          const browser = createBrowser({
+            storage: new Map([["document-processor-language", language]]),
+          });
+          await browser.respond(0, { jobs: [failed()] });
+          open(browser);
+          browser.elements.resume_merge_tokens.value = "4500";
+          const pending = browser.api.submitResume(true);
+          browser.requests[1].resolve({
+            ok: true,
+            status: 200,
+            json: async () => {
+              throw original;
+            },
+          });
+          await pending;
+          assertRestartFailure(
+            browser,
+            language,
+            "error.response_decoding_failed",
+          );
+          assert.equal(state.resumeIntent.error.cause.cause, original);
+          escape(browser);
+        }
+      }
+    });
+
+    test("a rejected acknowledgement preserves the existing live preview", async () => {
+      const browser = createBrowser();
+      await browser.respond(0, { jobs: [failed()] });
+      browser.api.toggleLive(id);
+      await browser.respond(1, {
+        content: "Prior attempt output",
+        active: false,
+      });
+      const context = state.liveContext;
+      open(browser);
+      browser.elements.resume_merge_tokens.value = "4500";
+      const pending = browser.api.submitResume(true);
+      await browser.respond(2, null);
+      await pending;
+      assertRestartFailure(browser, "en", "error.invalid_response", 3);
+      assert.equal(state.liveContext, context);
+      assert.equal(
+        browser.document.getElementById("live-content").textContent,
+        "Prior attempt output",
+      );
+    });
+
+    test("corrected requests can succeed after response, server, network or decoding failures", async () => {
+      for (const failure of ["response", "server", "network", "decoding"]) {
+        const browser = createBrowser();
+        await browser.respond(0, { jobs: [failed()] });
+        open(browser);
+        browser.elements.resume_merge_tokens.value = "4500";
+        const first = browser.api.submitResume(true);
+        if (failure === "network") await browser.reject(1);
+        else if (failure === "decoding") {
+          browser.requests[1].resolve({
+            ok: true,
+            status: 200,
+            json: async () => {
+              throw new SyntaxError("Invalid JSON");
+            },
+          });
+        } else
+          await browser.respond(
+            1,
+            null,
+            failure !== "server",
+            failure === "server" ? 400 : 200,
+          );
+        await first;
+        const pending = browser.api.submitResume(true);
+        assert.ok(browser.elements.resumeError.hidden);
+        assert.ok(browser.elements.resumeAdjusted.disabled);
+        assert.deepEqual(JSON.parse(browser.requests[2].options.body), {
+          merge_tokens: 4500,
+        });
+        await browser.respond(2, resumed({ merge_tokens: 4500 }));
+        await browser.respond(3, { jobs: [failed({ status: "queued" })] });
+        await pending;
+        assert.ok(!browser.elements.resumeDialog.open);
       }
     });
 
@@ -2587,7 +2940,9 @@ describe("Browser interface", { concurrency: false }, () => {
         const e = browser.elements;
         assert.equal(
           e.resumeError.textContent,
-          timeout ? "Request timed out." : "Offline",
+          translations.en[
+            timeout ? "Request timed out." : "error.network_failure"
+          ],
         );
         assert.ok(e.resumeDialog.open && !e.resumeAdjusted.disabled);
         assert.equal(e.resume_merge_tokens.value, "4500");
@@ -2667,7 +3022,7 @@ describe("Browser interface", { concurrency: false }, () => {
       browser.api.refresh();
       browser.elements.resume_merge_tokens.value = "4500";
       submit(browser);
-      await browser.respond(2, { status: "queued" });
+      await browser.respond(2, resumed({ merge_tokens: 4500 }));
       assert.equal(browser.requests.length, 3, "Reuse pending list request");
       await browser.respond(1, { jobs: [failed()] });
       assert.equal(
@@ -2692,7 +3047,7 @@ describe("Browser interface", { concurrency: false }, () => {
       open(browser);
       browser.elements.resume_merge_tokens.value = "4500";
       submit(browser);
-      await browser.respond(2, { status: "queued" });
+      await browser.respond(2, resumed({ merge_tokens: 4500 }));
       await browser.respond(1, { content: "Old attempt", active: false });
       assert.equal(
         browser.document.getElementById("live-content").textContent,
@@ -2939,7 +3294,7 @@ describe("Browser interface", { concurrency: false }, () => {
       const current = createBrowser();
       await current.respond(0, { jobs: [failed()] });
       open(current);
-      await old.respond(1, { status: "queued" });
+      await old.respond(1, resumed({ merge_tokens: 4500 }));
       assert.ok(
         current.elements.resumeDialog.open &&
           !current.elements.resumeRetry.disabled,

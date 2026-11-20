@@ -3,7 +3,7 @@
 import { $, el } from "./dom.js";
 import { state, ACTIVE_STATUSES, TERMINAL_STATUSES } from "./state.js";
 import { t, errorText } from "./i18n.js";
-import { jsonFetch } from "./api.js";
+import { ApiError, jsonFetch } from "./api.js";
 import { jobCard } from "./card.js";
 import { invalidateLivePreview, syncLivePolling } from "./live.js";
 import {
@@ -259,6 +259,34 @@ export async function submitResume(adjusted) {
   return restartJob(intent.job.id, budgets);
 }
 
+const objectPayload = (value) =>
+  value !== null && typeof value === "object" && !Array.isArray(value);
+const stringArray = (value) =>
+  Array.isArray(value) && value.every((item) => typeof item === "string");
+
+// Match the existing retry/resume contracts; neither endpoint returns a job ID.
+function validRestartResponse(data, budgets) {
+  if (
+    !objectPayload(data) ||
+    data.status !== "queued" ||
+    Object.hasOwn(data, "error") ||
+    Object.hasOwn(data, "error_code")
+  )
+    return false;
+  if (!budgets) return stringArray(data.warnings);
+  const config = data.configuration;
+  return (
+    objectPayload(config) &&
+    typeof config.fingerprint === "string" &&
+    config.fingerprint.trim().length > 0 &&
+    ["analysis_tokens", "merge_tokens", "final_tokens"].every(
+      (name) => Number.isSafeInteger(config[name]) && config[name] > 0,
+    ) &&
+    Object.entries(budgets).every(([name, value]) => config[name] === value) &&
+    stringArray(data.validation_warnings)
+  );
+}
+
 async function restartJob(id, budgets) {
   if (state.deleting || state.restartingJobs.has(id)) return;
   const generation = state.uiGeneration;
@@ -294,13 +322,19 @@ async function restartJob(id, budgets) {
       } else showJobsNotice({ error: errorText(d, "Retry failed") });
       return;
     }
+    if (r.status !== 200 || !validRestartResponse(d, budgets))
+      throw new ApiError("error.invalid_response", {
+        status: r.status,
+        data: d,
+      });
     invalidateLivePreview(id);
     await refresh(true);
     success = true;
   } catch (err) {
     if (generation !== state.uiGeneration) return;
-    if (intent) intent.error = { key: err.message };
-    else showJobsNotice({ error: err.message });
+    const key = err instanceof ApiError ? err.key : "Resume failed";
+    if (intent) intent.error = { key, cause: err };
+    else showJobsNotice({ error: t(key), cause: err });
   } finally {
     if (generation === state.uiGeneration) {
       state.restartingJobs.delete(id);
