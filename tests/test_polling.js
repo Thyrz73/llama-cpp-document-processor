@@ -746,6 +746,218 @@ describe("Browser interface", { concurrency: false }, () => {
     });
   });
 
+  describe("Job-history response validation", () => {
+    test("valid empty, current and legacy history payloads retain activity semantics", async () => {
+      for (const data of [
+        { jobs: [] },
+        { jobs: [], has_active_jobs: false },
+        { jobs: [], has_active_jobs: true },
+        { jobs: [job("running")] },
+        { jobs: [job("done")], has_active_jobs: false },
+        { jobs: [job("failed")], has_active_jobs: true },
+        {
+          jobs: [
+            {
+              ...job("failed"),
+              configuration: null,
+              phase_args: null,
+              queued_at: null,
+            },
+          ],
+        },
+      ]) {
+        const browser = createBrowser();
+        await browser.respond(0, data);
+        assert.equal(state.jobs, data.jobs);
+        assert.equal(state.jobsFailures, 0);
+        assert.equal(browser.elements.jobsError.hidden, true);
+        const active =
+          data.has_active_jobs ??
+          data.jobs.some((item) => item.status === "running");
+        assert.equal(state.hasActiveJobs, active);
+        assert.equal(browser.polls().length, active ? 1 : 0);
+      }
+    });
+
+    test("malformed history preserves the whole last valid snapshot and existing cards", async () => {
+      const malformed = [
+        {},
+        null,
+        [],
+        { jobs: null },
+        { jobs: {} },
+        { jobs: "invalid" },
+        ...[
+          null,
+          [],
+          {},
+          "invalid",
+          { ...job(), id: null },
+          { ...job(), id: "bad/id" },
+          { ...job(), filename: {} },
+          { ...job(), filename: "" },
+          { ...job(), status: "unknown" },
+          { ...job(), created_at: null },
+          { ...job(), created_at: "not a date" },
+          { ...job(), phase_code: {} },
+          { ...job(), error: {} },
+          { ...job(), question: [] },
+          { ...job(), progress_percent: {} },
+          { ...job(), total_chunks: "ten" },
+          { ...job(), cancel_requested: "false" },
+          { ...job(), report_available: "false" },
+          { ...job(), configuration: [] },
+          { ...job(), configuration: { profile: {} } },
+          { ...job(), configuration: { warnings: "invalid" } },
+          { ...job(), phase_args: [] },
+          {
+            ...job("failed"),
+            error_code: "output_limit",
+            phase_args: {
+              failed_phase: {
+                attempt_id: 1,
+                error_code: "output_limit",
+                code: { toString: null },
+              },
+            },
+          },
+          { ...job(), phase_args: { index: { toString: null } } },
+        ].map((entry) => ({ jobs: [entry], has_active_jobs: false })),
+        {
+          jobs: [
+            { ...job("failed"), filename: "should not replace.pdf" },
+            null,
+          ],
+          has_active_jobs: false,
+        },
+        { jobs: [job(), job()] },
+        ...[null, 0, "false", []].map((flag) => ({
+          jobs: [job("done")],
+          has_active_jobs: flag,
+        })),
+      ];
+      for (const language of ["en", "fr"]) {
+        for (const data of malformed) {
+          const browser = createBrowser({
+            storage: new Map([["document-processor-language", language]]),
+          });
+          const jobs = [job("failed"), job("running", 20, "b".repeat(32))];
+          await browser.respond(0, { jobs, has_active_jobs: true });
+          toggleSelection(browser);
+          setSelected(selectionCheckboxes(browser)[0]);
+          const article = browser.article();
+          const signature = state.renderedSignature;
+          const pending = browser.api.refresh();
+          await browser.respond(1, data);
+          await pending;
+          assert.ok(Array.isArray(state.jobs));
+          assert.equal(
+            state.jobs,
+            jobs,
+            "Preserve the last valid array, not a partially accepted list",
+          );
+          assert.equal(state.hasActiveJobs, true);
+          assert.equal(state.jobsFailures, 1);
+          assert.equal(state.jobsRequest, null);
+          assert.equal(state.renderedSignature, signature);
+          assert.equal(browser.article(), article);
+          assert.ok(selectionCheckboxes(browser)[0].checked);
+          assert.equal(
+            browser.elements.jobsError.textContent,
+            translations[language]["Cannot refresh analyses: "] +
+              translations[language]["error.invalid_response"],
+          );
+          assert.ok(!browser.elements.jobsError.hidden);
+          assert.equal(
+            browser.polls().length,
+            1,
+            "Keep polling known active work",
+          );
+        }
+      }
+    });
+
+    test("an invalid initial history response retains an empty usable list", async () => {
+      const browser = createBrowser();
+      const initial = state.jobs;
+      await browser.respond(0, {});
+      assert.equal(state.jobs, initial);
+      assert.deepEqual(state.jobs, []);
+      assert.ok(!browser.elements.jobsError.hidden);
+      assert.equal(browser.polls().length, 0);
+      const pending = browser.api.refresh();
+      await browser.respond(1, { jobs: [] });
+      await pending;
+      assert.equal(browser.elements.jobsError.hidden, true);
+      assert.equal(browser.elements.jobs.children.length, 2);
+    });
+
+    test("network and invalid JSON history failures preserve state and use localized errors", async () => {
+      for (const language of ["en", "fr"]) {
+        for (const failure of ["network", "json"]) {
+          const browser = createBrowser({
+            storage: new Map([["document-processor-language", language]]),
+          });
+          const jobs = [job("failed")];
+          await browser.respond(0, { jobs });
+          const pending = browser.api.refresh();
+          if (failure === "network")
+            await browser.reject(1, new TypeError("Failed to fetch"));
+          else
+            browser.requests[1].resolve({
+              ok: true,
+              status: 200,
+              json: async () => {
+                throw new SyntaxError("Unexpected token <");
+              },
+            });
+          await pending;
+          assert.equal(state.jobs, jobs);
+          assert.equal(state.hasActiveJobs, false);
+          assert.equal(state.jobsRequest, null);
+          const key =
+            failure === "network"
+              ? "error.network_failure"
+              : "error.response_decoding_failed";
+          assert.equal(
+            browser.elements.jobsError.textContent,
+            translations[language]["Cannot refresh analyses: "] +
+              translations[language][key],
+          );
+        }
+      }
+    });
+
+    test("repeated invalid refreshes release the request and a later valid snapshot recovers", async () => {
+      const browser = createBrowser();
+      const jobs = [job("failed")];
+      await browser.respond(0, { jobs });
+      for (let index = 1; index <= 3; index++) {
+        const pending = browser.api.refresh();
+        assert.equal(
+          browser.api.refresh(),
+          pending,
+          "Keep concurrent callers coalesced",
+        );
+        await browser.respond(index, {});
+        await pending;
+        assert.equal(state.jobs, jobs);
+        assert.equal(state.jobsFailures, index);
+        assert.equal(state.jobsRequest, null);
+        assert.equal(browser.polls().length, 0);
+      }
+      const pending = browser.api.refresh();
+      const recovered = [job("running")];
+      await browser.respond(4, { jobs: recovered, has_active_jobs: true });
+      await pending;
+      assert.equal(state.jobs, recovered);
+      assert.equal(state.hasActiveJobs, true);
+      assert.equal(state.jobsFailures, 0);
+      assert.equal(browser.elements.jobsError.hidden, true);
+      assert.equal(browser.polls().length, 1);
+    });
+  });
+
   describe("Live output and visibility", () => {
     test("closing active Live ignores its pending response and visibility never reopens it", async () => {
       const browser = createBrowser();
@@ -3038,6 +3250,164 @@ describe("Browser interface", { concurrency: false }, () => {
         1,
         "Known queued work restarts polling",
       );
+    });
+
+    test("POST 409 followed by malformed history unlocks Close and permits reopening and retry", async () => {
+      for (const language of ["en", "fr"]) {
+        for (const data of [{}, null, { jobs: null }, { jobs: [null] }]) {
+          const browser = createBrowser({
+            storage: new Map([["document-processor-language", language]]),
+          });
+          const jobs = [failed()];
+          await browser.respond(0, { jobs });
+          open(browser);
+          browser.elements.resume_merge_tokens.value = "4500";
+          const pending = browser.api.submitResume(true);
+          await browser.respond(
+            1,
+            { error_code: "resume_conflict" },
+            false,
+            409,
+          );
+          assert.equal(browser.requests[2].url, "/api/jobs");
+          await browser.respond(2, data);
+          await pending;
+          const e = browser.elements;
+          assert.equal(state.jobs, jobs);
+          assert.ok(Array.isArray(state.jobs));
+          assert.equal(state.restartingJobs.size, 0);
+          assert.equal(state.jobsRequest, null);
+          assert.equal(e.resumeDialog.open, true);
+          assert.equal(e.resumeDialog.attributes["aria-busy"], "false");
+          assert.equal(e.resumeStatus.textContent, "");
+          assert.equal(e.resumeCancel.disabled, false);
+          assert.ok(
+            e.resumeRetry.disabled && e.resumeAdjusted.disabled,
+            "A conflict still requires reopening",
+          );
+          assert.equal(e.resume_merge_tokens.value, "4500");
+          assert.equal(
+            e.resumeError.textContent,
+            translations[language]["error.resume_conflict"],
+          );
+          assert.equal(
+            e.jobsError.textContent,
+            translations[language]["Cannot refresh analyses: "] +
+              translations[language]["error.invalid_response"],
+          );
+          escape(browser);
+          open(browser);
+          assert.ok(
+            !e.resumeRetry.disabled &&
+              !e.resumeAdjusted.disabled &&
+              !e.resumeCancel.disabled,
+          );
+          const retried = browser.api.submitResume(false);
+          assert.equal(browser.requests[3].url, `/api/jobs/${id}/retry`);
+          await browser.respond(3, queuedRetry);
+          await browser.respond(4, {
+            jobs: [
+              failed({
+                status: "queued",
+                phase_code: "queued",
+                phase_args: {},
+              }),
+            ],
+          });
+          await retried;
+          assert.equal(e.resumeDialog.open, false);
+          assert.equal(e.jobsError.hidden, true);
+          assert.equal(state.restartingJobs.size, 0);
+        }
+      }
+    });
+
+    test("acknowledged resume followed by malformed history preserves the list and completes cleanup", async () => {
+      for (const data of [{}, null, { jobs: null }, { jobs: [null] }]) {
+        const browser = createBrowser();
+        const jobs = [failed()];
+        await browser.respond(0, { jobs });
+        open(browser);
+        browser.elements.resume_merge_tokens.value = "4500";
+        const pending = browser.api.submitResume(true);
+        await browser.respond(1, resumed({ merge_tokens: 4500 }));
+        await browser.respond(2, data);
+        await pending;
+        assert.equal(state.jobs, jobs);
+        assert.ok(Array.isArray(state.jobs));
+        assert.equal(
+          state.hasActiveJobs,
+          true,
+          "The accepted operation still needs polling",
+        );
+        assert.equal(state.restartingJobs.size, 0);
+        assert.equal(state.jobsRequest, null);
+        assert.equal(state.resumeIntent, null);
+        assert.equal(browser.elements.resumeDialog.open, false);
+        assert.ok(!browser.elements.jobsError.hidden);
+        assert.equal(browser.polls().length, 1);
+        open(browser);
+        assert.ok(
+          !browser.elements.resumeCancel.disabled &&
+            !browser.elements.resumeRetry.disabled &&
+            !browser.elements.resumeAdjusted.disabled,
+        );
+        escape(browser);
+        const refreshed = browser.api.refresh();
+        const recovered = [
+          failed({
+            status: "queued",
+            phase_code: "queued",
+            phase_args: {},
+            configuration: { ...config, merge_tokens: 4500 },
+          }),
+        ];
+        await browser.respond(3, { jobs: recovered, has_active_jobs: true });
+        await refreshed;
+        assert.equal(state.jobs, recovered);
+        assert.equal(state.jobsFailures, 0);
+        assert.equal(browser.elements.jobsError.hidden, true);
+      }
+    });
+
+    test("malformed polling keeps dialog edits and focus until a valid refresh recovers", async () => {
+      const browser = createBrowser();
+      const running = job("running", 20, "b".repeat(32));
+      const jobs = [failed(), running];
+      await browser.respond(0, { jobs });
+      open(browser);
+      const input = browser.elements.resume_merge_tokens;
+      input.value = "4500";
+      input.focus();
+      await browser.tick(6000);
+      await browser.respond(1, { jobs: [failed(), null] });
+      assert.equal(state.jobs, jobs);
+      assert.equal(browser.document.activeElement, input);
+      assert.equal(input.value, "4500");
+      assert.equal(browser.elements.resumeAdjusted.disabled, false);
+      assert.equal(browser.elements.resumeCancel.disabled, false);
+      const refreshed = browser.api.refresh();
+      await browser.respond(2, {
+        jobs: [failed(), { ...running, progress_percent: 40 }],
+      });
+      await refreshed;
+      assert.equal(browser.document.activeElement, input);
+      assert.equal(input.value, "4500");
+      assert.equal(browser.elements.resumeStale.hidden, true);
+      const resumedRequest = browser.api.submitResume(true);
+      await browser.respond(3, resumed({ merge_tokens: 4500 }));
+      await browser.respond(4, {
+        jobs: [
+          failed({
+            status: "queued",
+            configuration: { ...config, merge_tokens: 4500 },
+          }),
+          running,
+        ],
+      });
+      await resumedRequest;
+      assert.equal(browser.elements.resumeDialog.open, false);
+      assert.equal(state.restartingJobs.size, 0);
     });
 
     test("resume invalidates previous-attempt live output immediately after acknowledgement", async () => {

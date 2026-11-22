@@ -74,11 +74,15 @@ export function refresh(afterChange = false) {
         const data = await res.json();
         if (generation !== state.uiGeneration) return;
         if (state.refreshPending) continue;
-        state.jobsFailures = 0;
-        state.jobs = data.jobs;
-        state.hasActiveJobs =
+        if (!validHistoryResponse(data))
+          throw new ApiError("error.invalid_response", data);
+        const hasActiveJobs =
           data.has_active_jobs ??
-          state.jobs.some((job) => ACTIVE_STATUSES.has(job.status));
+          data.jobs.some((job) => ACTIVE_STATUSES.has(job.status));
+        // Commit the validated snapshot together; failures retain the last list.
+        state.jobs = data.jobs;
+        state.hasActiveJobs = hasActiveJobs;
+        state.jobsFailures = 0;
         $("jobsError").hidden = true;
         renderJobs();
       } catch (err) {
@@ -263,6 +267,85 @@ const objectPayload = (value) =>
   value !== null && typeof value === "object" && !Array.isArray(value);
 const stringArray = (value) =>
   Array.isArray(value) && value.every((item) => typeof item === "string");
+
+function validHistoryJob(job) {
+  if (
+    !objectPayload(job) ||
+    typeof job.id !== "string" ||
+    !/^[a-f0-9]{32}$/.test(job.id) ||
+    typeof job.filename !== "string" ||
+    !job.filename ||
+    (!ACTIVE_STATUSES.has(job.status) && !TERMINAL_STATUSES.has(job.status)) ||
+    typeof job.created_at !== "string" ||
+    !Number.isFinite(Date.parse(job.created_at))
+  )
+    return false;
+  // Older jobs may omit these fields or retain nullable database columns.
+  if (
+    [
+      "question",
+      "error",
+      "error_code",
+      "phase_code",
+      "stage",
+      "phase",
+      "queued_at",
+      "updated_at",
+      "report_name",
+    ].some((name) => job[name] != null && typeof job[name] !== "string") ||
+    ["pages", "done_chunks", "total_chunks", "progress_percent"].some(
+      (name) => job[name] != null && !Number.isFinite(job[name]),
+    ) ||
+    (job.report_available != null &&
+      typeof job.report_available !== "boolean") ||
+    (job.cancel_requested != null &&
+      ![true, false, 0, 1].includes(job.cancel_requested))
+  )
+    return false;
+  if (job.configuration != null) {
+    if (!objectPayload(job.configuration)) return false;
+    // Public controls are scalars plus warning codes, never private snapshots.
+    if (
+      !Object.entries(job.configuration).every(([name, value]) =>
+        name === "warnings"
+          ? stringArray(value)
+          : value === null ||
+            ["string", "boolean"].includes(typeof value) ||
+            Number.isFinite(value),
+      )
+    )
+      return false;
+  }
+  if (job.phase_args != null) {
+    if (!objectPayload(job.phase_args)) return false;
+    const failureCode = job.phase_args.failed_phase?.code;
+    if (failureCode != null && typeof failureCode !== "string") return false;
+    // Phase arguments include page arrays and failure metadata. Preserve their
+    // fallback semantics, but reject values that cannot be rendered as text.
+    try {
+      for (const value of Object.values(job.phase_args)) String(value);
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
+function validHistoryResponse(data) {
+  if (
+    !objectPayload(data) ||
+    !Array.isArray(data.jobs) ||
+    (data.has_active_jobs !== undefined &&
+      typeof data.has_active_jobs !== "boolean")
+  )
+    return false;
+  const ids = new Set();
+  return data.jobs.every((job) => {
+    if (!validHistoryJob(job) || ids.has(job.id)) return false;
+    ids.add(job.id);
+    return true;
+  });
+}
 
 // Match the existing retry/resume contracts; neither endpoint returns a job ID.
 function validRestartResponse(data, budgets) {
