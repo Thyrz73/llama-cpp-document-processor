@@ -8,6 +8,7 @@ First planned tagged release of the existing v2 application. This entry prepares
 
 ### Added
 
+- Configurable resume for failed/cancelled analyses: immutable output-budget revisions, attempt provenance, verified selective artifact reuse and a French/English Resume dialog ([#14](https://github.com/Thyrz73/llama-cpp-document-processor/issues/14)). Deterministic integration tests cover recovery, exact generation-call savings, queue/restart boundaries, report publication interruptions and release of historical lookup results without a live model.
 - Reproducible job profiles, immutable snapshots, measured attempts and verified intermediate artifacts ([b8e39d1](https://github.com/Thyrz73/llama-cpp-document-processor/commit/b8e39d1)).
 - Documentary provenance and deterministic reliability warnings, without claiming semantic validation ([66ff554](https://github.com/Thyrz73/llama-cpp-document-processor/commit/66ff554)).
 - Report reader, UTF-8 downloads, metrics and history controls ([0f819a6](https://github.com/Thyrz73/llama-cpp-document-processor/commit/0f819a6), [e2040a6](https://github.com/Thyrz73/llama-cpp-document-processor/commit/e2040a6)).
@@ -34,7 +35,7 @@ First planned tagged release of the existing v2 application. This entry prepares
 ### Compatibility
 
 - Python 3.12 is the Docker/CI baseline. Node 22 is needed only for frontend development.
-- SQLite migrations 1–4 preserve historical rows/files. Downgrades require the old application and its matching coherent backup. Application, schema and artifact/prompt versions are independent.
-- Old snapshots and `previous_reports/` remain retained. Legacy jobs may be recomputed; unverifiable source/model/template identity prevents artifact reuse. Retry preserves saved settings and does not automatically continue token-limited output.
+- SQLite migrations 1–6 preserve historical rows/files, adding configuration revision references and their index without backfilling old attempts. Downgrades require the old application and its matching coherent backup. Application, schema and artifact/prompt versions are independent.
+- Old snapshots and `previous_reports/` remain retained. Legacy jobs without snapshots require Retry and may be recomputed; unverifiable source/model/template identity prevents artifact reuse. Retry preserves the selected settings, including earlier resume budgets, and does not automatically continue token-limited output. See [selective reuse and resource limits](docs/resume-artifact-reuse.md).
 - Extraction-process isolation remains deferred after evaluation. OCR cancellation waits for the current operation or timeout. Large PDFs may exceed memory limits despite upload/pixel bounds.
 - See [release gates and rollback](docs/releasing.md), [measured validation](docs/release-validation.md) and [saved-job compatibility](docs/migration-v2.md). Publication requires approval and validation of the final commit.

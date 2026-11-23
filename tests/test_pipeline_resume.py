@@ -1,6 +1,7 @@
 """Resume real persisted attempts with deterministic SSE and exact call counts."""
 
 import copy
+import gc
 import hashlib
 import io
 import json
@@ -8,6 +9,7 @@ import os
 import re
 import tempfile
 import unittest
+import weakref
 from collections import Counter
 from contextlib import contextmanager
 from dataclasses import replace
@@ -857,6 +859,171 @@ class PipelineResumeTests(unittest.TestCase):
             self.assertEqual(response.json["error_code"], "retry_limit")
         self.assertEqual(self.store.attempt_count(self.job_id), 2)
         self.assertEqual(len(self.calls), before)
+
+    def assert_generation_outcomes(self, reused, recomputed):
+        _, steps = self.steps()
+        generations = [
+            step
+            for step in steps.values()
+            if step["stage"] in pipeline.GENERATION_STAGES
+        ]
+        self.assertEqual(
+            Counter(step["status"] for step in generations),
+            Counter({"reused": reused, "done": recomputed}),
+        )
+        selected = self.store.load_config(self.job_id)
+        for step in generations:
+            budget = selected[pipeline.GENERATION_BUDGETS[step["stage"]]]
+            metrics = step["metrics"]
+            if step["status"] == "reused":
+                source = self.store.load_config(
+                    self.job_id, revision=metrics["artifact_source_revision"]
+                )
+                self.assert_reused(
+                    step["step_key"],
+                    source[pipeline.GENERATION_BUDGETS[step["stage"]]],
+                    revision=metrics["artifact_source_revision"],
+                )
+                self.assertEqual(metrics["requested_output_budget"], budget)
+                self.assertEqual(
+                    metrics["artifact_source_sha256"],
+                    file_hash(
+                        self.store.job_dir(self.job_id)
+                        / "artifacts"
+                        / metrics["artifact_source_config_hash"]
+                        / metrics["artifact_source_name"]
+                    ),
+                )
+            else:
+                self.assertEqual(metrics["output_budget"], budget)
+        for call in self.models[-1].calls:
+            self.assertEqual(
+                call["budget"], selected[pipeline.GENERATION_BUDGETS[call["stage"]]]
+            )
+
+    def test_restart_between_resume_commit_claim_and_attempt_keeps_selected_work(self):
+        for claimed in (False, True):
+            with self.subTest(claimed=claimed):
+                self.create()
+                self.failure = ("final", 1, "output_limit")
+                self.assert_calls(self.execute(), section=8, merge=2, final=1)
+                failed = self.steps()[0]
+                before = self.preserved()
+                self.resume(final_tokens=512)
+                selected = self.store.load_config(self.job_id)
+                if claimed:
+                    self.assertEqual(self.store.claim_next_job(), self.job_id)
+                # No new attempt exists yet: both queue transition crash boundaries
+                # must recover without charging an unused attempt or losing selection.
+                self.assertEqual(self.store.attempt_count(self.job_id), 1)
+                self.restart()
+                self.assertEqual(self.store.get_job(self.job_id)["status"], "queued")
+                self.assertEqual(self.store.load_config(self.job_id), selected)
+                self.assertEqual(self.store.attempt_count(self.job_id), 1)
+                self.assert_calls(self.execute(), final=1)
+                self.assert_done()
+                self.assert_generation_outcomes(reused=10, recomputed=1)
+                self.assertEqual(self.store.metrics(self.job_id)["runs"][1], failed)
+                self.assertEqual(self.preserved(), before)
+                with self.store.connect() as con:
+                    self.assertEqual(
+                        con.execute("PRAGMA foreign_key_check").fetchall(), []
+                    )
+
+    def test_restart_after_report_publication_before_completion_reuses_final(self):
+        self.create()
+        self.failure = ("final", 1, "output_limit")
+        self.assert_calls(self.execute(), section=8, merge=2, final=1)
+        before = self.preserved()
+        self.resume(final_tokens=512)
+        selected = self.store.load_config(self.job_id)
+        with patch.object(pipeline, "report_filename", side_effect=WorkerStopping()):
+            self.assert_calls(self.execute(), final=1)
+        directory = self.store.job_dir(self.job_id)
+        report = (directory / REPORT_FILE).read_bytes()
+        digest = file_hash(directory / REPORT_FILE)
+        interrupted, steps = self.steps()
+        self.assertEqual(interrupted["status"], "interrupted")
+        self.assertEqual(steps[REPORT_FILE]["status"], "done")
+        self.assertEqual(steps["report"]["status"], "interrupted")
+        self.assertEqual(self.store.get_job(self.job_id)["status"], "running")
+        self.assertEqual(
+            self.client.get(f"/api/jobs/{self.job_id}/report").status_code, 409
+        )
+        self.restart()
+        self.assertEqual(self.store.load_config(self.job_id), selected)
+        self.assertEqual(self.execute(), [])
+        self.assert_done()
+        self.assert_generation_outcomes(reused=11, recomputed=0)
+        self.assert_reused(REPORT_FILE, 512, revision=1)
+        self.assertEqual(
+            (directory / "previous_reports" / f"{digest}.md").read_bytes(), report
+        )
+        self.assertEqual(self.preserved(), before)
+        runs = self.store.metrics(self.job_id)["runs"]
+        self.assertEqual(
+            [run["status"] for run in runs], ["done", "interrupted", "failed"]
+        )
+        self.assertEqual(runs[1], interrupted)
+        for run, snapshot in zip(
+            runs, (selected, selected, self.original), strict=True
+        ):
+            self.assertEqual(
+                self.store.load_attempt_config(self.job_id, run["id"]), snapshot
+            )
+
+    def test_pipeline_releases_historical_results_between_lookups_and_closes_client(
+        self,
+    ):
+        self.create()
+        self.failure = ("final", 1, "output_limit")
+        self.assert_calls(self.execute(), section=8, merge=2, final=1)
+        self.resume(final_tokens=512)
+        read = artifacts.Artifacts.read_compatible
+        references = []
+        clients = []
+        factory = self.factory
+
+        def observe(current, *args, **kwargs):
+            gc.collect()
+            self.assertTrue(all(reference() is None for reference in references))
+            result = read(current, *args, **kwargs)
+            if result is not None:
+                references.append(weakref.ref(result))
+                cache = kwargs["cache"]
+                retained = {
+                    "history": cache.history,
+                    "manifests": {
+                        key: entry.data for key, entry in cache.manifests.items()
+                    },
+                }
+                self.assertNotIn(json.dumps(result.text), json.dumps(retained))
+                self.assertLessEqual(
+                    cache.manifest_bytes, artifacts.MAX_REUSE_MANIFEST_BYTES
+                )
+            return result
+
+        def track_client(snapshot):
+            model = factory(snapshot)
+            close = model.session.close
+            model.session.close = Mock(wraps=close)
+            clients.append(model.session)
+            return model
+
+        with (
+            patch.object(self.services, "_client_factory", new=track_client),
+            patch.object(artifacts.Artifacts, "read_compatible", new=observe),
+        ):
+            self.assert_calls(self.execute(), final=1)
+        self.assert_done()
+        self.assert_generation_outcomes(reused=10, recomputed=1)
+        # Extraction, evidence, chunks, eight sections and two merges: no
+        # verified result object may accumulate in the attempt's metadata cache.
+        self.assertEqual(len(references), 13)
+        gc.collect()
+        self.assertTrue(all(reference() is None for reference in references))
+        self.assertEqual(len(clients), 1)
+        clients[0].close.assert_called_once_with()
 
     def test_reuse_verifies_history_pdf_and_manifest_once_per_attempt(self):
         self.create()

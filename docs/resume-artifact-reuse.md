@@ -86,6 +86,13 @@ during reuse and streaming, successive revisions, restart recovery, normal retri
 attempt limits, and original generation-budget provenance. It asserts generation
 counts and proves one history lookup, one PDF read in the artifact layer and one
 historical manifest read for the compatible final-failure resume fixture.
+Additional restart regressions cover a committed resume before processing, a
+claimed job before attempt creation, and interruption after report publication
+before completion is recorded. The first two retain ten generations and need one
+final call; the last reuses all eleven completed generations with zero new calls
+and archives the previously published report. Weak-reference assertions check
+that historical result objects are released between pipeline lookups, and the
+model client's session is closed after completion.
 
 ## Limits
 
@@ -100,3 +107,7 @@ Index memory is limited by the entries of resident manifests, in addition to
 their parsed JSON. An evicted manifest must be parsed and indexed again. Direct
 callers that omit the optional attempt cache rebuild the metadata index on each
 lookup; the pipeline always provides its attempt-local cache.
+The 4 MiB bound measures serialized manifest input, not parsed Python objects or
+total process memory. Extracted pages, section notes and merged input still use
+memory during processing; retained revisions and report archives also consume
+disk. These cache limits do not guarantee that a large PDF fits a 512 MiB container.

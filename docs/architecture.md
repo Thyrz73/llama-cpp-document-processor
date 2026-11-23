@@ -27,7 +27,7 @@ There is one process, one worker thread and a few web threads. SQLite holds the 
 | `document_processor/services.py` | Application-owned settings, store, worker, client construction, snapshots and pipeline wiring. |
 | `document_processor/backend.py` | `DeploymentModelClient` and one backend-keyed TTL cache/inspection lock per application. |
 | `document_processor/web/system.py` | Page, health, profiles, configuration preview and read-only diagnostics. |
-| `document_processor/web/jobs.py` | Uploads, job status/metrics/live, retry, cancellation and history deletion. |
+| `document_processor/web/jobs.py` | Uploads, job status/metrics/live, retry/resume, cancellation and history deletion. |
 | `document_processor/web/reports.py` | Validated report paths, streaming downloads and the bounded Markdown viewer. |
 | `document_processor/web/hooks.py` | Cross-origin write rejection, no-store/nosniff headers and stable public errors. |
 | `document_processor/lifecycle.py` | Startup validation, database initialization, Waitress, SIGTERM and ordered worker/SQLite shutdown. |
@@ -87,7 +87,7 @@ Blueprints namespace internal Flask endpoints (`system.index`, `jobs.create_job`
 2. **Claim.** `Worker.run_forever()` claims the oldest queued job (`JobStore.claim_next_job()`) and calls `Services.analyze_job()` (also exposed as `app.analyze_job` for compatibility), which builds a `pipeline.Runtime` with the store, the model client factory and the worker's cancellation check.
 3. **Analysis.** `JobRun.execute()` prepares the backend, extracts the text, splits it into sections, writes notes per section, merges them until they fit the final prompt, writes the final report and saves it. The extracted text, sections, notes, merges and final text are saved as artifacts, so a retry reuses finished work.
 4. **Progress.** Each phase updates the job row. When live output is enabled, previews update memory and periodically checkpoint `live_preview.json`. The browser polls `GET /api/jobs` every 6 seconds while jobs are active. An open live panel for a queued/running job schedules its next `GET /api/jobs/<id>/live` 1.7 seconds after the previous request settles. Model-pass `active=false` does not stop polling a running job. Terminal jobs get one final preview; opening historical output and changing channels remain one-off loads. Closing the panel, hiding the tab or stopping/resetting the UI cancels its timeout; late responses cannot restart an old UI.
-5. **End.** The job becomes `done`, `failed` (with a translated error code) or `cancelled`. Failed and cancelled jobs can be retried with the same snapshot, up to `MAX_JOB_ATTEMPTS` attempts in total.
+5. **End.** The job becomes `done`, `failed` (with a translated error code) or `cancelled`. Failed and cancelled jobs can be retried with their selected snapshot or resumed with increased output budgets, within the saved attempt limit (initially `MAX_JOB_ATTEMPTS`).
 
 `POST /api/jobs/<id>/cancel` records the request in SQLite, then signals the running job in memory. The job checks for it at each phase change, tokenizer call and streamed token, and every 0.2 seconds while it waits for the model. After a restart, `JobStore.initialize()` requeues interrupted jobs and completes pending cancellations.
 
@@ -95,7 +95,11 @@ Schema version 5 adds storage for configuration revisions. The original `job_con
 
 `requeue(..., config_revision=revision)` selects a stored revision atomically with queueing. Omitting the argument retains the current selection. `load_config(job_id)` verifies the selected snapshot; `revision=0` explicitly reads the original. `start_attempt()` pins the selection in the same transaction as the attempt, and `load_attempt_config(job_id, run_id)` reads that attempt's configuration even after another revision is selected or the application restarts. Missing selection/attempt references mean the original snapshot, preserving historical rows without backfilling. Jobs without any snapshot still use the existing legacy recomputation path.
 
-Revision references stay in separate SQLite tables, so job and metrics response fields are unchanged. The public list uses the selected fingerprint and the existing allowlist; selection invalidates the local cache after commit, and other stores observe changed fingerprints on their next read. This storage foundation has no API or interface for submitting resume changes yet; resume validation and artifact reuse changes belong to later steps.
+`POST /api/jobs/<id>/resume` validates absolute nondecreasing section/merge/final output budgets against the selected snapshot and available context, then appends/deduplicates a revision and selects it atomically with queueing. Worker wakeup follows commit. Retry retains the selection and accepts no configuration changes. Neither operation resolves saved profiles, prompts or deployment defaults again. The worker loads and pins the selected configuration on each attempt; startup recovery retains it even if processing stopped between claim and attempt creation.
+
+Revision references stay in separate SQLite tables, so job and metrics response fields are unchanged. The public list uses the selected fingerprint and the existing allowlist; selection invalidates the local cache after commit, and other stores observe changed fingerprints on their next read. The French/English Resume dialog shows saved settings, validated failed-phase guidance and separate current context warnings; it submits only changed budgets. See [the API contract](api.md#progress-retries-and-cancellation).
+
+The pipeline checks local artifacts first, then up to 32 older revisions for compatible completed work. Only output budgets and permitted metadata may differ; dependencies, PDF/backend identity, completion and content hashes still require verification. Replanned merge groups or changed final inputs force recomputation. Source revision/hash/name and original generation budget remain in step provenance alongside the current requested budget. The attempt-local cache retains verification metadata rather than artifact text, with a 4 MiB serialized-manifest LRU; this is not a bound on total pipeline memory. See [selective reuse](resume-artifact-reuse.md) for exact call savings, file limits and platform restrictions.
 
 List metadata, activity and effective configurations share an explicit read transaction, which ends before filesystem probes. Schema version 6 adds the `(job_id, revision)` child index for foreign-key checks when deleting configuration revisions.
 
@@ -124,6 +128,7 @@ Deterministic report copy is maintained in `report_text.py`; browser copy is mai
 | `app.js` | `start()`: connects the page controls to the other modules and loads the list. |
 | `state.js` | All mutable interface state, in a single `state` object. |
 | `jobs.js`, `card.js` | The analyses list: polling, rendering, the retry, cancel and delete actions, and the notice reporting their outcome. |
+| `resume.js` | Saved settings, failed-phase guidance and budget validation in the French/English Resume dialog. |
 | `live.js`, `metrics.js` | The live output and metrics panels of a job. |
 | `history.js` | History selection and the deletion dialog. |
 | `settings.js`, `upload.js` | The analysis settings with their server preview, and the upload form. |
@@ -140,7 +145,7 @@ The existing scripts and CSP stay unchanged. All paths restore explicit light/da
 - **One owner per concern.** Job queries live in `jobs.py` and schema migrations in `database.py`. PDF handling lives in `extraction.py`, and llama.cpp access in `model_client.py`.
 - **One database block at a time.** A `with store.connect()` block runs on its thread's own connection and cannot contain another one: call other `JobStore` methods after it. `JobStore` methods each use a single block.
 - **No dependency on the web app.** Package modules never import `app.py`, and their imports form no cycle. `tests/test_architecture.py` enforces both.
-- **Immutable snapshots.** A job keeps its original configuration forever; retries retain the selected snapshot. Internal storage can select an immutable revision for a future resume, while current HTTP retries accept no configuration changes.
+- **Immutable snapshots.** A job keeps its original configuration forever; resume selects an immutable budget revision, and retries retain that selection without configuration changes. Each attempt pins its own revision.
 - **Public errors are coded.** Raise `ProcessingError(code, message)`, or a subclass, and translate the code in both languages of `static/translations.json`. `tests/test_errors.py` keeps codes and translations in sync.
 - **Private data stays private.** Logs and metrics never contain document text, prompts or model output. The API returns model output only through the report routes and the optional live preview, and never returns the system prompt or the saved templates.
 

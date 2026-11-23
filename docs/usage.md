@@ -30,7 +30,13 @@ The server-rendered reader supports headings, lists, tables, quotes, links and c
 
 For a failed or cancelled job, choose **Resume…** to see its saved configuration and failure information. **Retry** keeps its selected effective settings, including budgets from an earlier resume. **Resume with adjusted budgets** lets you increase the analysis, merge and final output token budgets; only modified budgets are submitted. Other settings and prompts stay as saved. Create a new analysis to change them. Older jobs without saved budgets can still use Retry.
 
+Budgets are absolute integer counts (64–65,536), cannot decrease and must fit the saved application and known engine context limits. The dialog, failed-phase guidance and validation errors follow the French/English interface language; changing that language preserves edits and does not change the saved report language. Historical failure metadata can be unavailable, so the dialog then shows general guidance. Current context warnings are shown separately from warnings saved with the analysis.
+
 Output exhaustion may benefit from a larger budget for the affected phase. A context-window limit is different: increasing output budgets does not enlarge the context window and may reduce space for input. The failed phase is shown only when available, and larger budgets do not guarantee success.
+
+Resume keeps completed compatible work and regenerates unfinished or incompatible steps; it never continues partial output. For the deterministic eight-section fixture, a final output-limit recovery needs 1 generation instead of 11 for a fresh run. Changed inputs or merge grouping can reduce those savings; call counts do not measure execution time. See [reuse guarantees, examples and limits](resume-artifact-reuse.md).
+
+Budget revisions and each attempt's configuration survive restarts. Startup requeues interrupted processing and completes pending cancellations; the saved attempt limit still applies. Original settings, attempt history and historical artifacts remain retained, and saving archives an existing report in `previous_reports/`. These retained files use disk space. Reuse caches are bounded, but total PDF, notes and model memory are not covered by that bound; large PDFs can still exceed local memory. Unsafe or oversized historical files and platforms without safe file-opening support may require recomputation.
 
 Polling preserves edits while the dialog is open. If the job changes, close and reopen it to use the latest settings. Escape or **Close** dismisses the dialog when no request is pending. Validation and request errors appear inside the dialog; cancellation errors appear above the analyses list.
 
