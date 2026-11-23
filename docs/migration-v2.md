@@ -53,7 +53,7 @@ To inspect a stopped data directory or backup without starting a worker:
 python scripts/check_jobs.py /path/to/data
 ```
 
-This reads snapshots, source hashes and artifact manifests. It prints counts, not document text. Jobs without snapshots are counted separately; integrity failures produce a nonzero exit code.
+This reads original snapshots and every stored resume revision, checks selection/attempt references, and verifies source hashes and each configuration’s artifact manifest. Snapshot and artifact counts include all revisions. Jobs without snapshots are counted separately. Missing artifact directories are allowed before processing; an existing configuration directory with a missing or malformed manifest is an integrity error. Reads reject unsafe links and special files, bound manifest allocation, and stream artifact hashes. It prints counts, not document text; integrity failures produce a nonzero exit code. Use a stopped, checkpointed database or coherent backup: the inspector refuses a nonempty WAL rather than ignoring committed changes, and never creates SQLite WAL/SHM files or migrates data.
 
 ## Prompts
 
