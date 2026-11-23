@@ -149,17 +149,16 @@ def numeric_checks(answer, evidence, input_pages, *, prepared=None):
         if not quantities:
             continue
         normalized_line = _normalized(line)
+        refs = {int(m[1]) for m in PAGE_REFERENCE.finditer(line)}
         candidates = [
             item
             for item, entity in zip(
                 evidence["comparisons"], prepared.entities, strict=False
             )
             if item["page"] in input_pages
+            and (not refs or item["page"] in refs)
             and _entity_in_line(item["entity"], line, entity, normalized_line)
         ]
-        refs = [int(m[1]) for m in PAGE_REFERENCE.finditer(line)]
-        if refs:
-            candidates = [item for item in candidates if item["page"] in refs]
         # Duplicate source rows from repeat headers must not resolve ambiguity.
         if len(candidates) != 1:
             skipped += 1

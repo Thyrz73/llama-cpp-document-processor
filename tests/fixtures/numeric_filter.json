@@ -1,0 +1,381 @@
+{
+  "single": {
+    "checked": 1,
+    "unchecked_lines_or_values": 0,
+    "issues": [
+      {
+        "code": "numeric_mismatch",
+        "evidence_id": "9f0db3efa3026394",
+        "entity": "A · École",
+        "page": 1,
+        "unit": "MWh",
+        "expected": "-1.6",
+        "actual": "-2.6"
+      }
+    ],
+    "status": "partial",
+    "scope": "unique_entity_explicit_delta_only"
+  },
+  "multiple_ambiguous": {
+    "checked": 0,
+    "unchecked_lines_or_values": 1,
+    "issues": [],
+    "status": "not_performed",
+    "scope": "unique_entity_explicit_delta_only"
+  },
+  "multiple_with_unknown": {
+    "checked": 1,
+    "unchecked_lines_or_values": 0,
+    "issues": [
+      {
+        "code": "numeric_mismatch",
+        "evidence_id": "9f0db3efa3026394",
+        "entity": "A · École",
+        "page": 1,
+        "unit": "MWh",
+        "expected": "-1.6",
+        "actual": "-2.6"
+      }
+    ],
+    "status": "partial",
+    "scope": "unique_entity_explicit_delta_only"
+  },
+  "repeated": {
+    "checked": 1,
+    "unchecked_lines_or_values": 0,
+    "issues": [
+      {
+        "code": "numeric_mismatch",
+        "evidence_id": "9f0db3efa3026394",
+        "entity": "A · École",
+        "page": 1,
+        "unit": "MWh",
+        "expected": "-1.6",
+        "actual": "-2.6"
+      }
+    ],
+    "status": "partial",
+    "scope": "unique_entity_explicit_delta_only"
+  },
+  "unknown": {
+    "checked": 0,
+    "unchecked_lines_or_values": 1,
+    "issues": [],
+    "status": "not_performed",
+    "scope": "unique_entity_explicit_delta_only"
+  },
+  "zero": {
+    "checked": 0,
+    "unchecked_lines_or_values": 1,
+    "issues": [],
+    "status": "not_performed",
+    "scope": "unique_entity_explicit_delta_only"
+  },
+  "unicode_digit": {
+    "checked": 1,
+    "unchecked_lines_or_values": 0,
+    "issues": [
+      {
+        "code": "numeric_mismatch",
+        "evidence_id": "9f0db3efa3026394",
+        "entity": "A · École",
+        "page": 1,
+        "unit": "MWh",
+        "expected": "-1.6",
+        "actual": "-2.6"
+      }
+    ],
+    "status": "partial",
+    "scope": "unique_entity_explicit_delta_only"
+  },
+  "uncited": {
+    "checked": 0,
+    "unchecked_lines_or_values": 1,
+    "issues": [],
+    "status": "not_performed",
+    "scope": "unique_entity_explicit_delta_only"
+  },
+  "malformed_number": {
+    "checked": 0,
+    "unchecked_lines_or_values": 1,
+    "issues": [],
+    "status": "not_performed",
+    "scope": "unique_entity_explicit_delta_only"
+  },
+  "malformed_negative": {
+    "checked": 0,
+    "unchecked_lines_or_values": 1,
+    "issues": [],
+    "status": "not_performed",
+    "scope": "unique_entity_explicit_delta_only"
+  },
+  "malformed_list": {
+    "checked": 0,
+    "unchecked_lines_or_values": 1,
+    "issues": [],
+    "status": "not_performed",
+    "scope": "unique_entity_explicit_delta_only"
+  },
+  "malformed_range": {
+    "checked": 0,
+    "unchecked_lines_or_values": 1,
+    "issues": [],
+    "status": "not_performed",
+    "scope": "unique_entity_explicit_delta_only"
+  },
+  "lowercase": {
+    "checked": 0,
+    "unchecked_lines_or_values": 1,
+    "issues": [],
+    "status": "not_performed",
+    "scope": "unique_entity_explicit_delta_only"
+  },
+  "malformed_and_valid": {
+    "checked": 1,
+    "unchecked_lines_or_values": 0,
+    "issues": [
+      {
+        "code": "numeric_mismatch",
+        "evidence_id": "9f0db3efa3026394",
+        "entity": "A · École",
+        "page": 1,
+        "unit": "MWh",
+        "expected": "-1.6",
+        "actual": "-2.6"
+      }
+    ],
+    "status": "partial",
+    "scope": "unique_entity_explicit_delta_only"
+  },
+  "uncited_unique_scope": {
+    "checked": 1,
+    "unchecked_lines_or_values": 0,
+    "issues": [
+      {
+        "code": "numeric_mismatch",
+        "evidence_id": "9f0db3efa3026394",
+        "entity": "A · École",
+        "page": 1,
+        "unit": "MWh",
+        "expected": "-1.6",
+        "actual": "-2.6"
+      }
+    ],
+    "status": "partial",
+    "scope": "unique_entity_explicit_delta_only"
+  },
+  "citation_outside_scope": {
+    "checked": 0,
+    "unchecked_lines_or_values": 1,
+    "issues": [],
+    "status": "not_performed",
+    "scope": "unique_entity_explicit_delta_only"
+  },
+  "empty_scope": {
+    "checked": 0,
+    "unchecked_lines_or_values": 1,
+    "issues": [],
+    "status": "not_performed",
+    "scope": "unique_entity_explicit_delta_only"
+  },
+  "short_alias": {
+    "checked": 1,
+    "unchecked_lines_or_values": 0,
+    "issues": [
+      {
+        "code": "numeric_mismatch",
+        "evidence_id": "9f0db3efa3026394",
+        "entity": "A · École",
+        "page": 1,
+        "unit": "MWh",
+        "expected": "-1.6",
+        "actual": "-2.6"
+      }
+    ],
+    "status": "partial",
+    "scope": "unique_entity_explicit_delta_only"
+  },
+  "unicode_label": {
+    "checked": 1,
+    "unchecked_lines_or_values": 0,
+    "issues": [
+      {
+        "code": "numeric_mismatch",
+        "evidence_id": "9f0db3efa3026394",
+        "entity": "A · École",
+        "page": 1,
+        "unit": "MWh",
+        "expected": "-1.6",
+        "actual": "-2.6"
+      }
+    ],
+    "status": "partial",
+    "scope": "unique_entity_explicit_delta_only"
+  },
+  "unicode_normalization": {
+    "checked": 1,
+    "unchecked_lines_or_values": 0,
+    "issues": [
+      {
+        "code": "numeric_mismatch",
+        "evidence_id": "9f0db3efa3026394",
+        "entity": "A · École",
+        "page": 1,
+        "unit": "MWh",
+        "expected": "-1.6",
+        "actual": "-2.6"
+      }
+    ],
+    "status": "partial",
+    "scope": "unique_entity_explicit_delta_only"
+  },
+  "correct_value": {
+    "checked": 1,
+    "unchecked_lines_or_values": 0,
+    "issues": [],
+    "status": "partial",
+    "scope": "unique_entity_explicit_delta_only"
+  },
+  "mixed_languages": {
+    "checked": 2,
+    "unchecked_lines_or_values": 0,
+    "issues": [
+      {
+        "code": "numeric_mismatch",
+        "evidence_id": "9f0db3efa3026394",
+        "entity": "A · École",
+        "page": 1,
+        "unit": "MWh",
+        "expected": "-1.6",
+        "actual": "-2.6"
+      },
+      {
+        "code": "numeric_mismatch",
+        "evidence_id": "13470d664face8c3",
+        "entity": "School",
+        "page": 3,
+        "unit": "MWh",
+        "expected": "2",
+        "actual": "3"
+      }
+    ],
+    "status": "partial",
+    "scope": "unique_entity_explicit_delta_only"
+  },
+  "issue_order": {
+    "checked": 2,
+    "unchecked_lines_or_values": 0,
+    "issues": [
+      {
+        "code": "numeric_mismatch",
+        "evidence_id": "13470d664face8c3",
+        "entity": "School",
+        "page": 3,
+        "unit": "MWh",
+        "expected": "2",
+        "actual": "3"
+      },
+      {
+        "code": "numeric_mismatch",
+        "evidence_id": "9f0db3efa3026394",
+        "entity": "A · École",
+        "page": 1,
+        "unit": "MWh",
+        "expected": "-1.6",
+        "actual": "-2.6"
+      }
+    ],
+    "status": "partial",
+    "scope": "unique_entity_explicit_delta_only"
+  },
+  "quoted_number": {
+    "checked": 1,
+    "unchecked_lines_or_values": 0,
+    "issues": [
+      {
+        "code": "numeric_mismatch",
+        "evidence_id": "9f0db3efa3026394",
+        "entity": "A · École",
+        "page": 1,
+        "unit": "MWh",
+        "expected": "-1.6",
+        "actual": "-2.6"
+      }
+    ],
+    "status": "partial",
+    "scope": "unique_entity_explicit_delta_only"
+  },
+  "two_absolute_values": {
+    "checked": 0,
+    "unchecked_lines_or_values": 1,
+    "issues": [],
+    "status": "not_performed",
+    "scope": "unique_entity_explicit_delta_only"
+  },
+  "unlabelled_level": {
+    "checked": 0,
+    "unchecked_lines_or_values": 1,
+    "issues": [],
+    "status": "not_performed",
+    "scope": "unique_entity_explicit_delta_only"
+  },
+  "absolute_and_relative": {
+    "checked": 2,
+    "unchecked_lines_or_values": 0,
+    "issues": [
+      {
+        "code": "numeric_mismatch",
+        "evidence_id": "9f0db3efa3026394",
+        "entity": "A · École",
+        "page": 1,
+        "unit": "MWh",
+        "expected": "-1.6",
+        "actual": "-2.6"
+      }
+    ],
+    "status": "partial",
+    "scope": "unique_entity_explicit_delta_only"
+  },
+  "unknown_entity": {
+    "checked": 0,
+    "unchecked_lines_or_values": 1,
+    "issues": [],
+    "status": "not_performed",
+    "scope": "unique_entity_explicit_delta_only"
+  },
+  "wrong_period": {
+    "checked": 0,
+    "unchecked_lines_or_values": 1,
+    "issues": [],
+    "status": "not_performed",
+    "scope": "unique_entity_explicit_delta_only"
+  },
+  "percentage_unit": {
+    "checked": 0,
+    "unchecked_lines_or_values": 1,
+    "issues": [],
+    "status": "not_performed",
+    "scope": "unique_entity_explicit_delta_only"
+  },
+  "zero_baseline": {
+    "checked": 0,
+    "unchecked_lines_or_values": 1,
+    "issues": [],
+    "status": "not_performed",
+    "scope": "unique_entity_explicit_delta_only"
+  },
+  "no_quantities": {
+    "checked": 0,
+    "unchecked_lines_or_values": 0,
+    "issues": [],
+    "status": "not_performed",
+    "scope": "unique_entity_explicit_delta_only"
+  },
+  "duplicate_source_rows": {
+    "checked": 0,
+    "unchecked_lines_or_values": 1,
+    "issues": [],
+    "status": "not_performed",
+    "scope": "unique_entity_explicit_delta_only"
+  }
+}
