@@ -412,15 +412,20 @@ class JobRun:
         level = 0
         while True:
             self.model.current_stage = "final"
-            final_text, final_fits, final_evidence_limit = reliability.prepare_input(
-                notes,
-                self.evidence,
-                lambda text: self.model.fits(
-                    final_instruction, text, self.config["final_tokens"]
-                )[0],
-            )
-            if len(notes) <= MAX_FINAL_NOTES and final_fits:
-                return notes, final_text, final_evidence_limit
+            self.model.check_cancelled()
+            # More notes require a merge regardless of final prompt size.
+            if len(notes) <= MAX_FINAL_NOTES:
+                final_text, final_fits, final_evidence_limit = (
+                    reliability.prepare_input(
+                        notes,
+                        self.evidence,
+                        lambda text: self.model.fits(
+                            final_instruction, text, self.config["final_tokens"]
+                        )[0],
+                    )
+                )
+                if final_fits:
+                    return notes, final_text, final_evidence_limit
             if len(notes) < 2 or level >= MAX_MERGE_LEVELS:
                 raise ProcessingError(
                     "merge_impossible",
