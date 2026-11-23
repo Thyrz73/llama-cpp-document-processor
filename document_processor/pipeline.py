@@ -771,7 +771,12 @@ class JobRun:
 
         live("", "", False)
         try:
-            answer = model.complete(instruction, text, budget, on_update=live)
+            answer = model.complete(
+                instruction,
+                text,
+                budget,
+                on_update=live if self.runtime.live_output else None,
+            )
         except Exception:
             # The stream need not emit a final callback on failure, cancellation or shutdown.
             # Flush the last useful bounded text, retaining the original processing error.

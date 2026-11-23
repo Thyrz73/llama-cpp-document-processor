@@ -823,7 +823,7 @@ class HybridPreviewTests(unittest.TestCase):
             self.assertFalse(self.live()["enabled"])
 
             def stream(*args, on_update):
-                on_update("answer", "reasoning", True)
+                self.assertIsNone(on_update)
                 return "answer"
 
             self.model.complete.side_effect = stream
