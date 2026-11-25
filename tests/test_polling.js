@@ -519,6 +519,382 @@ describe("Browser interface", { concurrency: false }, () => {
     });
   });
 
+  describe("Metrics panel ownership", () => {
+    const a = () => ({
+      ...job("failed", 50),
+      queued_at: "queue-1",
+      updated_at: "update-1",
+    });
+    const b = () => job("running", 40, "b".repeat(32));
+    const metricsData = (name = "section") => ({
+      runs: [{ id: 1, status: "done", duration_ms: 1000, queue_ms: 100 }],
+      steps: [
+        {
+          step_key: name,
+          status: "done",
+          metrics: {
+            duration_ms: 500,
+            output_tokens: 12,
+            finish_reason: "stop",
+          },
+        },
+      ],
+      next_before: null,
+    });
+    const card = (browser, id) =>
+      descendants(browser.elements.jobs).find(
+        (node) => node.tag === "article" && node.dataset.jobId === id,
+      );
+    const button = (browser, id) =>
+      card(browser, id).querySelector("[data-metrics-job]");
+    const panel = (browser, id) =>
+      browser.document.getElementById("metrics-" + id);
+    const text = (node) =>
+      [
+        node.textContent,
+        ...descendants(node).map((child) => child.textContent),
+      ].join("\n");
+    async function ready(jobs = [a(), b()]) {
+      const browser = createBrowser({ withSettings: true });
+      await browser.respond(0, { jobs });
+      await browser.respond(1, { thinking_supported: false });
+      await browser.respond(2, {
+        configuration: {
+          chunk_tokens: 3000,
+          analysis_tokens: 3072,
+          merge_tokens: 2048,
+          final_tokens: 3072,
+          context_tokens: 16384,
+          warnings: [],
+          thinking_section: "inherit",
+          thinking_merge: "inherit",
+          thinking_final: "inherit",
+        },
+      });
+      return browser;
+    }
+    function open(browser, id = a().id) {
+      const index = browser.requests.length;
+      const pending = button(browser, id).handlers.click[0]();
+      assert.equal(browser.requests[index]?.url, `/api/jobs/${id}/metrics`);
+      return { index, pending, output: panel(browser, id) };
+    }
+    async function refresh(browser, jobs) {
+      const index = browser.requests.length;
+      const pending = browser.api.refresh();
+      await browser.respond(index, { jobs });
+      await pending;
+    }
+    async function loaded(browser) {
+      const opened = open(browser);
+      await browser.respond(opened.index, metricsData());
+      await opened.pending;
+      return opened.output;
+    }
+
+    test("loaded and hidden panels survive unrelated progress without refetching or replacing content", async () => {
+      const browser = await ready();
+      const output = await loaded(browser);
+      const children = [...output.children];
+      const oldCard = card(browser, a().id);
+      const oldButton = button(browser, a().id);
+      const requests = browser.requests.length;
+      await browser.tick(6000);
+      await browser.respond(requests, {
+        jobs: [a(), { ...b(), progress_percent: 41 }],
+      });
+      assert.equal(panel(browser, a().id), output);
+      assert.deepEqual(output.children, children);
+      assert.notEqual(
+        card(browser, a().id),
+        oldCard,
+        "Only panel ownership is repaired, cards still rebuild",
+      );
+      const beforeDetachedClick = browser.requests.length;
+      await oldButton.handlers.click[0]();
+      assert.equal(browser.requests.length, beforeDetachedClick);
+      assert.equal(
+        !!output.hidden,
+        false,
+        "Detached controls cannot toggle the current panel",
+      );
+      assert.equal(button(browser, a().id).handlers.click.length, 1);
+      await button(browser, a().id).handlers.click[0]();
+      assert.equal(output.hidden, true);
+      await refresh(browser, [a(), { ...b(), progress_percent: 42 }]);
+      assert.equal(panel(browser, a().id), output);
+      assert.equal(output.hidden, true);
+      assert.equal(
+        button(browser, a().id).attributes["aria-expanded"],
+        "false",
+      );
+      const before = browser.requests.length;
+      await button(browser, a().id).handlers.click[0]();
+      assert.equal(output.hidden, false);
+      assert.equal(button(browser, a().id).attributes["aria-expanded"], "true");
+      assert.equal(browser.requests.length, before);
+      assert.equal(
+        browser.requests.filter((request) => request.url.endsWith("/metrics"))
+          .length,
+        1,
+      );
+    });
+
+    test("pending panels survive refresh and language changes until their original request resolves", async () => {
+      const browser = await ready();
+      const opened = open(browser);
+      await refresh(browser, [a(), { ...b(), progress_percent: 41 }]);
+      browser.elements.uiLanguage.value = "fr";
+      browser.elements.uiLanguage.handlers.change[0]();
+      assert.equal(panel(browser, a().id), opened.output);
+      assert.equal(opened.output.textContent, translations.fr["Loading…"]);
+      await button(browser, a().id).handlers.click[0]();
+      await button(browser, a().id).handlers.click[0]();
+      await browser.respond(opened.index, metricsData());
+      await opened.pending;
+      assert.equal(panel(browser, a().id), opened.output);
+      assert.ok(
+        text(opened.output).includes(
+          translations.fr["Generated: {tokens} tokens"].replace(
+            "{tokens}",
+            "12",
+          ),
+        ),
+      );
+      const before = browser.requests.length;
+      browser.elements.uiLanguage.value = "en";
+      browser.elements.uiLanguage.handlers.change[0]();
+      assert.equal(panel(browser, a().id), opened.output);
+      assert.ok(text(opened.output).includes("Generated: 12 tokens"));
+      browser.api.rerenderJobs();
+      assert.equal(panel(browser, a().id), opened.output);
+      assert.equal(
+        browser.requests.length,
+        before,
+        "Translation and rerender do not refetch metrics",
+      );
+    });
+
+    test("same-job attempt, status, update and configuration changes reject stale replies", async () => {
+      for (const change of [
+        { queued_at: "queue-2" },
+        { updated_at: "update-2" },
+        { latest_attempt_id: 2 },
+        { status: "queued" },
+        { done_chunks: 2 },
+        { configuration: { analysis_tokens: 4096 } },
+      ]) {
+        const browser = await ready();
+        const old = open(browser);
+        await refresh(browser, [{ ...a(), ...change }, b()]);
+        assert.equal(panel(browser, a().id), null);
+        assert.equal(old.output.isConnected, false);
+        assert.equal(
+          button(browser, a().id).attributes["aria-expanded"],
+          "false",
+        );
+        const replacement = open(browser);
+        await browser.respond(old.index, metricsData("STALE ATTEMPT"));
+        await old.pending;
+        assert.equal(panel(browser, a().id), replacement.output);
+        assert.equal(replacement.output.textContent, "Loading…");
+        assert.ok(!text(old.output).includes("STALE ATTEMPT"));
+        await browser.respond(
+          replacement.index,
+          metricsData("current attempt"),
+        );
+        await replacement.pending;
+        assert.ok(text(replacement.output).includes("current attempt"));
+      }
+    });
+
+    test("simultaneous panels stay bound to actual job IDs when cards reorder", async () => {
+      const c = { ...job("done", 100, "c".repeat(32)), updated_at: "update-c" };
+      const browser = await ready([a(), b(), c]);
+      const first = open(browser);
+      await browser.respond(first.index, metricsData("first job"));
+      await first.pending;
+      const second = open(browser, c.id);
+      await refresh(browser, [c, { ...b(), progress_percent: 42 }, a()]);
+      assert.equal(panel(browser, a().id), first.output);
+      assert.equal(panel(browser, c.id), second.output);
+      await browser.respond(second.index, metricsData("second job"));
+      await second.pending;
+      assert.ok(text(first.output).includes("first job"));
+      assert.ok(!text(first.output).includes("second job"));
+      assert.ok(text(second.output).includes("second job"));
+      await button(browser, c.id).handlers.click[0]();
+      assert.equal(second.output.hidden, true);
+      assert.equal(!!first.output.hidden, false);
+      assert.equal(
+        browser.requests.filter((request) => request.url.endsWith("/metrics"))
+          .length,
+        2,
+      );
+    });
+
+    test("retained timeout and invalid-response errors retranslate without refetching", async () => {
+      for (const timeout of [false, true]) {
+        const browser = await ready();
+        browser.elements.uiLanguage.value = "fr";
+        browser.elements.uiLanguage.handlers.change[0]();
+        const opened = open(browser);
+        if (timeout) {
+          await browser.tick(15000);
+          assert.equal(
+            browser.requests[opened.index].options.signal.aborted,
+            true,
+          );
+        } else await browser.respond(opened.index, { runs: null, steps: [] });
+        await opened.pending;
+        const key = timeout ? "Request timed out." : "Metrics unavailable";
+        assert.equal(opened.output.textContent, translations.fr[key]);
+        await refresh(browser, [a(), { ...b(), progress_percent: 44 }]);
+        browser.elements.uiLanguage.value = "en";
+        browser.elements.uiLanguage.handlers.change[0]();
+        assert.equal(panel(browser, a().id), opened.output);
+        assert.equal(opened.output.textContent, key);
+        assert.equal(
+          browser.requests.filter((request) => request.url.endsWith("/metrics"))
+            .length,
+          1,
+        );
+      }
+    });
+
+    test("an accepted retry invalidates immediately before refreshed history arrives", async () => {
+      const browser = await ready();
+      const old = open(browser);
+      const index = browser.requests.length;
+      const retry = browser.api.retry(a().id);
+      assert.equal(browser.requests[index].url, `/api/jobs/${a().id}/retry`);
+      await browser.respond(index, { status: "queued" });
+      assert.equal(panel(browser, a().id), null);
+      assert.equal(old.output.isConnected, false);
+      await browser.respond(old.index, { error: "stale server error" }, false);
+      await old.pending;
+      assert.equal(old.output.textContent, "Loading…");
+      await browser.respond(index + 1, {
+        jobs: [{ ...a(), status: "queued", queued_at: "queue-2" }, b()],
+      });
+      await retry;
+      assert.equal(panel(browser, a().id), null);
+      const next = open(browser);
+      await browser.respond(next.index, metricsData("retried"));
+      await next.pending;
+      assert.ok(text(next.output).includes("retried"));
+    });
+
+    test("deletion removes panel ownership and late results cannot reattach it", async () => {
+      const browser = await ready();
+      const old = open(browser);
+      const trigger = card(browser, a().id).querySelector("[data-delete-job]");
+      browser.api.confirmDeletion([a().id], false, trigger);
+      const index = browser.requests.length;
+      const deletion = browser.api.submitDeletion();
+      await browser.respond(index, {
+        id: a().id,
+        deleted: true,
+        warning_code: null,
+      });
+      assert.equal(panel(browser, a().id), null);
+      assert.equal(old.output.isConnected, false);
+      await browser.respond(old.index, metricsData("deleted stale"));
+      await old.pending;
+      assert.equal(old.output.textContent, "Loading…");
+      await browser.respond(index + 1, { jobs: [b()] });
+      await deletion;
+      assert.equal(panel(browser, a().id), null);
+      assert.equal(card(browser, a().id), undefined);
+    });
+
+    test("error states survive unrelated updates and translate without another request", async () => {
+      const browser = await ready();
+      const opened = open(browser);
+      await browser.respond(
+        opened.index,
+        { error_code: "backend_unavailable", error: "fallback error" },
+        false,
+      );
+      await opened.pending;
+      const original = opened.output.textContent;
+      await refresh(browser, [a(), { ...b(), progress_percent: 41 }]);
+      assert.equal(panel(browser, a().id), opened.output);
+      assert.equal(opened.output.textContent, original);
+      browser.elements.uiLanguage.value = "fr";
+      browser.elements.uiLanguage.handlers.change[0]();
+      assert.equal(
+        opened.output.textContent,
+        translations.fr["error.backend_unavailable"],
+      );
+      assert.equal(
+        browser.requests.filter((request) => request.url.endsWith("/metrics"))
+          .length,
+        1,
+      );
+    });
+
+    test("a late old-page response cannot update an identical job on a fresh page", async () => {
+      const previous = await ready();
+      const old = open(previous);
+      const current = await ready();
+      const replacement = open(current);
+      const requests = current.requests.length;
+      await button(previous, a().id).handlers.click[0]();
+      assert.equal(
+        current.requests.length,
+        requests,
+        "An old page control cannot issue a current-page request",
+      );
+      await previous.respond(old.index, metricsData("OLD PAGE"));
+      await old.pending;
+      assert.equal(replacement.output.textContent, "Loading…");
+      await current.respond(replacement.index, metricsData("NEW PAGE"));
+      await replacement.pending;
+      assert.ok(text(replacement.output).includes("NEW PAGE"));
+      assert.ok(!text(replacement.output).includes("OLD PAGE"));
+    });
+
+    test("metrics focus, live identity and deletion-dialog focus survive progress updates", async () => {
+      const browser = await ready();
+      const output = await loaded(browser);
+      const index = browser.requests.length;
+      browser.api.toggleLive(b().id);
+      await browser.respond(index, {
+        enabled: true,
+        content: "live text",
+        active: true,
+      });
+      const live = browser.document.getElementById("live-" + b().id);
+      const content = browser.document.getElementById("live-content");
+      content.scrollTop = 77;
+      button(browser, a().id).focus();
+      await refresh(browser, [a(), { ...b(), progress_percent: 41 }]);
+      assert.equal(browser.document.activeElement, button(browser, a().id));
+      assert.equal(panel(browser, a().id), output);
+      assert.equal(browser.document.getElementById("live-" + b().id), live);
+      assert.equal(content.scrollTop, 77);
+      output.tabIndex = 0;
+      output.focus();
+      await refresh(browser, [a(), { ...b(), progress_percent: 42 }]);
+      assert.equal(browser.document.activeElement, output);
+      const trigger = card(browser, a().id).querySelector("[data-delete-job]");
+      browser.api.confirmDeletion([a().id], false, trigger);
+      await refresh(browser, [a(), { ...b(), progress_percent: 43 }]);
+      assert.equal(browser.elements.deleteDialog.open, true);
+      assert.equal(
+        browser.document.activeElement,
+        browser.elements.deleteCancel,
+      );
+      assert.equal(panel(browser, a().id), output);
+      browser.api.closeDeleteDialog();
+      assert.equal(
+        browser.document.activeElement,
+        card(browser, a().id).querySelector("[data-delete-job]"),
+      );
+    });
+  });
+
   describe("Jobs polling and mutations", () => {
     test("initial load stops for empty, completed, failed and mixed terminal lists", async () => {
       for (const jobs of [

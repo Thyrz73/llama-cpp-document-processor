@@ -154,6 +154,11 @@ export function createBrowserHarness(context, { template, translations }) {
       }
       // Replace children and count simulated DOM rebuilds.
       replaceChildren(...children) {
+        if (
+          document.activeElement !== this &&
+          this.contains(document.activeElement)
+        )
+          document.activeElement = document.documentElement;
         for (const child of this.children) child.parentElement = null;
         this.children = [];
         this.append(...children);
@@ -177,15 +182,47 @@ export function createBrowserHarness(context, { template, translations }) {
       addEventListener(type, fn) {
         (this.handlers[type] ??= []).push(fn);
       }
-      // Recursively find Live-channel buttons among the children.
       querySelectorAll(selector) {
+        const nodes = descendants(this);
+        if (selector.startsWith("."))
+          return nodes.filter((node) =>
+            node.className?.split(" ").includes(selector.slice(1)),
+          );
+        if (!selector.startsWith("[data-"))
+          throw Error("Unsupported selector " + selector);
         const key = selector
           .slice(6, -1)
           .replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
-        return this.children.flatMap((c) => [
-          ...(c.dataset[key] !== undefined ? [c] : []),
-          ...c.querySelectorAll(selector),
-        ]);
+        return nodes.filter((node) => node.dataset[key] !== undefined);
+      }
+      querySelector(selector) {
+        return this.querySelectorAll(selector)[0] || null;
+      }
+      contains(node) {
+        return (
+          this === node || this.children.some((child) => child.contains(node))
+        );
+      }
+      insertBefore(child, reference) {
+        if (reference != null && !this.children.includes(reference))
+          throw Error("Reference is not a child");
+        if (child === reference) return child;
+        child.remove();
+        const index =
+          reference == null
+            ? this.children.length
+            : this.children.indexOf(reference);
+        child.parentElement = this;
+        this.children.splice(index, 0, child);
+        return child;
+      }
+      remove() {
+        if (!this.parentElement) return;
+        if (this.contains(document.activeElement))
+          document.activeElement = document.documentElement;
+        const siblings = this.parentElement.children;
+        siblings.splice(siblings.indexOf(this), 1);
+        this.parentElement = null;
       }
       get isConnected() {
         for (let node = this; node; node = node.parentElement)
@@ -377,6 +414,7 @@ export function createBrowserHarness(context, { template, translations }) {
       stop,
       resetState,
       refresh: jobs.refresh,
+      rerenderJobs: jobs.rerenderJobs,
       toggleLive: jobs.toggleLive,
       loadLive: live.loadLive,
       retry: jobs.retry,

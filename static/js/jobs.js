@@ -5,6 +5,7 @@ import { state, ACTIVE_STATUSES, TERMINAL_STATUSES } from "./state.js";
 import { t, errorText } from "./i18n.js";
 import { jsonFetch } from "./api.js";
 import { jobCard } from "./card.js";
+import { invalidateMetrics, retainMetrics } from "./metrics.js";
 import { invalidateLivePreview, syncLivePolling } from "./live.js";
 import {
   closeDeleteDialog,
@@ -90,8 +91,8 @@ export function refresh(afterChange = false) {
 }
 
 // Rebuild the cards when the jobs, the open live panel or the deletion state
-// changed. The open live panel is moved into the new card instead of being
-// rebuilt, so its text, tab and scroll position are kept.
+// changed. Live output and metrics for unchanged job observations move into
+// the new cards, retaining panel identity, visibility and pending requests.
 export function renderJobs() {
   const eligible = new Set(
     state.jobs
@@ -114,6 +115,11 @@ export function renderJobs() {
   const live = state.expandedId ? $("live-" + state.expandedId) : null,
     host = $("jobs");
   const priorScroll = live ? $("live-content")?.scrollTop : null;
+  const metrics = new Map();
+  for (const job of state.jobs) {
+    const panel = retainMetrics(job);
+    if (panel) metrics.set(job.id, panel);
+  }
   host.replaceChildren();
   state.renderedSignature = signature;
   const groups = {};
@@ -144,7 +150,7 @@ export function renderJobs() {
   }
   for (const job of state.jobs)
     groups[ACTIVE_STATUSES.has(job.status) ? "active" : "history"].append(
-      jobCard(job, CARD_HANDLERS, live),
+      jobCard(job, CARD_HANDLERS, live, metrics.get(job.id)),
     );
   // Browsers may reset scrollTop when a kept node is detached and reattached.
   if (priorScroll != null && $("live-content"))
@@ -157,16 +163,23 @@ export function renderJobs() {
 // Give the keyboard focus back to the control that had it before a rebuild,
 // so progress updates do not interrupt a selection in the history.
 function restoreFocus(focused, host) {
+  if (focused?.isConnected && host.contains(focused)) {
+    focusHistoryControl(focused);
+    return;
+  }
   const selector = focused?.dataset?.selectJob
     ? "[data-select-job]"
     : focused?.dataset?.deleteJob
       ? "[data-delete-job]"
-      : null;
+      : focused?.dataset?.metricsJob
+        ? "[data-metrics-job]"
+        : null;
   if (selector) {
     const replacement = [...host.querySelectorAll(selector)].find(
       (node) =>
         node.dataset.selectJob === focused.dataset.selectJob &&
-        node.dataset.deleteJob === focused.dataset.deleteJob,
+        node.dataset.deleteJob === focused.dataset.deleteJob &&
+        node.dataset.metricsJob === focused.dataset.metricsJob,
     );
     focusHistoryControl(replacement);
   } else if (
@@ -235,6 +248,7 @@ export async function retry(id) {
     const d = await r.json();
     if (!r.ok) throw Error(errorText(d, "Retry failed"));
     invalidateLivePreview(id);
+    invalidateMetrics(id);
     await refresh(true);
   } catch (err) {
     showJobsNotice({ error: err.message });
@@ -316,6 +330,7 @@ export async function submitDeletion() {
     };
     state.jobs = state.jobs.filter((job) => !removed.has(job.id));
     for (const id of removed) {
+      invalidateMetrics(id);
       state.selectedJobs.delete(id);
       state.promptExpanded.delete(id);
     }

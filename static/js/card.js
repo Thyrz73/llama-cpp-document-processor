@@ -12,7 +12,7 @@ const SVG = "http://www.w3.org/2000/svg";
 // handlers.retry, handlers.cancel and handlers.toggleLive come from jobs.js:
 // they update the list, and jobs.js imports this module. live is the open
 // live panel, reused so that its text and scroll position survive a refresh.
-export function jobCard(job, handlers, live) {
+export function jobCard(job, handlers, live, metrics) {
   const item = el("article", undefined, "item");
   item.dataset.jobId = job.id;
   item.append(cardHeader(job));
@@ -50,12 +50,13 @@ export function jobCard(job, handlers, live) {
   } else if (job.status === "done") {
     item.append(el("div", t("Report unavailable"), "meta"));
   }
-  item.append(actionButtons(job, handlers, item));
+  item.append(actionButtons(job, handlers, item, metrics));
   // The saved request is the only prompt a user can write; server prompts stay
   // private. The server sets question_custom to 0 for default instructions,
   // older jobs included.
   if (job.question && job.question_custom !== 0) item.append(savedRequest(job));
   if (state.expandedId === job.id) item.append(live || createLive(job.id));
+  if (metrics) item.append(metrics);
   if (reportActions.children.length) item.append(reportActions);
   return item;
 }
@@ -154,7 +155,7 @@ function reportLinks(job) {
 }
 
 // Retry, cancel, metrics and live output buttons.
-function actionButtons(job, handlers, item) {
+function actionButtons(job, handlers, item, metrics) {
   const actions = el("div", undefined, "actions");
   if (["failed", "cancelled"].includes(job.status)) {
     const retry = el("button", t("Retry"), "button-secondary");
@@ -184,6 +185,9 @@ function actionButtons(job, handlers, item) {
   }
   const stats = el("button", t("Metrics"), "button-secondary");
   stats.type = "button";
+  stats.dataset.metricsJob = job.id;
+  stats.setAttribute("aria-controls", "metrics-" + job.id);
+  stats.setAttribute("aria-expanded", String(!!metrics && !metrics.hidden));
   stats.addEventListener("click", () => showMetrics(job.id, item));
   actions.append(stats);
   const open = state.expandedId === job.id;
