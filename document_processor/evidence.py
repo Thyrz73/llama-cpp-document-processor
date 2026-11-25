@@ -338,11 +338,14 @@ def evidence_block(evidence, pages, limit=EVIDENCE_PROMPT_CHARS):
     )
 
 
-def combined(notes, evidence, evidence_limit=EVIDENCE_PROMPT_CHARS):
+def combined(
+    notes, evidence, evidence_limit=EVIDENCE_PROMPT_CHARS, *, selected_evidence=None
+):
     """Join notes into one prompt input, followed by the source evidence of their pages.
 
     Each note is headed by its PDF pages. The evidence takes at most
-    evidence_limit characters; 0 leaves it out.
+    evidence_limit characters; 0 leaves it out. selected_evidence lets fitting
+    reuse the block already selected for this candidate, including an empty one.
     """
     text = "\n\n".join(
         f"## Notes {i + 1} | PDF pages: {','.join(map(str, item['pages']))}\n{item['text']}"
@@ -354,13 +357,15 @@ def combined(notes, evidence, evidence_limit=EVIDENCE_PROMPT_CHARS):
         )
         for i, item in enumerate(notes)
     )
-    pages = {p for item in notes for p in item["pages"]}
     if evidence_limit == 0:
         return (
             text
             + "\nSource evidence omitted from this prompt (context budget); full provenance retained locally."
         )
-    return text + evidence_block(evidence, pages, evidence_limit)
+    if selected_evidence is None:
+        pages = {p for item in notes for p in item["pages"]}
+        selected_evidence = evidence_block(evidence, pages, evidence_limit)
+    return text + selected_evidence
 
 
 def prepare_input(notes, evidence, fits):
@@ -370,10 +375,11 @@ def prepare_input(notes, evidence, fits):
     falls back to another merge level. The evidence kept on disk is never
     trimmed.
     """
-    text = combined(notes, evidence)
+    block = evidence_block(evidence, {p for item in notes for p in item["pages"]})
+    text = combined(notes, evidence, selected_evidence=block)
     if fits(text):
         return text, True, EVIDENCE_PROMPT_CHARS
-    if evidence_block(evidence, {p for item in notes for p in item["pages"]}):
+    if block:
         compact = combined(notes, evidence, 0)
         if fits(compact):
             return compact, True, 0

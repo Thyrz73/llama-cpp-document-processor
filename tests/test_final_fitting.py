@@ -216,10 +216,11 @@ class FinalFittingTests(unittest.TestCase):
                             model=run.model,
                             seen=final_builds,
                             combine=combined,
+                            **kwargs,
                         ):
                             if model.current_stage == "final":
                                 seen.append(len(items))
-                            return combine(items, source, *args)
+                            return combine(items, source, *args, **kwargs)
 
                         with patch.object(evidence, "combined", observe):
                             result = run._merge_until_final_fits(notes, "final")
