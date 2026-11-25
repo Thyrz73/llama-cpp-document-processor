@@ -297,6 +297,236 @@ class ApplicationTests(unittest.TestCase):
         )
         worker.start.assert_not_called()
 
+    def retry_state(self, services, identifier):
+        """Compare every persisted table and job file, including existing attempts."""
+        with services.store.connect() as connection:
+            database = tuple(connection.iterdump())
+        directory = services.store.job_dir(identifier)
+        return database, {
+            str(path.relative_to(directory)): path.read_bytes()
+            for path in directory.rglob("*")
+            if path.is_file()
+        }
+
+    def test_retry_rejects_all_body_formats_before_mutating_state(self):
+        worker = Mock(spec=Worker)
+        client, services = self.ready(worker=worker)
+        bodies = (
+            (
+                "file-only",
+                lambda: {"data": {"file": (io.BytesIO(b"PRIVATE_BODY"), "change.pdf")}},
+            ),
+            ("empty-file", lambda: {"data": {"file": (io.BytesIO(b""), "empty.pdf")}}),
+            (
+                "mixed",
+                lambda: {
+                    "data": {
+                        "options": "{}",
+                        "file": (io.BytesIO(b"PRIVATE_BODY"), "change.pdf"),
+                    }
+                },
+            ),
+            ("json", lambda: {"json": {"profile": "low"}}),
+            ("empty-json-object", lambda: {"json": {}}),
+            ("form", lambda: {"data": {"profile": "low"}}),
+            ("empty-form-value", lambda: {"data": {"profile": ""}}),
+            ("text", lambda: {"data": "PRIVATE_BODY", "content_type": "text/plain"}),
+            (
+                "binary",
+                lambda: {"data": b"\x00", "content_type": "application/octet-stream"},
+            ),
+            (
+                "empty-multipart-envelope",
+                lambda: {
+                    "data": b"--test--\r\n",
+                    "content_type": "multipart/form-data; boundary=test",
+                },
+            ),
+            (
+                "malformed-multipart",
+                lambda: {
+                    "data": b"PRIVATE_BODY",
+                    "content_type": "multipart/form-data; boundary=test",
+                },
+            ),
+            (
+                "empty-form-pairs",
+                lambda: {
+                    "data": b"&&",
+                    "content_type": "application/x-www-form-urlencoded",
+                },
+            ),
+        )
+        for status in ("failed", "cancelled"):
+            for name, body in bodies:
+                with self.subTest(status=status, body=name):
+                    identifier = self.upload(client).json["id"]
+                    job = services.store.get_job(identifier)
+                    recorder = services.store.start_attempt(
+                        identifier, job["created_at"]
+                    )
+                    recorder.end(recorder.start("section", "saved.md"), "done")
+                    recorder.finish(status)
+                    services.store.update_job(identifier, status=status)
+                    before = self.retry_state(services, identifier)
+                    worker.reset_mock()
+                    with patch.object(
+                        services.store, "requeue", wraps=services.store.requeue
+                    ) as requeue:
+                        response = client.post(
+                            f"/api/jobs/{identifier}/retry", **body()
+                        )
+                    self.assertEqual(response.status_code, 400, response.json)
+                    self.assertEqual(response.json["error_code"], "immutable_config")
+                    requeue.assert_not_called()
+                    worker.wake.assert_not_called()
+                    self.assertEqual(self.retry_state(services, identifier), before)
+                    self.assertEqual(services.store.attempt_count(identifier), 1)
+                    self.assertEqual(
+                        services.store.get_job(identifier)["status"], status
+                    )
+
+    def test_empty_retry_bodies_preserve_success_and_saved_configuration(self):
+        worker = Mock(spec=Worker)
+        client, services = self.ready(worker=worker)
+        for status in ("failed", "cancelled"):
+            for content_type in (
+                None,
+                "application/json",
+                "text/plain",
+                "application/x-www-form-urlencoded",
+                "multipart/form-data; boundary=test",
+            ):
+                with self.subTest(status=status, content_type=content_type):
+                    identifier = self.upload(client).json["id"]
+                    services.store.update_job(identifier, status=status)
+                    snapshot = services.store.load_config(identifier)
+                    worker.reset_mock()
+                    options = (
+                        {}
+                        if content_type is None
+                        else {
+                            "input_stream": io.BytesIO(b""),
+                            "content_type": content_type,
+                        }
+                    )
+                    response = client.post(f"/api/jobs/{identifier}/retry", **options)
+                    self.assertEqual(
+                        (response.status_code, response.json),
+                        (200, {"status": "queued", "warnings": []}),
+                    )
+                    self.assertEqual(
+                        services.store.get_job(identifier)["status"], "queued"
+                    )
+                    self.assertEqual(services.store.load_config(identifier), snapshot)
+                    self.assertEqual(services.store.attempt_count(identifier), 0)
+                    worker.wake.assert_called_once_with()
+
+    def test_retry_stream_probe_is_bounded_for_known_and_server_terminated_bodies(self):
+        worker = Mock(spec=Worker)
+        client, services = self.ready(worker=worker)
+        identifier = self.upload(client).json["id"]
+        services.store.update_job(identifier, status="failed")
+        before = self.retry_state(services, identifier)
+        worker.reset_mock()
+        for terminated in (False, True):
+            with self.subTest(terminated=terminated):
+                raw = Mock(wraps=io.BytesIO(b"PRIVATE_BODY" * 1000), spec=["read"])
+                environ = {"wsgi.input": raw, "CONTENT_LENGTH": "12000"}
+                if terminated:
+                    environ.update(
+                        CONTENT_LENGTH="",
+                        **{
+                            "wsgi.input_terminated": True,
+                            "HTTP_TRANSFER_ENCODING": "chunked",
+                        },
+                    )
+                response = client.post(
+                    f"/api/jobs/{identifier}/retry",
+                    content_type="multipart/form-data; boundary=test",
+                    environ_overrides=environ,
+                )
+                self.assertEqual(
+                    (response.status_code, response.json["error_code"]),
+                    (400, "immutable_config"),
+                )
+                raw.read.assert_called_once_with(1)
+                self.assertEqual(self.retry_state(services, identifier), before)
+        worker.wake.assert_not_called()
+
+    def test_empty_retry_conflicts_limits_and_unknown_job_contracts_are_unchanged(self):
+        worker = Mock(spec=Worker)
+        client, services = self.ready(worker=worker)
+        for status in ("queued", "running", "done"):
+            with self.subTest(status=status):
+                identifier = self.upload(client).json["id"]
+                services.store.update_job(identifier, status=status)
+                before = self.retry_state(services, identifier)
+                worker.reset_mock()
+                response = client.post(f"/api/jobs/{identifier}/retry")
+                self.assertEqual(
+                    (response.status_code, response.json["error_code"]),
+                    (409, "retry_conflict"),
+                )
+                self.assertEqual(self.retry_state(services, identifier), before)
+                worker.wake.assert_not_called()
+        identifier = self.upload(client).json["id"]
+        for _ in range(services.store.load_config(identifier)["max_attempts"]):
+            services.store.start_attempt(
+                identifier, services.store.get_job(identifier)["created_at"]
+            ).finish("failed")
+        services.store.update_job(identifier, status="failed")
+        before = self.retry_state(services, identifier)
+        worker.reset_mock()
+        response = client.post(f"/api/jobs/{identifier}/retry")
+        self.assertEqual(
+            (response.status_code, response.json["error_code"]), (409, "retry_limit")
+        )
+        self.assertEqual(self.retry_state(services, identifier), before)
+        for options in (
+            {},
+            {"data": {"file": (io.BytesIO(b"PRIVATE_BODY"), "change.pdf")}},
+        ):
+            response = client.post(f"/api/jobs/{'f' * 32}/retry", **options)
+            self.assertEqual(
+                (response.status_code, response.json["error_code"]), (404, "http_404")
+            )
+        worker.wake.assert_not_called()
+
+    def test_retry_preserves_upload_limit_and_accepts_empty_server_terminated_stream(
+        self,
+    ):
+        worker = Mock(spec=Worker)
+        client, services = self.ready(worker=worker)
+        identifier = self.upload(client).json["id"]
+        services.store.update_job(identifier, status="failed")
+        before = self.retry_state(services, identifier)
+        worker.reset_mock()
+        response = client.post(
+            f"/api/jobs/{identifier}/retry",
+            environ_overrides={
+                "CONTENT_LENGTH": str(self.settings.max_content_length + 1),
+                "wsgi.input": io.BytesIO(b"x"),
+            },
+        )
+        self.assertEqual(
+            (response.status_code, response.json["error_code"]), (413, "upload_limit")
+        )
+        self.assertEqual(self.retry_state(services, identifier), before)
+        worker.wake.assert_not_called()
+        response = client.post(
+            f"/api/jobs/{identifier}/retry",
+            environ_overrides={
+                "CONTENT_LENGTH": "",
+                "wsgi.input_terminated": True,
+                "wsgi.input": io.BytesIO(b""),
+            },
+        )
+        self.assertEqual(
+            (response.status_code, response.json["status"]), (200, "queued")
+        )
+        worker.wake.assert_called_once_with()
+
     def test_upload_limit_covers_the_pdf_and_the_multipart_envelope(self):
         settings = replace(self.settings, max_upload_mb=1)
         client, services = self.ready(settings=settings)

@@ -292,7 +292,9 @@ def retry_job(job_id):
     services = get_services()
     if not services.store.get_job(job_id):
         abort(404)
-    if request.data or request.form:
+    # request.data parses forms and hides file-only multipart bodies. Probe the
+    # unparsed, size-limited stream without buffering or parsing an upload.
+    if request.stream.read(1):
         return jsonify(
             error="Retry uses the original snapshot. Create a new job to change options.",
             error_code="immutable_config",
