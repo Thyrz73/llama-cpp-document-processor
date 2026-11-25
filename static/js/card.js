@@ -7,14 +7,28 @@ import { createLive } from "./live.js";
 import { showMetrics } from "./metrics.js";
 
 const SVG = "http://www.w3.org/2000/svg";
+const RENDER_KEY = Symbol("card render key");
 
 // Build the card of job.
 // handlers.retry, handlers.cancel and handlers.toggleLive come from jobs.js:
 // they update the list, and jobs.js imports this module. live is the open
 // live panel, reused so that its text and scroll position survive a refresh.
-export function jobCard(job, handlers, live, metrics) {
+export function jobCard(job, handlers, live, metrics, previous) {
+  // Panels and native request expansion keep their state on the owned nodes;
+  // selection checks/classes are refreshed by updateSelection() after rendering.
+  const key = JSON.stringify([
+    job,
+    state.uiGeneration,
+    state.language,
+    state.expandedId === job.id,
+    state.deleting,
+    state.selectionMode,
+    state.cancellingJobs.has(job.id),
+  ]);
+  if (previous?.[RENDER_KEY] === key) return previous;
   const item = el("article", undefined, "item");
   item.dataset.jobId = job.id;
+  item[RENDER_KEY] = key;
   item.append(cardHeader(job));
   item.append(el("div", phaseLabel(job), "meta"));
   if (job.configuration)

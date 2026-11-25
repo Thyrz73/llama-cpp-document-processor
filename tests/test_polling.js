@@ -597,7 +597,6 @@ describe("Browser interface", { concurrency: false }, () => {
       const output = await loaded(browser);
       const children = [...output.children];
       const oldCard = card(browser, a().id);
-      const oldButton = button(browser, a().id);
       const requests = browser.requests.length;
       await browser.tick(6000);
       await browser.respond(requests, {
@@ -605,19 +604,12 @@ describe("Browser interface", { concurrency: false }, () => {
       });
       assert.equal(panel(browser, a().id), output);
       assert.deepEqual(output.children, children);
-      assert.notEqual(
+      assert.equal(
         card(browser, a().id),
         oldCard,
-        "Only panel ownership is repaired, cards still rebuild",
+        "Unchanged cards now retain identity",
       );
-      const beforeDetachedClick = browser.requests.length;
-      await oldButton.handlers.click[0]();
-      assert.equal(browser.requests.length, beforeDetachedClick);
-      assert.equal(
-        !!output.hidden,
-        false,
-        "Detached controls cannot toggle the current panel",
-      );
+      assert.equal(!!output.hidden, false);
       assert.equal(button(browser, a().id).handlers.click.length, 1);
       await button(browser, a().id).handlers.click[0]();
       assert.equal(output.hidden, true);
@@ -686,7 +678,15 @@ describe("Browser interface", { concurrency: false }, () => {
       ]) {
         const browser = await ready();
         const old = open(browser);
+        const oldButton = button(browser, a().id);
         await refresh(browser, [{ ...a(), ...change }, b()]);
+        const beforeDetachedClick = browser.requests.length;
+        await oldButton.handlers.click[0]();
+        assert.equal(
+          browser.requests.length,
+          beforeDetachedClick,
+          "Detached controls cannot request new metrics",
+        );
         assert.equal(panel(browser, a().id), null);
         assert.equal(old.output.isConnected, false);
         assert.equal(
@@ -892,6 +892,358 @@ describe("Browser interface", { concurrency: false }, () => {
         browser.document.activeElement,
         card(browser, a().id).querySelector("[data-delete-job]"),
       );
+    });
+  });
+
+  describe("Selective job-card rendering", () => {
+    const cards = (browser) =>
+      descendants(browser.elements.jobs).filter(
+        (node) => node.tag === "article",
+      );
+    const card = (browser, id) =>
+      cards(browser).find((node) => node.dataset.jobId === id);
+    const text = (node) =>
+      [
+        node.textContent,
+        ...descendants(node).map((child) => child.textContent),
+      ].join("\n");
+    const a = () => job("done", 100);
+    const b = () => job("running", 50, "b".repeat(32));
+    async function ready(jobs, withSettings = false) {
+      const browser = createBrowser({ withSettings });
+      await browser.respond(0, { jobs });
+      if (withSettings) {
+        await browser.respond(1, { thinking_supported: false });
+        await browser.respond(2, {
+          configuration: {
+            chunk_tokens: 3000,
+            analysis_tokens: 3072,
+            merge_tokens: 2048,
+            final_tokens: 3072,
+            context_tokens: 16384,
+            warnings: [],
+            thinking_section: "inherit",
+            thinking_merge: "inherit",
+            thinking_final: "inherit",
+          },
+        });
+      }
+      return browser;
+    }
+    async function refresh(browser, jobs) {
+      const index = browser.requests.length;
+      const pending = browser.api.refresh();
+      await browser.respond(index, { jobs });
+      await pending;
+    }
+    // Capture visible text, attributes, styles and interactive properties, not
+    // renderer-private symbols or ephemeral scroll/focus bookkeeping.
+    function snapshot(node) {
+      return {
+        tag: node.tag,
+        text: node.textContent,
+        className: node.className || "",
+        attributes: { ...node.attributes },
+        dataset: { ...node.dataset },
+        style: { ...node.style },
+        hidden: !!node.hidden,
+        disabled: !!node.disabled,
+        checked: !!node.checked,
+        indeterminate: !!node.indeterminate,
+        open: !!node.open,
+        value: node.value || "",
+        href: node.href || "",
+        download: node.download || "",
+        title: node.title || "",
+        type: node.type || "",
+        children: node.children.map(snapshot),
+      };
+    }
+    function matchesFreshConstruction(browser) {
+      const selective = snapshot(browser.elements.jobs);
+      // With no old card nodes available, the unchanged card builder takes
+      // the original fresh-construction path. No production test flag is needed.
+      for (const node of cards(browser)) node.remove();
+      browser.api.rerenderJobs();
+      assert.deepEqual(snapshot(browser.elements.jobs), selective);
+    }
+
+    test("one update in 100 jobs creates one card and matches fresh DOM construction", async () => {
+      const jobs = Array.from({ length: 100 }, (_, index) =>
+        job(
+          index === 99 ? "running" : "done",
+          index === 99 ? 50 : 100,
+          index.toString(16).padStart(32, "0"),
+        ),
+      );
+      const browser = await ready(jobs);
+      const before = cards(browser);
+      const create = browser.document.createElement;
+      let html = 0,
+        createdCards = 0;
+      browser.document.createElement = (tag) => {
+        html++;
+        if (tag === "article") createdCards++;
+        return create(tag);
+      };
+      const next = jobs.map((value, index) =>
+        index === 99 ? { ...value, progress_percent: 51 } : value,
+      );
+      await refresh(browser, next);
+      assert.equal(createdCards, 1);
+      assert.ok(
+        html < 100,
+        `Expected far fewer than the measured 2013 baseline elements, got ${html}`,
+      );
+      assert.equal(
+        before.filter((node) => cards(browser).includes(node)).length,
+        99,
+      );
+      assert.ok(text(card(browser, next[99].id)).includes("51%"));
+      matchesFreshConstruction(browser);
+    });
+
+    test("status transitions, server order and removals update the right group and card", async () => {
+      const c = job("failed", 20, "c".repeat(32));
+      const d = job("queued", 0, "d".repeat(32));
+      const browser = await ready([b(), a(), c, d]);
+      const before = new Map(
+        cards(browser).map((node) => [node.dataset.jobId, node]),
+      );
+      const next = [
+        { ...c, status: "queued" },
+        a(),
+        { ...b(), status: "done" },
+        d,
+      ];
+      await refresh(browser, next);
+      assert.deepEqual(
+        cards(browser).map((node) => node.dataset.jobId),
+        [c.id, d.id, a().id, b().id],
+      );
+      assert.equal(card(browser, a().id), before.get(a().id));
+      assert.equal(card(browser, d.id), before.get(d.id));
+      assert.notEqual(card(browser, b().id), before.get(b().id));
+      assert.notEqual(card(browser, c.id), before.get(c.id));
+      assert.equal(
+        card(browser, b().id).querySelectorAll(".report-actions").length,
+        1,
+      );
+      assert.ok(!text(card(browser, c.id)).includes("Retry"));
+      const retained = card(browser, a().id);
+      await refresh(browser, [a()]);
+      assert.equal(card(browser, a().id), retained);
+      assert.equal(card(browser, c.id), undefined);
+      assert.equal(before.get(c.id).isConnected, false);
+      matchesFreshConstruction(browser);
+    });
+
+    test("rendered field changes replace stale controls and equal the fresh renderer", async () => {
+      for (const change of [
+        { filename: "new.pdf" },
+        { stage: "New stage" },
+        { pages: 12, done_chunks: 8, total_chunks: 10 },
+        { error: "new failure", error_code: "analysis_failed" },
+        { question: "Updated custom request", question_custom: 1 },
+        { report_name: "new-report.md" },
+        { report_available: false },
+        { configuration: { profile: "high", customized: true } },
+      ]) {
+        const browser = await ready([a(), b()]);
+        const old = card(browser, a().id);
+        const unchanged = card(browser, b().id);
+        await refresh(browser, [{ ...a(), ...change }, b()]);
+        assert.notEqual(card(browser, a().id), old);
+        assert.equal(old.isConnected, false);
+        assert.equal(card(browser, b().id), unchanged);
+        matchesFreshConstruction(browser);
+      }
+    });
+
+    test("selection, request expansion, focus and theme survive polls while language refreshes text", async () => {
+      const first = {
+        ...a(),
+        question: "Keep this request.",
+        question_custom: 1,
+      };
+      const browser = await ready([first, b()], true);
+      toggleSelection(browser);
+      const row = card(browser, first.id);
+      const check = row.querySelector("[data-select-job]");
+      setSelected(check);
+      assert.equal(row.classList.contains("item-selected"), true);
+      const details = row.querySelector(".custom-prompt");
+      details.open = true;
+      details.handlers.toggle[0]();
+      const pre = details.children[1];
+      pre.scrollTop = 21;
+      check.focus();
+      browser.elements.theme.value = "dark";
+      browser.elements.theme.handlers.change[0]();
+      assert.equal(card(browser, first.id), row);
+      await refresh(browser, [first, { ...b(), progress_percent: 51 }]);
+      assert.equal(card(browser, first.id), row);
+      assert.equal(browser.document.activeElement, check);
+      assert.equal(check.checked, true);
+      assert.equal(row.classList.contains("item-selected"), true);
+      assert.equal(details.open, true);
+      assert.equal(pre.scrollTop, 21);
+      assert.equal(row.querySelector("[data-delete-job]").hidden, true);
+      browser.elements.uiLanguage.value = "fr";
+      browser.elements.uiLanguage.handlers.change[0]();
+      const translated = card(browser, first.id);
+      assert.notEqual(translated, row);
+      assert.equal(translated.querySelector(".custom-prompt").open, true);
+      assert.equal(translated.querySelector("[data-select-job]").checked, true);
+      assert.ok(
+        text(translated).includes(
+          translations.fr["Custom analysis instructions"],
+        ),
+      );
+      assert.equal(
+        translated.querySelector(".report-actions").children[0].href,
+        `/api/jobs/${first.id}/report/view?lang=fr`,
+      );
+      assert.equal(browser.document.documentElement.dataset.theme, "dark");
+      matchesFreshConstruction(browser);
+    });
+
+    test("pending cancellation refreshes only affected controls without duplicate handlers", async () => {
+      const browser = await ready([a(), b()]);
+      const historical = card(browser, a().id);
+      const oldActive = card(browser, b().id);
+      const index = browser.requests.length;
+      const pending = browser.api.cancelJob(b().id);
+      const changed = card(browser, b().id);
+      assert.notEqual(changed, oldActive);
+      assert.equal(card(browser, a().id), historical);
+      const cancel = descendants(changed).find(
+        (node) =>
+          node.tag === "button" &&
+          node.textContent === "Requesting cancellation…",
+      );
+      assert.equal(cancel.disabled, true);
+      assert.equal(cancel.handlers.click.length, 1);
+      await browser.api.cancelJob(b().id);
+      assert.equal(browser.requests.length, index + 1);
+      await browser.respond(index, {
+        status: "running",
+        cancel_requested: true,
+      });
+      await browser.respond(index + 1, {
+        jobs: [a(), { ...b(), cancel_requested: true }],
+      });
+      await pending;
+      assert.equal(card(browser, a().id), historical);
+      assert.ok(text(card(browser, b().id)).includes("Cancellation requested"));
+      matchesFreshConstruction(browser);
+    });
+
+    test("deletion state refreshes disabled actions and removes only confirmed jobs", async () => {
+      const second = job("failed", 20, "c".repeat(32));
+      const browser = await ready([a(), second]);
+      const before = card(browser, second.id);
+      browser.api.confirmDeletion(
+        [a().id],
+        false,
+        card(browser, a().id).querySelector("[data-delete-job]"),
+      );
+      const index = browser.requests.length;
+      const pending = browser.api.submitDeletion();
+      const disabled = card(browser, second.id);
+      assert.notEqual(disabled, before);
+      assert.equal(disabled.querySelector("[data-delete-job]").disabled, true);
+      await browser.respond(index, {
+        id: a().id,
+        deleted: true,
+        warning_code: null,
+      });
+      assert.equal(card(browser, a().id), undefined);
+      await browser.respond(index + 1, { jobs: [second] });
+      await pending;
+      assert.equal(
+        card(browser, second.id).querySelector("[data-delete-job]").disabled,
+        false,
+      );
+      assert.equal(browser.elements.deleteDialog.open, false);
+      matchesFreshConstruction(browser);
+    });
+
+    test("retained cards coexist with live and metrics panels during progress and dialog updates", async () => {
+      const browser = await ready([a(), b()]);
+      const historical = card(browser, a().id);
+      const stats = historical.querySelector("[data-metrics-job]");
+      const metricsIndex = browser.requests.length;
+      const metricsPending = stats.handlers.click[0]();
+      const liveIndex = browser.requests.length;
+      browser.api.toggleLive(b().id);
+      await browser.respond(liveIndex, {
+        enabled: true,
+        content: "live text",
+        active: true,
+      });
+      const output = browser.document.getElementById("metrics-" + a().id);
+      const live = browser.document.getElementById("live-" + b().id);
+      const liveText = browser.document.getElementById("live-content");
+      liveText.scrollTop = 77;
+      stats.focus();
+      await refresh(browser, [a(), { ...b(), progress_percent: 51 }]);
+      assert.equal(card(browser, a().id), historical);
+      assert.equal(browser.document.activeElement, stats);
+      assert.equal(
+        browser.document.getElementById("metrics-" + a().id),
+        output,
+      );
+      assert.equal(browser.document.getElementById("live-" + b().id), live);
+      assert.equal(liveText.scrollTop, 77);
+      await browser.respond(metricsIndex, { runs: [], steps: [] });
+      await metricsPending;
+      browser.api.confirmDeletion(
+        [a().id],
+        false,
+        historical.querySelector("[data-delete-job]"),
+      );
+      await refresh(browser, [a(), { ...b(), progress_percent: 52 }]);
+      assert.equal(card(browser, a().id), historical);
+      assert.equal(
+        browser.document.activeElement,
+        browser.elements.deleteCancel,
+      );
+      browser.api.closeDeleteDialog();
+      assert.equal(
+        browser.document.activeElement,
+        historical.querySelector("[data-delete-job]"),
+      );
+      assert.equal(
+        browser.requests.filter((request) => request.url.endsWith("/metrics"))
+          .length,
+        1,
+      );
+    });
+
+    test("failed and stale list responses preserve current cards and recover selective updates", async () => {
+      const browser = await ready([a(), b()]);
+      const first = card(browser, a().id),
+        second = card(browser, b().id);
+      let index = browser.requests.length;
+      let pending = browser.api.refresh();
+      await browser.reject(index, Error("Offline"));
+      await pending;
+      assert.equal(card(browser, a().id), first);
+      assert.equal(card(browser, b().id), second);
+      await refresh(browser, [a(), { ...b(), progress_percent: 51 }]);
+      assert.equal(card(browser, a().id), first);
+      assert.notEqual(card(browser, b().id), second);
+      assert.equal(browser.elements.jobsError.hidden, true);
+      index = browser.requests.length;
+      pending = browser.api.refresh();
+      const current = await ready([{ ...a(), filename: "current page.pdf" }]);
+      const latest = card(current, a().id);
+      await browser.respond(index, { jobs: [a(), b()] });
+      await pending;
+      assert.equal(card(current, a().id), latest);
+      assert.ok(text(latest).includes("current page.pdf"));
+      matchesFreshConstruction(current);
     });
   });
 

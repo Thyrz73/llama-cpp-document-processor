@@ -136,7 +136,25 @@ export function createBrowserHarness(context, { template, translations }) {
         this.scrollTop = 0;
         this.scrollHeight = 200;
         this.clientHeight = 100;
-        this.classList = { add() {}, remove() {}, toggle() {} };
+        const classes = () =>
+          new Set((this.className || "").split(/\s+/).filter(Boolean));
+        this.classList = {
+          add: (...names) => {
+            this.className = [...new Set([...classes(), ...names])].join(" ");
+          },
+          remove: (...names) => {
+            this.className = [...classes()]
+              .filter((name) => !names.includes(name))
+              .join(" ");
+          },
+          contains: (name) => classes().has(name),
+          toggle: (name, force) => {
+            const enabled = force ?? !classes().has(name);
+            if (enabled) this.classList.add(name);
+            else this.classList.remove(name);
+            return enabled;
+          },
+        };
         this.replacements = 0;
         this.value = "";
         this.options = [];

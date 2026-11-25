@@ -90,9 +90,8 @@ export function refresh(afterChange = false) {
   return state.jobsRequest;
 }
 
-// Rebuild the cards when the jobs, the open live panel or the deletion state
-// changed. Live output and metrics for unchanged job observations move into
-// the new cards, retaining panel identity, visibility and pending requests.
+// Rebuild group controls and retain cards whose job/render state is unchanged.
+// Changed cards still preserve eligible live and metrics panel ownership.
 export function renderJobs() {
   const eligible = new Set(
     state.jobs
@@ -115,6 +114,12 @@ export function renderJobs() {
   const live = state.expandedId ? $("live-" + state.expandedId) : null,
     host = $("jobs");
   const priorScroll = live ? $("live-content")?.scrollTop : null;
+  const cards = new Map(
+    [...host.querySelectorAll("[data-job-id]")].map((card) => [
+      card.dataset.jobId,
+      card,
+    ]),
+  );
   const metrics = new Map();
   for (const job of state.jobs) {
     const panel = retainMetrics(job);
@@ -150,7 +155,7 @@ export function renderJobs() {
   }
   for (const job of state.jobs)
     groups[ACTIVE_STATUSES.has(job.status) ? "active" : "history"].append(
-      jobCard(job, CARD_HANDLERS, live, metrics.get(job.id)),
+      jobCard(job, CARD_HANDLERS, live, metrics.get(job.id), cards.get(job.id)),
     );
   // Browsers may reset scrollTop when a kept node is detached and reattached.
   if (priorScroll != null && $("live-content"))
@@ -195,8 +200,8 @@ function restoreFocus(focused, host) {
   }
 }
 
-// Rebuild the cards even when the jobs did not change, for example after a
-// language change or while a cancellation request is pending.
+// Recheck card render state even when jobs did not change, for example after
+// a language change or while a cancellation request is pending.
 export function rerenderJobs() {
   state.renderedSignature = null;
   renderJobs();
