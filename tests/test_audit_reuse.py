@@ -16,7 +16,7 @@ os.environ.setdefault(
     str(Path(__file__).resolve().parents[1] / "config/system_prompt.example.txt"),
 )
 
-from document_processor import checks, pipeline
+from document_processor import artifacts, checks, files, pipeline
 from document_processor import reliability as r
 from document_processor.artifacts import Artifacts
 
@@ -193,6 +193,69 @@ class AuditReuseTests(unittest.TestCase):
 
 
 class PipelineAuditReuseTests(unittest.TestCase):
+    def test_compact_and_pretty_runs_preserve_reports_checks_and_interrupted_reuse(
+        self,
+    ):
+        fixture = fixtures.PipelineReliabilityTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        results = []
+        for compact_enabled in (False, True):
+            identifier = fixture.create()
+            first_call = len(fixtures.WordModel.calls)
+
+            def persist(path, data, *, compact=False, enabled=compact_enabled):
+                files.atomic_json(path, data, compact=compact and enabled)
+
+            with (
+                patch.object(artifacts, "atomic_json", new=persist),
+                patch.object(pipeline, "atomic_json", new=persist),
+                patch.object(fixtures.WordModel, "final_output", ANSWER),
+                patch.object(fixtures.WordModel, "fail_final", True),
+            ):
+                with self.assertRaises(fixtures.ModelError):
+                    fixture.run_job(identifier, 5)
+                self.assertEqual(len(fixtures.WordModel.calls) - first_call, 7)
+                fixtures.WordModel.fail_final = False
+                fixture.run_job(identifier, 5)
+                self.assertEqual(len(fixtures.WordModel.calls) - first_call, 8)
+                root, quality = fixture.load_checks(identifier)
+                saved = (root / "quality_checks.json").read_bytes()
+                manifest = json.loads((root / "manifest.json").read_bytes())
+                # Both representations include all published artifacts with the
+                # exact same content hashes. Evidence/chunks retain their bytes.
+                representation = (
+                    {"sort_keys": True, "separators": (",", ":"), "allow_nan": False}
+                    if compact_enabled
+                    else {"indent": 2}
+                )
+                for path, data in (
+                    (root / "manifest.json", manifest),
+                    (root / "quality_checks.json", quality),
+                ):
+                    self.assertEqual(
+                        path.read_bytes(),
+                        json.dumps(data, ensure_ascii=False, **representation).encode(),
+                    )
+                fixture.run_job(identifier, 5)
+                self.assertEqual(len(fixtures.WordModel.calls) - first_call, 8)
+                self.assertEqual((root / "quality_checks.json").read_bytes(), saved)
+                results.append(
+                    (
+                        quality,
+                        manifest,
+                        (root.parent.parent / "rapport_final.md").read_bytes(),
+                        (root / "source_evidence.json").read_bytes(),
+                        (root / "chunks.json").read_bytes(),
+                        fixtures.WordModel.calls[first_call:],
+                        [
+                            r.report_warnings(quality, language)
+                            for language in ("fr", "en")
+                        ],
+                    )
+                )
+        self.assertEqual(results[0], results[1])
+
     def test_generation_and_retry_have_one_audit_per_output_and_identical_quality_files(
         self,
     ):

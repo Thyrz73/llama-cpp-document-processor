@@ -31,9 +31,19 @@ def atomic_text(path, text):
         raise
 
 
-def atomic_json(path, data):
-    """Write data to path as UTF-8 JSON, atomically (see atomic_text)."""
-    atomic_text(path, json.dumps(data, ensure_ascii=False, indent=2))
+def atomic_json(path, data, *, compact=False):
+    """Write UTF-8 JSON atomically; opt in to compact, sorted, finite metadata."""
+    if compact:
+        text = json.dumps(
+            data,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+    else:
+        text = json.dumps(data, ensure_ascii=False, indent=2)
+    atomic_text(path, text)
 
 
 def file_hash(path):

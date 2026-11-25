@@ -862,5 +862,7 @@ class JobRun:
         if evidence_limit is not None:
             check["evidence_prompt_limit"] = evidence_limit
         self.quality["steps"][name] = check
-        atomic_json(self.artifacts.root / "quality_checks.json", self.quality)
+        atomic_json(
+            self.artifacts.root / "quality_checks.json", self.quality, compact=True
+        )
         return check

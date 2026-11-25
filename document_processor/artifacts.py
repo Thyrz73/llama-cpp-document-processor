@@ -71,7 +71,7 @@ class Artifacts:
                 "The model or template changed. Start a new analysis.",
             )
         self.manifest["identity"] = identity
-        atomic_json(self.path, self.manifest)
+        atomic_json(self.path, self.manifest, compact=True)
 
     def read(self, name, dependencies):
         """Return verified text, or None when there is no reusable completed artifact."""
@@ -96,4 +96,4 @@ class Artifacts:
             "sha256": file_hash(path),
             "complete": True,
         }
-        atomic_json(self.path, self.manifest)
+        atomic_json(self.path, self.manifest, compact=True)
