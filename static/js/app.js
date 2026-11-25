@@ -21,7 +21,7 @@ import { initSettings, renderConfig } from "./settings.js";
 export function start() {
   resetState();
   loadTranslations();
-  applyLanguage();
+  applyLanguage({ remember: false });
   initTheme();
   initUpload();
   $("refresh").addEventListener("click", refresh);

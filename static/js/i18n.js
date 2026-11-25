@@ -2,6 +2,7 @@
 // language, and the labels of job statuses and phases.
 import { $ } from "./dom.js";
 import { state } from "./state.js";
+import { getPreference, setPreference } from "./preferences.js";
 
 const LANGUAGE_KEY = "document-processor-language";
 const STATUS_LABELS = {
@@ -18,7 +19,7 @@ export const FILE_PROMPT = "📄 Drop a PDF or click to browse";
 export function loadTranslations() {
   const node = $("translations");
   state.catalog = node ? JSON.parse(node.textContent) : { en: {}, fr: {} };
-  const saved = localStorage.getItem(LANGUAGE_KEY) || "en";
+  const saved = getPreference(LANGUAGE_KEY) || "en";
   state.language = ["en", "fr"].includes(saved) ? saved : "en";
 }
 
@@ -52,9 +53,9 @@ export function phaseLabel(job) {
     : job.stage || job.phase || t("Waiting");
 }
 
-// Translate the page's static text and remember the language.
+// Translate static text; remember user changes, without writing startup fallbacks.
 // The user's request and the model output are never translated.
-export function applyLanguage() {
+export function applyLanguage({ remember = true } = {}) {
   const { catalog, language } = state;
   document.documentElement.lang = language;
   const question = $("question");
@@ -75,5 +76,5 @@ export function applyLanguage() {
     $("jobs").textContent = t("Loading…");
   if ($("languageFlag")) $("languageFlag").src = "/static/" + language + ".svg";
   document.title = t("Document Processor · Local PDF analysis");
-  localStorage.setItem(LANGUAGE_KEY, language);
+  if (remember) setPreference(LANGUAGE_KEY, language);
 }

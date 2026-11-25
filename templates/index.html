@@ -9,7 +9,18 @@
     <script>
       // Apply the remembered theme before rendering to avoid a color flash.
       (function () {
-        const preferred = localStorage.getItem("document-processor-theme");
+        let preferred = null;
+        try {
+          preferred = globalThis.localStorage?.getItem(
+            "document-processor-theme",
+          );
+        } catch (error) {
+          if (
+            !(error instanceof DOMException) ||
+            !["SecurityError", "QuotaExceededError"].includes(error.name)
+          )
+            throw error;
+        }
         document.documentElement.dataset.theme =
           preferred === "dark" ? "dark" : "light";
       })();

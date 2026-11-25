@@ -5,6 +5,7 @@ import { $, el } from "./dom.js";
 import { state } from "./state.js";
 import { t, errorText } from "./i18n.js";
 import { jsonFetch } from "./api.js";
+import { getPreference, setPreference } from "./preferences.js";
 
 const OVERRIDE_NAMES = [
   "chunk_tokens",
@@ -173,11 +174,11 @@ async function inspectBackend() {
 export function initSettings() {
   if (!$("profile")) return;
   for (const name of SAVED_CHOICES) {
-    const saved = localStorage.getItem("document-processor-" + name);
+    const saved = getPreference("document-processor-" + name);
     if (saved && [...$(name).options].some((option) => option.value === saved))
       $(name).value = saved;
     $(name).addEventListener("change", () => {
-      localStorage.setItem("document-processor-" + name, $(name).value);
+      setPreference("document-processor-" + name, $(name).value);
       schedulePreview();
     });
   }

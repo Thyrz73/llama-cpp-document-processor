@@ -2,6 +2,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { beforeEach, describe, test } from "node:test";
+import { getPreference, setPreference } from "../static/js/preferences.js";
 import {
   createBrowserHarness,
   descendants,
@@ -234,6 +235,287 @@ describe("Browser interface", { concurrency: false }, () => {
           second.elements.theme.value === "light",
         "New page uses the same saved preferences",
       );
+    });
+  });
+
+  describe("Optional preference storage", () => {
+    const prefix = "document-processor-";
+    const savedPreferences = () =>
+      new Map([
+        [prefix + "language", "fr"],
+        [prefix + "theme", "dark"],
+        [prefix + "profile", "high"],
+        [prefix + "reportLanguage", "fr"],
+        [prefix + "detailLevel", "detailed"],
+      ]);
+    const configuration = {
+      chunk_tokens: 3000,
+      analysis_tokens: 3072,
+      merge_tokens: 2048,
+      final_tokens: 3072,
+      context_tokens: 16384,
+      warnings: [],
+      thinking_section: "inherit",
+      thinking_merge: "inherit",
+      thinking_final: "inherit",
+    };
+    const change = (browser, name, value) => {
+      browser.elements[name].value = value;
+      assert.doesNotThrow(() => browser.elements[name].handlers.change[0]());
+    };
+    async function ready(options) {
+      const browser = createBrowser({ withSettings: true, ...options });
+      assert.deepEqual(
+        browser.requests.map((request) => request.url),
+        ["/api/jobs", "/api/profiles"],
+      );
+      await browser.respond(0, { jobs: [job("done")] });
+      assert.ok(browser.article(), "Initial history renders");
+      await browser.respond(1, { thinking_supported: false });
+      assert.equal(browser.requests[2].url, "/api/config/preview");
+      await browser.respond(2, { configuration });
+      assert.equal(
+        browser.requests.length,
+        3,
+        "Storage does not add startup requests",
+      );
+      assert.equal(browser.elements.send.disabled, false);
+      for (const [id, event] of [
+        ["uploadForm", "submit"],
+        ["file", "change"],
+        ["drop", "drop"],
+        ["refresh", "click"],
+        ["theme", "change"],
+        ["uiLanguage", "change"],
+      ])
+        assert.equal(
+          browser.elements[id].handlers[event].length,
+          id === "drop" ? 2 : 1,
+          id,
+        );
+      return browser;
+    }
+    async function changeSettings(browser) {
+      const before = browser.requests.length;
+      change(browser, "profile", "medium");
+      change(browser, "reportLanguage", "en");
+      change(browser, "detailLevel", "concise");
+      assert.equal(
+        browser.requests.length,
+        before,
+        "Changes debounce normally",
+      );
+      await browser.tick(250);
+      assert.equal(
+        browser.requests.length,
+        before + 1,
+        "Only one preview for the changes",
+      );
+      assert.equal(browser.requests[before].url, "/api/config/preview");
+      const options = JSON.parse(browser.requests[before].options.body);
+      assert.equal(options.profile, "medium");
+      assert.equal(options.report_language, "en");
+      assert.equal(options.detail_level, "concise");
+      await browser.respond(before, { configuration });
+      assert.equal(browser.elements.send.disabled, false);
+    }
+    async function upload(browser) {
+      const before = browser.requests.length;
+      const options = browser.api.selectedOptions();
+      const pending = browser.upload();
+      assert.equal(browser.requests[before].url, "/api/jobs");
+      assert.equal(browser.requests[before].options.method, "POST");
+      assert.deepEqual(
+        JSON.parse(browser.requests[before].options.body.get("options")),
+        options,
+      );
+      const id = "b".repeat(32);
+      await browser.respond(before, { id });
+      await browser.respond(before + 1, { jobs: [job("queued", 0, id)] });
+      await pending;
+      assert.equal(browser.requests[before + 2].url, `/api/jobs/${id}/live`);
+      await browser.respond(before + 2, {
+        enabled: true,
+        content: "",
+        active: false,
+      });
+      assert.equal(
+        browser.requests.length,
+        before + 3,
+        "Only upload, history refresh and normal live preview",
+      );
+      assert.equal(browser.article().dataset.jobId, id);
+      assert.equal(browser.elements.send.disabled, false);
+    }
+
+    test("denied startup reads use defaults without overwriting saved values", async () => {
+      const storage = savedPreferences();
+      const before = new Map(storage);
+      const browser = await ready({
+        storage,
+        storageFailures: { read: new DOMException("Denied", "SecurityError") },
+      });
+      assert.equal(browser.document.documentElement.lang, "en");
+      assert.equal(browser.earlyTheme, "light");
+      assert.equal(browser.elements.theme.value, "light");
+      assert.deepEqual(browser.api.selectedOptions(), {
+        profile: "low",
+        report_language: "auto",
+        detail_level: "standard",
+        overrides: {},
+      });
+      assert.deepEqual(
+        storage,
+        before,
+        "Writable storage must not receive unread fallbacks",
+      );
+      await upload(browser);
+      assert.deepEqual(storage, before);
+    });
+
+    test("denied access to the storage property leaves the whole interface usable", async () => {
+      const storage = savedPreferences();
+      const before = new Map(storage);
+      const browser = await ready({
+        storage,
+        storageFailures: {
+          access: new DOMException("Denied", "SecurityError"),
+        },
+      });
+      const requests = browser.requests.length;
+      change(browser, "uiLanguage", "fr");
+      change(browser, "theme", "dark");
+      assert.equal(browser.document.documentElement.lang, "fr");
+      assert.equal(browser.document.documentElement.dataset.theme, "dark");
+      assert.equal(
+        browser.api.selectedOptions().report_language,
+        "auto",
+        "UI language does not change report language",
+      );
+      assert.equal(
+        browser.requests.length,
+        requests,
+        "Language and theme need no requests",
+      );
+      await changeSettings(browser);
+      await upload(browser);
+      assert.deepEqual(storage, before);
+    });
+
+    test("denied and quota-exhausted writes retain session changes and persisted values", async () => {
+      for (const name of ["SecurityError", "QuotaExceededError"]) {
+        const storage = savedPreferences();
+        const before = new Map(storage);
+        const browser = await ready({
+          storage,
+          storageFailures: { write: new DOMException("Unavailable", name) },
+        });
+        assert.equal(browser.document.documentElement.lang, "fr");
+        assert.equal(browser.elements.theme.value, "dark");
+        assert.equal(browser.elements.profile.value, "high");
+        assert.equal(browser.elements.reportLanguage.value, "fr");
+        assert.equal(browser.elements.detailLevel.value, "detailed");
+        change(browser, "uiLanguage", "en");
+        change(browser, "theme", "light");
+        assert.equal(browser.document.documentElement.lang, "en");
+        assert.equal(browser.document.documentElement.dataset.theme, "light");
+        assert.equal(browser.api.selectedOptions().report_language, "fr");
+        await changeSettings(browser);
+        await upload(browser);
+        assert.deepEqual(storage, before);
+      }
+    });
+
+    test("storage can become unavailable after startup and recover without losing preferences", async () => {
+      const storage = savedPreferences();
+      const before = new Map(storage);
+      const browser = await ready({ storage });
+      browser.storageFailures.access = new DOMException(
+        "Denied",
+        "SecurityError",
+      );
+      change(browser, "uiLanguage", "en");
+      change(browser, "theme", "light");
+      assert.equal(browser.document.documentElement.lang, "en");
+      assert.equal(browser.document.documentElement.dataset.theme, "light");
+      await changeSettings(browser);
+      assert.deepEqual(storage, before);
+      delete browser.storageFailures.access;
+      assert.equal(
+        getPreference(prefix + "language"),
+        "fr",
+        "Failed writes preserved the persisted language",
+      );
+      change(browser, "uiLanguage", "fr");
+      change(browser, "uiLanguage", "en");
+      change(browser, "theme", "dark");
+      change(browser, "theme", "light");
+      await changeSettings(browser);
+      const reopened = await ready({ storage });
+      assert.equal(reopened.document.documentElement.lang, "en");
+      assert.equal(reopened.elements.theme.value, "light");
+      assert.equal(reopened.elements.profile.value, "medium");
+      assert.equal(reopened.elements.reportLanguage.value, "en");
+      assert.equal(reopened.elements.detailLevel.value, "concise");
+      await upload(reopened);
+    });
+
+    test("accessible preferences survive startup and explicit choices persist across visits", async () => {
+      const storage = savedPreferences();
+      const before = new Map(storage);
+      const browser = await ready({ storage });
+      assert.deepEqual(storage, before);
+      assert.equal(browser.document.documentElement.lang, "fr");
+      assert.equal(browser.elements.theme.value, "dark");
+      assert.equal(browser.elements.profile.value, "high");
+      assert.equal(browser.elements.reportLanguage.value, "fr");
+      assert.equal(browser.elements.detailLevel.value, "detailed");
+      change(browser, "uiLanguage", "en");
+      change(browser, "theme", "light");
+      assert.equal(browser.api.selectedOptions().report_language, "fr");
+      await changeSettings(browser);
+      assert.deepEqual(
+        storage,
+        new Map([
+          [prefix + "language", "en"],
+          [prefix + "theme", "light"],
+          [prefix + "profile", "medium"],
+          [prefix + "reportLanguage", "en"],
+          [prefix + "detailLevel", "concise"],
+        ]),
+      );
+      const reopened = await ready({ storage });
+      assert.equal(reopened.document.documentElement.lang, "en");
+      assert.equal(reopened.elements.profile.value, "medium");
+      assert.equal(reopened.elements.detailLevel.value, "concise");
+      await upload(reopened);
+    });
+
+    test("storage guards preserve unexpected exceptions and tolerate an absent API", async () => {
+      const browser = await ready();
+      for (const error of [
+        new TypeError("Programming error"),
+        new DOMException("Unexpected", "InvalidStateError"),
+      ]) {
+        browser.storageFailures.read = error;
+        assert.throws(
+          () => getPreference("key"),
+          (caught) => caught === error,
+        );
+        delete browser.storageFailures.read;
+        browser.storageFailures.write = error;
+        assert.throws(
+          () => setPreference("key", "value"),
+          (caught) => caught === error,
+        );
+        delete browser.storageFailures.write;
+      }
+      Object.defineProperty(globalThis, "localStorage", {
+        configurable: true,
+        value: undefined,
+      });
+      assert.equal(getPreference("key"), null);
+      assert.doesNotThrow(() => setPreference("key", "value"));
     });
   });
 

@@ -114,6 +114,7 @@ export function createBrowserHarness(context, { template, translations }) {
   function createBrowser({
     withSettings = false,
     storage = new Map(),
+    storageFailures = {},
     systemDark = false,
   } = {}) {
     // Reset the old page while its globals and timer registry are still installed.
@@ -268,8 +269,14 @@ export function createBrowserHarness(context, { template, translations }) {
       elements.profile.value = "low";
       elements.reportLanguage.value = "auto";
       elements.detailLevel.value = "standard";
-      for (const name of ["profile", "reportLanguage", "detailLevel"])
-        elements[name].options = [{ value: elements[name].value }];
+      for (const name of ["profile", "reportLanguage", "detailLevel"]) {
+        const select = template.match(
+          new RegExp(`<select[^>]*id="${name}"[^>]*>([\\s\\S]*?)</select>`),
+        )[1];
+        elements[name].options = [
+          ...select.matchAll(/<option[^>]*value="([^"]+)"/g),
+        ].map((match) => ({ value: match[1] }));
+      }
       for (const stage of ["section", "merge", "final"])
         elements["thinking_" + stage].value = "inherit";
     }
@@ -311,24 +318,35 @@ export function createBrowserHarness(context, { template, translations }) {
     // Install the simulated browser, run the page's inline scripts, then start
     // the interface as main.js does. start() resets the state shared by the modules.
     environments.push({ clock });
+    const browserStorage = {
+      getItem(key) {
+        if (storageFailures.read) throw storageFailures.read;
+        return storage.has(String(key))
+          ? String(storage.get(String(key)))
+          : null;
+      },
+      setItem(key, value) {
+        if (storageFailures.write) throw storageFailures.write;
+        storage.set(String(key), String(value));
+      },
+      removeItem(key) {
+        if (storageFailures.write) throw storageFailures.write;
+        storage.delete(String(key));
+      },
+      clear() {
+        if (storageFailures.write) throw storageFailures.write;
+        storage.clear();
+      },
+    };
+    Object.defineProperty(globalThis, "localStorage", {
+      configurable: true,
+      get() {
+        if (storageFailures.access) throw storageFailures.access;
+        return browserStorage;
+      },
+    });
     Object.assign(globalThis, {
       document,
-      localStorage: {
-        getItem(key) {
-          return storage.has(String(key))
-            ? String(storage.get(String(key)))
-            : null;
-        },
-        setItem(key, value) {
-          storage.set(String(key), String(value));
-        },
-        removeItem(key) {
-          storage.delete(String(key));
-        },
-        clear() {
-          storage.clear();
-        },
-      },
       matchMedia: () => systemTheme,
       fetch,
       setTimeout: (fn, delay) => clock.schedule(fn, delay, false),
@@ -418,6 +436,7 @@ export function createBrowserHarness(context, { template, translations }) {
       visible,
       click,
       upload,
+      storageFailures,
       systemTheme,
       earlyTheme,
       article: () =>
